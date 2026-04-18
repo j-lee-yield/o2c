@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@o2c/config": ["../../packages/config/dist/index.d.ts"],
+      "@o2c/database": ["../../packages/database/dist/index.d.ts"],
+      "@o2c/seed": ["../../packages/seed/dist/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

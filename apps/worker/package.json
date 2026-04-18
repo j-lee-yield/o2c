@@ -1,0 +1,25 @@
+{
+  "name": "@o2c/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "lint": "eslint src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@o2c/audit": "workspace:*",
+    "@o2c/config": "workspace:*",
+    "@o2c/database": "workspace:*",
+    "@o2c/domain": "workspace:*",
+    "@o2c/seed": "workspace:*",
+    "@o2c/workflows": "workspace:*"
+  }
+}

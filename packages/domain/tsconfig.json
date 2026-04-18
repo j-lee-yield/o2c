@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@o2c/audit": ["../audit/dist/index.d.ts"],
+      "@o2c/auth": ["../auth/dist/index.d.ts"],
+      "@o2c/types": ["../types/dist/index.d.ts"]
+    }
+  },
+  "include": ["src/index.ts", "src/index.test.ts"]
+}

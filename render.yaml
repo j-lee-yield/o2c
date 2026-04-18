@@ -1,0 +1,142 @@
+services:
+  - type: web
+    runtime: node
+    name: o2c-web
+    plan: starter
+    region: singapore
+    rootDir: .
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm --filter @o2c/web start
+    envVars:
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: WEB_PORT
+        value: "10000"
+      - key: O2C_API_BASE_URL
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: o2c-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: o2c-redis
+          property: connectionString
+      - key: DEFAULT_TENANT_SLUG
+        sync: false
+      - key: JWT_ISSUER
+        sync: false
+      - key: JWT_AUDIENCE
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
+      - key: JWT_PRIVATE_KEY
+        sync: false
+      - key: CLIENT_CONNECT_LINK_SECRET
+        sync: false
+
+  - type: web
+    runtime: node
+    name: o2c-api
+    plan: starter
+    region: singapore
+    rootDir: .
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm --filter @o2c/api start
+    envVars:
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: API_PORT
+        value: "10000"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: o2c-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: o2c-redis
+          property: connectionString
+      - key: DEFAULT_TENANT_SLUG
+        sync: false
+      - key: JWT_ISSUER
+        sync: false
+      - key: JWT_AUDIENCE
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
+      - key: JWT_PRIVATE_KEY
+        sync: false
+      - key: CLIENT_CONNECT_LINK_SECRET
+        sync: false
+      - key: INTEGRATION_QUICKBOOKS_CLIENT_ID
+        sync: false
+      - key: INTEGRATION_QUICKBOOKS_CLIENT_SECRET
+        sync: false
+      - key: INTEGRATION_QUICKBOOKS_CONNECT_REDIRECT_URI
+        sync: false
+      - key: INTEGRATION_QUICKBOOKS_CONNECT_DEFAULT_ENVIRONMENT
+        sync: false
+      - key: INTEGRATION_BUSINESS_CENTRAL_BASE_URL
+        sync: false
+      - key: INTEGRATION_BUSINESS_CENTRAL_CONNECT_CLIENT_ID
+        sync: false
+      - key: INTEGRATION_BUSINESS_CENTRAL_CONNECT_CLIENT_SECRET
+        sync: false
+      - key: INTEGRATION_BUSINESS_CENTRAL_CONNECT_REDIRECT_URI
+        sync: false
+      - key: INTEGRATION_BUSINESS_CENTRAL_CONNECT_DEFAULT_ENVIRONMENT
+        sync: false
+      - key: INTEGRATION_GMAIL_CONNECT_CLIENT_ID
+        sync: false
+      - key: INTEGRATION_GMAIL_CONNECT_CLIENT_SECRET
+        sync: false
+      - key: INTEGRATION_GMAIL_CONNECT_REDIRECT_URI
+        sync: false
+      - key: INTEGRATION_SAP_BUSINESS_ONE_SYNC_ENABLED
+        value: "true"
+      - key: INTEGRATION_SAP_BUSINESS_ONE_SYNC_INTERVAL_MINUTES
+        value: "15"
+
+  - type: worker
+    runtime: node
+    name: o2c-worker
+    plan: starter
+    region: singapore
+    rootDir: .
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm --filter @o2c/worker start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: o2c-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: o2c-redis
+          property: connectionString
+      - key: DEFAULT_TENANT_SLUG
+        sync: false
+      - key: JWT_ISSUER
+        sync: false
+      - key: JWT_AUDIENCE
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
+      - key: JWT_PRIVATE_KEY
+        sync: false
+
+  - type: keyvalue
+    name: o2c-redis
+    plan: starter
+    region: singapore
+    ipAllowList: []
+
+databases:
+  - name: o2c-postgres
+    plan: basic-1gb
+    region: singapore
+    databaseName: o2c
+    user: o2c

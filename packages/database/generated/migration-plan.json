@@ -1,0 +1,101 @@
+{
+  "databaseUrl": "postgresql://postgres:postgres@localhost:5433/o2c",
+  "generatedAt": "2026-04-16T06:59:36.723Z",
+  "migrations": [
+    {
+      "id": "0001_core_domain_schema",
+      "fileName": "0001_core_domain_schema.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0001_core_domain_schema.sql"
+    },
+    {
+      "id": "0001_init",
+      "fileName": "0001_init.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0001_init.sql"
+    },
+    {
+      "id": "0002_canonical_entity_metadata_and_payment_applications",
+      "fileName": "0002_canonical_entity_metadata_and_payment_applications.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0002_canonical_entity_metadata_and_payment_applications.sql"
+    },
+    {
+      "id": "0003_imported_invoice_snapshots",
+      "fileName": "0003_imported_invoice_snapshots.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0003_imported_invoice_snapshots.sql"
+    },
+    {
+      "id": "0004_learning_layer_foundation",
+      "fileName": "0004_learning_layer_foundation.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0004_learning_layer_foundation.sql"
+    },
+    {
+      "id": "0005_multichannel_communication_foundation",
+      "fileName": "0005_multichannel_communication_foundation.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0005_multichannel_communication_foundation.sql"
+    },
+    {
+      "id": "0006_harden_approvals_and_invoice_identity",
+      "fileName": "0006_harden_approvals_and_invoice_identity.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0006_harden_approvals_and_invoice_identity.sql"
+    },
+    {
+      "id": "0007_runtime_persistence_and_domain_alignment",
+      "fileName": "0007_runtime_persistence_and_domain_alignment.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0007_runtime_persistence_and_domain_alignment.sql"
+    },
+    {
+      "id": "0008_uploaded_document_processing_records",
+      "fileName": "0008_uploaded_document_processing_records.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0008_uploaded_document_processing_records.sql"
+    },
+    {
+      "id": "0009_outbound_email_sending_identity",
+      "fileName": "0009_outbound_email_sending_identity.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0009_outbound_email_sending_identity.sql"
+    },
+    {
+      "id": "0010_gmail_oauth_persistence",
+      "fileName": "0010_gmail_oauth_persistence.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0010_gmail_oauth_persistence.sql"
+    },
+    {
+      "id": "0011_deductions_workspace",
+      "fileName": "0011_deductions_workspace.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0011_deductions_workspace.sql"
+    },
+    {
+      "id": "0012_perfios_bank_statement_persistence",
+      "fileName": "0012_perfios_bank_statement_persistence.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0012_perfios_bank_statement_persistence.sql"
+    },
+    {
+      "id": "0013_payment_finality_and_withholding",
+      "fileName": "0013_payment_finality_and_withholding.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0013_payment_finality_and_withholding.sql"
+    },
+    {
+      "id": "0014_quickbooks_oauth_persistence",
+      "fileName": "0014_quickbooks_oauth_persistence.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0014_quickbooks_oauth_persistence.sql"
+    },
+    {
+      "id": "0015_sap_business_one_connection_and_sync",
+      "fileName": "0015_sap_business_one_connection_and_sync.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0015_sap_business_one_connection_and_sync.sql"
+    },
+    {
+      "id": "0016_control_center_persistence",
+      "fileName": "0016_control_center_persistence.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0016_control_center_persistence.sql"
+    },
+    {
+      "id": "0017_control_center_template_settings",
+      "fileName": "0017_control_center_template_settings.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0017_control_center_template_settings.sql"
+    },
+    {
+      "id": "0018_client_connect_invites_and_pull_runs",
+      "fileName": "0018_client_connect_invites_and_pull_runs.sql",
+      "absolutePath": "/Users/jl/Desktop/o2c/packages/database/src/migrations/0018_client_connect_invites_and_pull_runs.sql"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@o2c/audit": ["../audit/dist/index.d.ts"],
+      "@o2c/config": ["../config/dist/index.d.ts"],
+      "@o2c/contracts": ["../contracts/dist/index.d.ts"],
+      "@o2c/domain": ["../domain/dist/index.d.ts"],
+      "@o2c/workflows": ["../workflows/dist/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
