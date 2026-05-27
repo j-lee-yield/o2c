@@ -33,6 +33,7 @@ import type {
   IntegrationItem,
   InvoiceAgingAnalytics,
   InvoiceDetailData,
+  InvoiceIndexEntry,
   InvoiceLinkedStatusItem,
   LearningCashApplicationSummary,
   LearningCollectionsSummary,
@@ -385,6 +386,15 @@ export const registerOperatorConsoleRoutes = (app: FastifyInstance): void => {
       .reduce((sum, scenario) => sum + scenario.paymentAmountCents, 0);
 
     const invoiceIndex = await buildInvoiceIndexResponse();
+    if (collectionsQueue.length === 0) {
+      collectionsQueue = hydrateCollectionsQueueWithPersistedLearning({
+        collectionsQueue: invoiceIndex.invoices
+          .filter(isInvoiceIndexEntryEligibleForCollectionsQueue)
+          .map((invoice) => mapInvoiceIndexEntryToCollectionsQueueItem(invoice, learningScenarios)),
+        databaseUrl: env.DATABASE_URL,
+        tenantId: env.DEFAULT_TENANT_SLUG,
+      });
+    }
     const metrics: MetricTile[] = [
       {
         label: "Cash collected today",
@@ -3148,6 +3158,66 @@ function mapBusinessCentralInvoiceToCollectionsQueueItem(
     oldestInvoiceAge: invoice.invoiceDate ?? "BC invoice",
     averageAge: invoice.companyName ?? "Business Central",
     assignee: "ERP Sync",
+    dueLabel: invoice.dueDate ?? "No due date",
+    learning,
+  };
+}
+
+function isInvoiceIndexEntryEligibleForCollectionsQueue(invoice: InvoiceIndexEntry) {
+  return (
+    invoice.openAmountCents > 0 &&
+    invoice.status !== "paid" &&
+    invoice.status !== "voided" &&
+    invoice.status !== "disputed"
+  );
+}
+
+function readStringMetadata(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function mapInvoiceIndexEntryToCollectionsQueueItem(
+  invoice: InvoiceIndexEntry,
+  scenarios: ReturnType<typeof indexLearningScenarios>,
+): OperatorConsoleResponse["collectionsQueue"][number] {
+  const accountName = invoice.billingAccountName ?? invoice.customerName;
+  const billingAccountId = invoice.billingAccountId;
+  const contactName = readStringMetadata(invoice.metadata, "contactName");
+  const contactEmail = readStringMetadata(invoice.metadata, "contactEmail");
+  const overdueAmountCents = getOverdueOpenAmountCents(invoice);
+  const attentionAmountCents = overdueAmountCents > 0 ? overdueAmountCents : invoice.openAmountCents;
+  const learning =
+    (billingAccountId ? scenarios[billingAccountId]?.collections : undefined) ??
+    buildSparseCollectionsLearningFallback({
+      contactName,
+      contactEmail,
+      hasDueDate: Boolean(invoice.dueDate),
+    });
+
+  return {
+    id: billingAccountId ?? invoice.canonicalInvoiceId ?? invoice.externalId ?? invoice.id,
+    ...(invoice.customerReference ?? billingAccountId
+      ? { accountReference: invoice.customerReference ?? billingAccountId }
+      : {}),
+    accountName,
+    accountTier: readStringMetadata(invoice.metadata, "accountTier") === "strategic" ? "Strategic" : "Standard",
+    overdueAmount: formatCurrency(attentionAmountCents),
+    promiseDue: invoice.dueDate ?? "No due date",
+    nextAction: `Review ${invoice.invoiceNumber}`,
+    rationale:
+      invoice.importMode === "seed_fallback"
+        ? "Seed demo open invoice remains eligible for safe collections review."
+        : `${invoice.sourceLabel} ${invoice.status} invoice remains eligible for collections review.`,
+    ...(contactName ? { contactName } : {}),
+    ...(contactEmail ? { contactEmail } : {}),
+    outstandingAmount: formatCurrency(invoice.openAmountCents),
+    oldestInvoiceAge: invoice.issuedAt ?? "Imported invoice",
+    averageAge:
+      invoice.daysPastDue !== undefined
+        ? `${invoice.daysPastDue} days past due`
+        : invoice.sourceLabel,
+    assignee: "Collections",
     dueLabel: invoice.dueDate ?? "No due date",
     learning,
   };

@@ -3,9 +3,9 @@ import { buildApiApp } from "../app.js";
 import { resetBusinessCentralConnectionServiceForTests } from "../bootstrap/business-central-connection-service.js";
 import { resetQuickBooksConnectionServiceForTests } from "../bootstrap/quickbooks-connection-service.js";
 
-process.env.INTEGRATION_QUICKBOOKS_CLIENT_ID ??= "qb-client";
-process.env.INTEGRATION_QUICKBOOKS_CLIENT_SECRET ??= "qb-secret";
-process.env.INTEGRATION_QUICKBOOKS_CONNECT_REDIRECT_URI ??=
+process.env.INTEGRATION_QUICKBOOKS_CLIENT_ID = "qb-client";
+process.env.INTEGRATION_QUICKBOOKS_CLIENT_SECRET = "qb-secret";
+process.env.INTEGRATION_QUICKBOOKS_CONNECT_REDIRECT_URI =
   "http://127.0.0.1:3001/v1/integrations/quickbooks/callback";
 
 const TEST_TENANT = process.env.DEFAULT_TENANT_SLUG ?? "test-tenant";
@@ -149,9 +149,9 @@ describe("integration inspector API", () => {
   });
 
   it("returns summarized and raw Business Central data for a tenant", async () => {
-    process.env.INTEGRATION_BUSINESS_CENTRAL_CONNECT_CLIENT_ID ??= "bc-client";
-    process.env.INTEGRATION_BUSINESS_CENTRAL_CONNECT_CLIENT_SECRET ??= "bc-secret";
-    process.env.INTEGRATION_BUSINESS_CENTRAL_CONNECT_REDIRECT_URI ??=
+    process.env.INTEGRATION_BUSINESS_CENTRAL_CONNECT_CLIENT_ID = "bc-client";
+    process.env.INTEGRATION_BUSINESS_CENTRAL_CONNECT_CLIENT_SECRET = "bc-secret";
+    process.env.INTEGRATION_BUSINESS_CENTRAL_CONNECT_REDIRECT_URI =
       "http://127.0.0.1:3001/v1/integrations/business-central/callback";
 
     mockJsonFetch([
@@ -176,6 +176,27 @@ describe("integration inspector API", () => {
             remainingAmount: 0,
             totalAmountIncludingTax: 717,
             status: "Paid",
+          },
+        ],
+      },
+      {
+        value: [
+          {
+            id: "customer-1",
+            number: "C-100",
+            displayName: "Contoso Retail",
+            email: "ap@contoso.example",
+            phoneNumber: "09170000000",
+            currencyCode: "PHP",
+          },
+        ],
+      },
+      { value: [] },
+      {
+        value: [
+          {
+            id: "company-info-1",
+            displayName: "Contoso Holding",
           },
         ],
       },

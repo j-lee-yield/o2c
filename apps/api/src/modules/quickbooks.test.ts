@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApiApp } from "../app.js";
 import { resetQuickBooksConnectionServiceForTests } from "../bootstrap/quickbooks-connection-service.js";
 
-process.env.INTEGRATION_QUICKBOOKS_CLIENT_ID ??= "qb-client";
-process.env.INTEGRATION_QUICKBOOKS_CLIENT_SECRET ??= "qb-secret";
-process.env.INTEGRATION_QUICKBOOKS_CONNECT_REDIRECT_URI ??=
+process.env.INTEGRATION_QUICKBOOKS_CLIENT_ID = "qb-client";
+process.env.INTEGRATION_QUICKBOOKS_CLIENT_SECRET = "qb-secret";
+process.env.INTEGRATION_QUICKBOOKS_CONNECT_REDIRECT_URI =
   "http://127.0.0.1:3001/v1/integrations/quickbooks/callback";
 
 const TEST_TENANT = process.env.DEFAULT_TENANT_SLUG ?? "test-tenant";
@@ -61,10 +61,10 @@ describe("quickbooks integration API", () => {
     const previousRedirectUri = process.env.INTEGRATION_QUICKBOOKS_CONNECT_REDIRECT_URI;
     const previousEnvironment =
       process.env.INTEGRATION_QUICKBOOKS_CONNECT_DEFAULT_ENVIRONMENT;
-    delete process.env.INTEGRATION_QUICKBOOKS_CLIENT_ID;
-    delete process.env.INTEGRATION_QUICKBOOKS_CLIENT_SECRET;
-    delete process.env.INTEGRATION_QUICKBOOKS_CONNECT_REDIRECT_URI;
-    delete process.env.INTEGRATION_QUICKBOOKS_CONNECT_DEFAULT_ENVIRONMENT;
+    process.env.INTEGRATION_QUICKBOOKS_CLIENT_ID = "";
+    process.env.INTEGRATION_QUICKBOOKS_CLIENT_SECRET = "";
+    process.env.INTEGRATION_QUICKBOOKS_CONNECT_REDIRECT_URI = "";
+    process.env.INTEGRATION_QUICKBOOKS_CONNECT_DEFAULT_ENVIRONMENT = "";
     resetQuickBooksConnectionServiceForTests();
 
     const app = buildApiApp();

@@ -710,7 +710,11 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
 }
 
 function readEnv(value: string | number | undefined) {
-  return typeof value === "number" ? String(value) : value?.trim();
+  if (typeof value === "number") {
+    return String(value);
+  }
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function getBusinessCentralCompanyLabel(company: BusinessCentralCompany) {

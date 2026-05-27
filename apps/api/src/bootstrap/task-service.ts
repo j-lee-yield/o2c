@@ -14,6 +14,7 @@ import {
   TaskWorkflowService,
   type TaskRepository,
 } from "@o2c/workflows";
+import { buildJoshDemoCollectionsTask } from "./josh-demo-scenario.js";
 
 let seeded = false;
 let taskService: TaskWorkflowService | undefined;
@@ -32,7 +33,10 @@ export async function getTaskService() {
     seeded = true;
     const env = loadEnv();
     if (env.ENABLE_DEMO_DATA === true || env.NODE_ENV === "test" || process.env.VITEST === "true") {
-      await taskService.seed(buildDemoSeedBundle().tasks);
+      await taskService.seed([
+        ...buildDemoSeedBundle().tasks,
+        buildJoshDemoCollectionsTask(),
+      ]);
     }
   }
 

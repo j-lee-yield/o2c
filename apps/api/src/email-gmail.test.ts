@@ -22,9 +22,9 @@ describe("gmail integration routes", () => {
     const previousClientId = process.env.INTEGRATION_GMAIL_CONNECT_CLIENT_ID;
     const previousClientSecret = process.env.INTEGRATION_GMAIL_CONNECT_CLIENT_SECRET;
     const previousRedirectUri = process.env.INTEGRATION_GMAIL_CONNECT_REDIRECT_URI;
-    delete process.env.INTEGRATION_GMAIL_CONNECT_CLIENT_ID;
-    delete process.env.INTEGRATION_GMAIL_CONNECT_CLIENT_SECRET;
-    delete process.env.INTEGRATION_GMAIL_CONNECT_REDIRECT_URI;
+    process.env.INTEGRATION_GMAIL_CONNECT_CLIENT_ID = "";
+    process.env.INTEGRATION_GMAIL_CONNECT_CLIENT_SECRET = "";
+    process.env.INTEGRATION_GMAIL_CONNECT_REDIRECT_URI = "";
 
     const response = await app.inject({
       method: "GET",
@@ -34,11 +34,19 @@ describe("gmail integration routes", () => {
       },
     });
 
-    process.env.INTEGRATION_GMAIL_CONNECT_CLIENT_ID = previousClientId;
-    process.env.INTEGRATION_GMAIL_CONNECT_CLIENT_SECRET = previousClientSecret;
-    process.env.INTEGRATION_GMAIL_CONNECT_REDIRECT_URI = previousRedirectUri;
+    restoreEnvValue("INTEGRATION_GMAIL_CONNECT_CLIENT_ID", previousClientId);
+    restoreEnvValue("INTEGRATION_GMAIL_CONNECT_CLIENT_SECRET", previousClientSecret);
+    restoreEnvValue("INTEGRATION_GMAIL_CONNECT_REDIRECT_URI", previousRedirectUri);
 
     expect(response.statusCode).toBe(400);
     expect(response.json().message).toContain("not configured");
   });
 });
+
+function restoreEnvValue(key: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[key];
+    return;
+  }
+  process.env[key] = value;
+}

@@ -6,6 +6,7 @@ import {
   queryJsonRows,
   quoteLiteral,
 } from "@o2c/database";
+import type { Task } from "@o2c/domain";
 import { createImportedInvoiceSyncService } from "./imported-invoice-sync-service.js";
 import { createAccountStore, normalizeImportedAccountRecord } from "../modules/accounts.js";
 
@@ -69,6 +70,111 @@ export const JOSH_DEMO_INVOICES = [
     dueDate: "2026-04-08",
   },
 ] as const;
+
+export function buildJoshDemoCollectionsTask(): Task {
+  const invoiceNumbers = JOSH_DEMO_INVOICES.map((invoice) => invoice.invoiceNumber);
+  const totalAmountCents = JOSH_DEMO_INVOICES.reduce(
+    (sum, invoice) => sum + invoice.amountCents,
+    0,
+  );
+
+  return {
+    id: deterministicUuid("demo:josh:task:collections-email"),
+    tenantId: "default",
+    version: 1,
+    createdAt: JOSH_DEMO_OCCURRED_AT,
+    updatedAt: JOSH_DEMO_OCCURRED_AT,
+    createdByActorId: "josh_demo_seed",
+    createdByActorRole: "system",
+    updatedByActorId: "josh_demo_seed",
+    updatedByActorRole: "system",
+    title: "Send Josh a reviewed follow-up for overdue invoices",
+    description: "Demo collections task with verified contact context and invoice-backed draft email.",
+    kind: "collections_follow_up",
+    taskType: "collections_follow_up",
+    status: "open",
+    origin: "workflow_generated",
+    surfaces: ["home", "collections", "customers"],
+    customerProfileId: JOSH_CUSTOMER_PROFILE_ID,
+    billingAccountId: JOSH_BILLING_ACCOUNT_ID,
+    contactId: JOSH_CONTACT_ID,
+    priority: "high",
+    dueAt: JOSH_DEMO_DUE_AT,
+    sourceLinks: JOSH_DEMO_INVOICES.map((invoice) => ({
+      label: `Invoice ${invoice.invoiceNumber}`,
+      objectType: "invoice",
+      objectId: invoice.id,
+      href: `/invoices?invoice=${invoice.id}`,
+    })),
+    auditTrail: [
+      {
+        occurredAt: JOSH_DEMO_OCCURRED_AT,
+        action: "task.created",
+        actorId: "josh_demo_seed",
+        actorRole: "system",
+        summary: "Josh demo collections task seeded with verified contact and invoice context.",
+      },
+    ],
+    metadata: {
+      scenario: "josh_demo_overdue_follow_up",
+      customerName: JOSH_BILLING_ACCOUNT_NAME,
+      relatedRecord: invoiceNumbers.join(", "),
+      amountCents: totalAmountCents,
+      overdueAmountCents: totalAmountCents,
+      composeEmail: {
+        scenario: "josh_demo_overdue_follow_up",
+        account: {
+          id: JOSH_BILLING_ACCOUNT_ID,
+          createdAt: JOSH_DEMO_OCCURRED_AT,
+          updatedAt: JOSH_DEMO_OCCURRED_AT,
+          parentAccountId: JOSH_PARENT_ACCOUNT_ID,
+          accountNumber: JOSH_ACCOUNT_NUMBER,
+          displayName: JOSH_BILLING_ACCOUNT_NAME,
+          currency: "PHP",
+          accountTier: "standard",
+          status: "active",
+          centrallyPaid: false,
+          metadata: {},
+        },
+        contact: {
+          id: JOSH_CONTACT_ID,
+          createdAt: JOSH_DEMO_OCCURRED_AT,
+          updatedAt: JOSH_DEMO_OCCURRED_AT,
+          parentAccountId: JOSH_PARENT_ACCOUNT_ID,
+          billingAccountId: JOSH_BILLING_ACCOUNT_ID,
+          scope: "billing_account",
+          scopeId: JOSH_BILLING_ACCOUNT_ID,
+          fullName: JOSH_BILLING_ACCOUNT_NAME,
+          email: JOSH_EMAIL,
+          role: "ap",
+          isPrimary: true,
+          isVerified: true,
+          allowAutoSend: true,
+          recentSuccessfulResponses: 0,
+          metadata: {},
+        },
+        invoices: JOSH_DEMO_INVOICES.map((invoice) => ({
+          id: invoice.id,
+          createdAt: JOSH_DEMO_OCCURRED_AT,
+          updatedAt: JOSH_DEMO_OCCURRED_AT,
+          state: "synced_open",
+          parentAccountId: JOSH_PARENT_ACCOUNT_ID,
+          billingAccountId: JOSH_BILLING_ACCOUNT_ID,
+          invoiceContactId: JOSH_CONTACT_ID,
+          invoiceDate: invoice.invoiceDate,
+          invoiceNumber: invoice.invoiceNumber,
+          currency: "PHP",
+          amountCents: invoice.amountCents,
+          dueDate: invoice.dueDate,
+          metadata: {
+            externalId: invoice.externalId,
+            openAmountCents: invoice.amountCents,
+          },
+        })),
+      },
+    },
+  };
+}
 
 let seedPromise: Promise<void> | undefined;
 
