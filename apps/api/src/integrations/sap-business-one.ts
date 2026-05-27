@@ -2,6 +2,7 @@ import { loadEnv } from "@o2c/config";
 import {
   buildSapBusinessOneCookieHeader,
   getSapBusinessOneConnectionService,
+  type SapBusinessOneTenantConnection,
 } from "../bootstrap/sap-business-one-connection-service.js";
 
 export type SapBusinessOneInvoiceRow = {
@@ -188,9 +189,7 @@ export async function loadSapBusinessOnePayments(
 
 function mapSapBusinessOneInvoiceRow(
   invoice: SapBusinessOneInvoiceRow,
-  connection: NonNullable<
-    ReturnType<typeof getSapBusinessOneConnectionService>["getConnectionSummary"]
-  >,
+  connection: SapBusinessOneTenantConnection,
 ): SapBusinessOneInvoiceRecord {
   const totalAmountCents = decimalToCents(invoice.DocTotal ?? 0);
   const paidAmountCents = decimalToCents(invoice.PaidToDate ?? 0);
@@ -220,14 +219,13 @@ function mapSapBusinessOneInvoiceRow(
 function mapSapBusinessOneBusinessPartnerRow(
   customer: SapBusinessOneBusinessPartnerRow,
 ): SapBusinessOneCustomerRecord {
+  const phone = customer.Phone1?.trim() || customer.Phone2?.trim();
   return {
     externalId: customer.CardCode,
     displayName: customer.CardName?.trim() || customer.CardCode,
     currencyCode: customer.Currency?.trim() || "PHP",
     ...(customer.E_Mail?.trim() ? { email: customer.E_Mail.trim() } : {}),
-    ...(customer.Phone1?.trim() || customer.Phone2?.trim()
-      ? { phone: customer.Phone1?.trim() || customer.Phone2?.trim() }
-      : {}),
+    ...(phone ? { phone } : {}),
     ...(customer.FederalTaxID?.trim() ? { taxId: customer.FederalTaxID.trim() } : {}),
     status: customer.Valid === "tNO" ? "inactive" : "active",
   };

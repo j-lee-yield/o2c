@@ -1,4 +1,10 @@
 import { AuthorizationError, assertAnyRole, type Principal, type Role } from "@o2c/auth";
+import type {
+  ClaimInput,
+  DeductionApPortalJobHookInput,
+  DeductionLineItemInput,
+  DeductionUploadHookInput,
+} from "@o2c/contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -69,6 +75,93 @@ const apPortalHookSchema = uploadHookSchema
     claim: claimSchema,
   });
 
+type LineItemBody = z.infer<typeof lineItemSchema>;
+type ClaimBody = z.infer<typeof claimSchema>;
+type UploadHookBody = z.infer<typeof uploadHookSchema>;
+type ApPortalHookBody = z.infer<typeof apPortalHookSchema>;
+
+function mapLineItemInput(line: LineItemBody): DeductionLineItemInput {
+  return {
+    ...(line.id ? { id: line.id } : {}),
+    ...(line.claimId ? { claimId: line.claimId } : {}),
+    lineNumber: line.lineNumber,
+    category: line.category,
+    description: line.description,
+    disputedAmountCents: line.disputedAmountCents,
+    ...(typeof line.acceptedAmountCents === "number" ? { acceptedAmountCents: line.acceptedAmountCents } : {}),
+    ...(typeof line.quantity === "number" ? { quantity: line.quantity } : {}),
+    ...(typeof line.unitAmountCents === "number" ? { unitAmountCents: line.unitAmountCents } : {}),
+    ...(line.status ? { status: line.status } : {}),
+    ...(line.metadata ? { metadata: line.metadata } : {}),
+  };
+}
+
+function mapClaimInput(claim: ClaimBody): ClaimInput {
+  return {
+    ...(claim.id ? { id: claim.id } : {}),
+    claimNumber: claim.claimNumber,
+    ...(claim.claimantName ? { claimantName: claim.claimantName } : {}),
+    assertedAmountCents: claim.assertedAmountCents,
+    assertedAt: claim.assertedAt,
+    ...(claim.status ? { status: claim.status } : {}),
+    ...(claim.sourceChannel ? { sourceChannel: claim.sourceChannel } : {}),
+    ...(claim.metadata ? { metadata: claim.metadata } : {}),
+  };
+}
+
+function mapUploadHookInput(body: UploadHookBody): DeductionUploadHookInput {
+  return {
+    ...(body.caseId ? { caseId: body.caseId } : {}),
+    ...(body.tenantId ? { tenantId: body.tenantId } : {}),
+    parentAccountId: body.parentAccountId,
+    billingAccountId: body.billingAccountId,
+    ...(body.branchId ? { branchId: body.branchId } : {}),
+    ...(body.invoiceId ? { invoiceId: body.invoiceId } : {}),
+    ...(body.paymentId ? { paymentId: body.paymentId } : {}),
+    ...(body.exceptionId ? { exceptionId: body.exceptionId } : {}),
+    ...(body.approvalRequestId ? { approvalRequestId: body.approvalRequestId } : {}),
+    ...(body.externalClaimReference ? { externalClaimReference: body.externalClaimReference } : {}),
+    targetAmountCents: body.targetAmountCents,
+    currency: body.currency,
+    reasonCode: body.reasonCode,
+    ...(body.priority ? { priority: body.priority } : {}),
+    ...(body.ownerRole ? { ownerRole: body.ownerRole } : {}),
+    detectedAt: body.detectedAt,
+    uploadedDocumentIds: body.uploadedDocumentIds,
+    ...(body.missingDocumentTypes
+      ? { missingDocumentTypes: body.missingDocumentTypes as NonNullable<DeductionUploadHookInput["missingDocumentTypes"]> }
+      : {}),
+    ...(body.lineItems ? { lineItems: body.lineItems.map(mapLineItemInput) } : {}),
+    ...(body.claims ? { claims: body.claims.map(mapClaimInput) } : {}),
+    ...(body.metadata ? { metadata: body.metadata } : {}),
+  };
+}
+
+function mapApPortalHookInput(body: ApPortalHookBody): DeductionApPortalJobHookInput {
+  return {
+    ...(body.caseId ? { caseId: body.caseId } : {}),
+    ...(body.tenantId ? { tenantId: body.tenantId } : {}),
+    sourceJobId: body.sourceJobId,
+    parentAccountId: body.parentAccountId,
+    billingAccountId: body.billingAccountId,
+    ...(body.branchId ? { branchId: body.branchId } : {}),
+    ...(body.invoiceId ? { invoiceId: body.invoiceId } : {}),
+    ...(body.paymentId ? { paymentId: body.paymentId } : {}),
+    ...(body.exceptionId ? { exceptionId: body.exceptionId } : {}),
+    ...(body.approvalRequestId ? { approvalRequestId: body.approvalRequestId } : {}),
+    externalClaimReference: body.externalClaimReference,
+    targetAmountCents: body.targetAmountCents,
+    currency: body.currency,
+    reasonCode: body.reasonCode,
+    ...(body.priority ? { priority: body.priority } : {}),
+    detectedAt: body.detectedAt,
+    claim: mapClaimInput(body.claim),
+    ...(body.lineItems ? { lineItems: body.lineItems.map(mapLineItemInput) } : {}),
+    ...(body.documentIds ? { documentIds: body.documentIds } : {}),
+    ...(body.metadata ? { metadata: body.metadata } : {}),
+  };
+}
+
 export const registerDeductionRoutes = (app: FastifyInstance): void => {
   app.get("/v1/deductions/queue", async (request, reply) => {
     try {
@@ -99,7 +192,7 @@ export const registerDeductionRoutes = (app: FastifyInstance): void => {
       });
       const body = uploadHookSchema.parse(request.body);
       const service = await getDeductionsWorkspaceService();
-      return reply.send(await service.recordUploadHook(principal, body));
+      return reply.send(await service.recordUploadHook(principal, mapUploadHookInput(body)));
     } catch (error) {
       return replyFromDeductionError(reply, error);
     }
@@ -113,7 +206,7 @@ export const registerDeductionRoutes = (app: FastifyInstance): void => {
       });
       const body = apPortalHookSchema.parse(request.body);
       const service = await getDeductionsWorkspaceService();
-      return reply.send(await service.recordApPortalJobHook(principal, body));
+      return reply.send(await service.recordApPortalJobHook(principal, mapApPortalHookInput(body)));
     } catch (error) {
       return replyFromDeductionError(reply, error);
     }

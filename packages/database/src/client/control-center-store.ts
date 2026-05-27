@@ -6,6 +6,7 @@ import type {
   ControlCenterStage,
   ControlCenterTemplateFolder,
   ControlCenterWorkflow,
+  ControlCenterWorkflowExecution,
 } from "@o2c/domain";
 import type {
   ControlCenterPersistence,
@@ -68,6 +69,32 @@ type StageRow = {
   enabled: boolean;
   requiresApproval: boolean;
   riskHints: string[];
+};
+
+type ExecutionRow = {
+  id: string;
+  tenantId: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string | null;
+  createdByActorId?: string;
+  createdByActorRole?: ActorRole;
+  updatedByActorId?: string;
+  updatedByActorRole?: ActorRole;
+  workflowId: string;
+  billingAccountId: string;
+  parentAccountId: string;
+  status: ControlCenterWorkflowExecution["status"];
+  currentTrack: ControlCenterWorkflowExecution["currentTrack"];
+  lastDecisionAction?: ControlCenterWorkflowExecution["lastDecisionAction"];
+  lastDecisionReason?: string;
+  lastDecisionConfidence?: number;
+  requiresHumanReview: boolean;
+  effectiveUntil?: string;
+  rationaleSummary?: string;
+  reasoningMetadata: Record<string, unknown>;
+  metadata: Record<string, unknown>;
 };
 
 type TemplateRow = {
@@ -163,6 +190,7 @@ export class PostgresControlCenterPersistence implements ControlCenterPersistenc
     return {
       workflows: this.listWorkflows(),
       stages: this.listStages(),
+      executions: this.listExecutions(),
       templates: this.listTemplates(),
       folders: this.listFolders(),
       ...(callAgentConfig ? { callAgentConfig } : {}),
@@ -309,6 +337,74 @@ export class PostgresControlCenterPersistence implements ControlCenterPersistenc
         DELETE FROM control_center_stage
         WHERE tenant_id = '${quoteLiteral(this.tenantId)}'
           AND id = '${quoteLiteral(stageId)}';
+      `,
+    );
+  }
+
+  upsertExecution(execution: ControlCenterWorkflowExecution): void {
+    executeSqlCommand(
+      this.databaseUrl,
+      `
+        INSERT INTO control_center_workflow_execution (
+          id, tenant_id, version, created_at, updated_at, deleted_at,
+          created_by_actor_id, created_by_actor_role, updated_by_actor_id, updated_by_actor_role,
+          workflow_id, billing_account_id, parent_account_id, status, current_track,
+          last_decision_action, last_decision_reason, last_decision_confidence,
+          requires_human_review, effective_until, rationale_summary, reasoning_metadata, metadata
+        )
+        VALUES (
+          '${quoteLiteral(execution.id)}',
+          '${quoteLiteral(execution.tenantId ?? this.tenantId)}',
+          ${execution.version ?? 1},
+          '${quoteLiteral(execution.createdAt)}'::timestamptz,
+          '${quoteLiteral(execution.updatedAt)}'::timestamptz,
+          ${execution.deletedAt ? `'${quoteLiteral(execution.deletedAt)}'::timestamptz` : "NULL"},
+          ${execution.createdByActorId ? `'${quoteLiteral(execution.createdByActorId)}'` : "NULL"},
+          ${execution.createdByActorRole ? `'${quoteLiteral(execution.createdByActorRole)}'` : "NULL"},
+          ${execution.updatedByActorId ? `'${quoteLiteral(execution.updatedByActorId)}'` : "NULL"},
+          ${execution.updatedByActorRole ? `'${quoteLiteral(execution.updatedByActorRole)}'` : "NULL"},
+          '${quoteLiteral(execution.workflowId)}',
+          '${quoteLiteral(execution.billingAccountId)}'::uuid,
+          '${quoteLiteral(execution.parentAccountId)}'::uuid,
+          '${quoteLiteral(execution.status)}',
+          '${quoteLiteral(execution.currentTrack)}',
+          ${execution.lastDecisionAction ? `'${quoteLiteral(execution.lastDecisionAction)}'` : "NULL"},
+          ${execution.lastDecisionReason ? `'${quoteLiteral(execution.lastDecisionReason)}'` : "NULL"},
+          ${execution.lastDecisionConfidence !== undefined ? execution.lastDecisionConfidence : "NULL"},
+          ${execution.requiresHumanReview ? "TRUE" : "FALSE"},
+          ${execution.effectiveUntil ? `'${quoteLiteral(execution.effectiveUntil)}'::timestamptz` : "NULL"},
+          ${execution.rationaleSummary ? `'${quoteLiteral(execution.rationaleSummary)}'` : "NULL"},
+          '${jsonLiteral(execution.reasoningMetadata ?? {})}'::jsonb,
+          '${jsonLiteral(execution.metadata ?? {})}'::jsonb
+        )
+        ON CONFLICT (tenant_id, workflow_id, billing_account_id)
+        DO UPDATE SET
+          version = EXCLUDED.version,
+          updated_at = EXCLUDED.updated_at,
+          deleted_at = EXCLUDED.deleted_at,
+          updated_by_actor_id = EXCLUDED.updated_by_actor_id,
+          updated_by_actor_role = EXCLUDED.updated_by_actor_role,
+          status = EXCLUDED.status,
+          current_track = EXCLUDED.current_track,
+          last_decision_action = EXCLUDED.last_decision_action,
+          last_decision_reason = EXCLUDED.last_decision_reason,
+          last_decision_confidence = EXCLUDED.last_decision_confidence,
+          requires_human_review = EXCLUDED.requires_human_review,
+          effective_until = EXCLUDED.effective_until,
+          rationale_summary = EXCLUDED.rationale_summary,
+          reasoning_metadata = EXCLUDED.reasoning_metadata,
+          metadata = EXCLUDED.metadata;
+      `,
+    );
+  }
+
+  deleteExecution(executionId: string): void {
+    executeSqlCommand(
+      this.databaseUrl,
+      `
+        DELETE FROM control_center_workflow_execution
+        WHERE tenant_id = '${quoteLiteral(this.tenantId)}'
+          AND id = '${quoteLiteral(executionId)}';
       `,
     );
   }
@@ -582,6 +678,51 @@ export class PostgresControlCenterPersistence implements ControlCenterPersistenc
     ).map(normalizeStageRow);
   }
 
+  private listExecutions(): ControlCenterWorkflowExecution[] {
+    try {
+      return queryJsonRows<ExecutionRow>(
+        this.databaseUrl,
+        `
+          SELECT row_to_json(q)
+          FROM (
+            SELECT
+              id,
+              tenant_id AS "tenantId",
+              version,
+              created_at AS "createdAt",
+              updated_at AS "updatedAt",
+              deleted_at AS "deletedAt",
+              created_by_actor_id AS "createdByActorId",
+              created_by_actor_role AS "createdByActorRole",
+              updated_by_actor_id AS "updatedByActorId",
+              updated_by_actor_role AS "updatedByActorRole",
+              workflow_id AS "workflowId",
+              billing_account_id::text AS "billingAccountId",
+              parent_account_id::text AS "parentAccountId",
+              status,
+              current_track AS "currentTrack",
+              last_decision_action AS "lastDecisionAction",
+              last_decision_reason AS "lastDecisionReason",
+              last_decision_confidence AS "lastDecisionConfidence",
+              requires_human_review AS "requiresHumanReview",
+              effective_until AS "effectiveUntil",
+              rationale_summary AS "rationaleSummary",
+              reasoning_metadata AS "reasoningMetadata",
+              metadata
+            FROM control_center_workflow_execution
+            WHERE tenant_id = '${quoteLiteral(this.tenantId)}'
+            ORDER BY updated_at DESC
+          ) q;
+        `,
+      ).map(normalizeExecutionRow);
+    } catch (error) {
+      if (isMissingRelationError(error, "control_center_workflow_execution")) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
   private listTemplates(): ControlCenterEmailTemplate[] {
     return queryJsonRows<TemplateRow>(
       this.databaseUrl,
@@ -772,6 +913,36 @@ function normalizeStageRow(row: StageRow): ControlCenterStage {
   };
 }
 
+function normalizeExecutionRow(row: ExecutionRow): ControlCenterWorkflowExecution {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    version: row.version,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.deletedAt ? { deletedAt: row.deletedAt } : {}),
+    ...(row.createdByActorId ? { createdByActorId: row.createdByActorId } : {}),
+    ...(row.createdByActorRole ? { createdByActorRole: row.createdByActorRole } : {}),
+    ...(row.updatedByActorId ? { updatedByActorId: row.updatedByActorId } : {}),
+    ...(row.updatedByActorRole ? { updatedByActorRole: row.updatedByActorRole } : {}),
+    workflowId: row.workflowId,
+    billingAccountId: row.billingAccountId,
+    parentAccountId: row.parentAccountId,
+    status: row.status,
+    currentTrack: row.currentTrack,
+    ...(row.lastDecisionAction ? { lastDecisionAction: row.lastDecisionAction } : {}),
+    ...(row.lastDecisionReason ? { lastDecisionReason: row.lastDecisionReason } : {}),
+    ...(row.lastDecisionConfidence !== undefined
+      ? { lastDecisionConfidence: row.lastDecisionConfidence }
+      : {}),
+    requiresHumanReview: row.requiresHumanReview,
+    ...(row.effectiveUntil ? { effectiveUntil: row.effectiveUntil } : {}),
+    ...(row.rationaleSummary ? { rationaleSummary: row.rationaleSummary } : {}),
+    reasoningMetadata: row.reasoningMetadata ?? {},
+    metadata: row.metadata ?? {},
+  };
+}
+
 function normalizeTemplateRow(row: TemplateRow): ControlCenterEmailTemplate {
   return {
     id: row.id,
@@ -859,4 +1030,8 @@ function normalizeConfigRow(row: ConfigRow): ControlCenterConfig {
     defaultRiskApprovalMode: row.defaultRiskApprovalMode,
     seededDemoFlags: row.seededDemoFlags ?? {},
   };
+}
+
+function isMissingRelationError(error: unknown, relationName: string) {
+  return error instanceof Error && error.message.includes(`relation "${relationName}" does not exist`);
 }

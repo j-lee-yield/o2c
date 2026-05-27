@@ -8,8 +8,16 @@ import {
   queryJsonRows,
   quoteLiteral,
 } from "@o2c/database";
+import {
+  allocatePaymentToInstallmentLines,
+  createInstallmentLine,
+  CrossEntityInstallmentAllocationAmbiguityError,
+  DisputedInstallmentLineAutoChaseBlockedError,
+  InstallmentManualAllocationRequiredError,
+} from "@o2c/domain";
 import type {
   BankTransactionSettlementStatus,
+  CurrencyCode,
   DuplicateSignalInput,
   PaymentCandidateRecord,
   PaymentReviewReasonCode,
@@ -101,6 +109,47 @@ const fileHeadersSchema = z.object({
 
 const paymentCandidateParamsSchema = z.object({
   candidateId: z.string().min(1),
+});
+
+const installmentLineAllocationSchema = z.object({
+  installmentLineId: z.string().min(1),
+  installmentPlanId: z.string().min(1),
+  parentInvoiceId: z.string().min(1).optional(),
+  billingAccountId: z.string().min(1),
+  branchId: z.string().min(1).optional(),
+  currency: z.string().min(1),
+  sequenceNumber: z.number().int().positive(),
+  dueDate: z.string().min(1),
+  scheduledAmountCents: z.number().int().nonnegative(),
+  paidAmountCents: z.number().int().nonnegative().default(0),
+  remainingAmountCents: z.number().int().nonnegative(),
+  status: z.enum([
+    "future",
+    "due",
+    "partially_paid",
+    "overdue",
+    "promised",
+    "disputed",
+    "paid",
+    "restructured",
+  ]),
+  daysPastDue: z.number().int().nonnegative().optional(),
+  lastPromiseToPayDate: z.string().min(1).optional(),
+});
+
+const installmentAllocationPreviewSchema = z.object({
+  billingAccountId: z.string().min(1),
+  branchId: z.string().min(1).optional(),
+  paymentAmountCents: z.number().int().positive(),
+  paymentCurrency: z.string().min(1),
+  policy: z.enum(["oldest_due_first", "manual_allocation", "erp_provided_allocation"]),
+  lines: z.array(installmentLineAllocationSchema).min(1),
+  manualAllocations: z
+    .array(z.object({ installmentLineId: z.string().min(1), amountCents: z.number().int().positive() }))
+    .optional(),
+  erpAllocations: z
+    .array(z.object({ installmentLineId: z.string().min(1), amountCents: z.number().int().positive() }))
+    .optional(),
 });
 
 const promotePaymentCandidateSchema = z.object({
@@ -985,8 +1034,81 @@ export const registerPaymentRoutes = (app: FastifyInstance): void => {
       "statement-level readiness summary",
       "durable bank-statement persistence when database is available",
       "retrieval of normalized statement ingestions",
+      "installment allocation previews",
     ],
   }));
+
+  app.post("/v1/payments/installment-allocation/preview", async (request, reply) => {
+    try {
+      const body = installmentAllocationPreviewSchema.parse(request.body ?? {});
+      const decision = allocatePaymentToInstallmentLines({
+        paymentAmountCents: body.paymentAmountCents,
+        accountBillingAccountId: body.billingAccountId,
+        ...(body.branchId ? { accountBranchId: body.branchId } : {}),
+        paymentCurrency: body.paymentCurrency,
+        policy: body.policy,
+        lines: body.lines.map((line) =>
+          createInstallmentLine({
+            id: line.installmentLineId,
+            createdAt: "2026-04-21T00:00:00.000Z",
+            installmentPlanId: line.installmentPlanId,
+            ...(line.parentInvoiceId ? { parentInvoiceId: line.parentInvoiceId } : {}),
+            billingAccountId: line.billingAccountId,
+            ...(line.branchId ? { branchId: line.branchId } : {}),
+            currency: line.currency,
+            sequenceNumber: line.sequenceNumber,
+            dueDate: line.dueDate,
+            scheduledAmountCents: line.scheduledAmountCents,
+            paidAmountCents: line.paidAmountCents,
+            remainingAmountCents: line.remainingAmountCents,
+            status: line.status,
+            ...(typeof line.daysPastDue === "number" ? { daysPastDue: line.daysPastDue } : {}),
+            ...(line.lastPromiseToPayDate ? { lastPromiseToPayDate: line.lastPromiseToPayDate } : {}),
+            metadata: {},
+          }),
+        ),
+        ...(body.manualAllocations ? { manualAllocations: body.manualAllocations } : {}),
+        ...(body.erpAllocations ? { erpAllocations: body.erpAllocations } : {}),
+      });
+
+      return reply.send({
+        policy: decision.policy,
+        appliedAmountCents: decision.appliedAmountCents,
+        unappliedAmountCents: decision.unappliedAmountCents,
+        allocations: decision.allocations.map((allocation) => ({
+          installmentLineId: allocation.line.installmentLineId,
+          installmentPlanId: allocation.line.installmentPlanId,
+          ...(allocation.line.parentInvoiceId ? { parentInvoiceId: allocation.line.parentInvoiceId } : {}),
+          billingAccountId: allocation.line.billingAccountId,
+          ...(allocation.line.branchId ? { branchId: allocation.line.branchId } : {}),
+          amountCents: allocation.amountCents,
+          dueDate: allocation.line.dueDate,
+          sequenceNumber: allocation.line.sequenceNumber,
+          remainingAmountCentsAfterAllocation: Math.max(
+            0,
+            allocation.line.remainingAmountCents - allocation.amountCents,
+          ),
+        })),
+        auditLogPreview: {
+          action: "payments.installment_allocation.previewed",
+          entityType: "payment",
+          payload: decision.auditPayload,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof CrossEntityInstallmentAllocationAmbiguityError ||
+        error instanceof DisputedInstallmentLineAutoChaseBlockedError ||
+        error instanceof InstallmentManualAllocationRequiredError
+      ) {
+        return reply.status(409).send({ message: error.message });
+      }
+      if (error instanceof z.ZodError) {
+        return reply.status(400).send({ message: "Invalid installment allocation preview request.", issues: error.issues });
+      }
+      throw error;
+    }
+  });
 
   app.post("/v1/payments/ingestions/bank-statements/file", async (request, reply) => {
     const headers = fileHeadersSchema.parse(request.headers);
@@ -1016,7 +1138,7 @@ export const registerPaymentRoutes = (app: FastifyInstance): void => {
         ...(fileImport.statement.account_number_masked
           ? { account_number_masked: fileImport.statement.account_number_masked }
           : {}),
-        currency: fileImport.statement.currency,
+        currency: normalizeCurrencyCode(fileImport.statement.currency),
         parser_confidence: fileImport.statement.parser_confidence,
       },
       transactions: fileImport.transactions,
@@ -1535,6 +1657,10 @@ function deterministicTextId(namespace: string, seed: string) {
 function deterministicUuid(seed: string) {
   const hash = createHash("sha1").update(seed).digest("hex").slice(0, 32);
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
+function normalizeCurrencyCode(value: string | undefined): CurrencyCode {
+  return value === "USD" ? "USD" : "PHP";
 }
 
 function nullableText(value?: string) {

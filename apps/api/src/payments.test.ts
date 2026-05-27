@@ -228,4 +228,86 @@ describe("payments API", () => {
     expect(body.paymentCandidateCount).toBe(2);
     expect(body.heldRows).toEqual([{ rowNumber: 4, reason: "Missing or invalid transaction date." }]);
   });
+
+  it("previews installment-aware oldest-due-first allocation without aging the full invoice", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/payments/installment-allocation/preview",
+      payload: {
+        billingAccountId: "billing-1",
+        branchId: "branch-1",
+        paymentAmountCents: 15_000,
+        paymentCurrency: "PHP",
+        policy: "oldest_due_first",
+        lines: [
+          {
+            installmentLineId: "line-1",
+            installmentPlanId: "plan-1",
+            parentInvoiceId: "invoice-1",
+            billingAccountId: "billing-1",
+            branchId: "branch-1",
+            currency: "PHP",
+            sequenceNumber: 1,
+            dueDate: "2026-03-15",
+            scheduledAmountCents: 10_000,
+            paidAmountCents: 0,
+            remainingAmountCents: 10_000,
+            status: "overdue",
+          },
+          {
+            installmentLineId: "line-2",
+            installmentPlanId: "plan-1",
+            parentInvoiceId: "invoice-1",
+            billingAccountId: "billing-1",
+            branchId: "branch-1",
+            currency: "PHP",
+            sequenceNumber: 2,
+            dueDate: "2026-04-15",
+            scheduledAmountCents: 10_000,
+            paidAmountCents: 0,
+            remainingAmountCents: 10_000,
+            status: "due",
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.allocations).toHaveLength(2);
+    expect(body.allocations[0].installmentLineId).toBe("line-1");
+    expect(body.allocations[0].amountCents).toBe(10_000);
+    expect(body.allocations[1].amountCents).toBe(5_000);
+    expect(body.auditLogPreview.payload.policy).toBe("oldest_due_first");
+  });
+
+  it("blocks installment preview allocation when cross-entity ambiguity exists", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/payments/installment-allocation/preview",
+      payload: {
+        billingAccountId: "billing-1",
+        paymentAmountCents: 10_000,
+        paymentCurrency: "PHP",
+        policy: "oldest_due_first",
+        lines: [
+          {
+            installmentLineId: "line-1",
+            installmentPlanId: "plan-1",
+            billingAccountId: "billing-2",
+            currency: "PHP",
+            sequenceNumber: 1,
+            dueDate: "2026-03-15",
+            scheduledAmountCents: 10_000,
+            paidAmountCents: 0,
+            remainingAmountCents: 10_000,
+            status: "overdue",
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().message).toContain("cross-entity ambiguity");
+  });
 });

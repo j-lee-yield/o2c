@@ -5,10 +5,12 @@ import {
 } from "@o2c/audit";
 import type { Principal } from "@o2c/auth";
 import {
+  applyControlCenterWorkflowDecision,
   createCallAgentConfig,
   createControlCenterConfig,
   createControlCenterStage,
   createControlCenterWorkflow,
+  createControlCenterWorkflowExecution,
   createEmailTemplate,
   createTemplateFolder,
   updateCallAgentConfig,
@@ -24,6 +26,7 @@ import {
   type ControlCenterStage,
   type ControlCenterTemplateFolder,
   type ControlCenterWorkflow,
+  type ControlCenterWorkflowExecution,
   type Contact,
   type CustomerInvoice,
 } from "@o2c/domain";
@@ -45,6 +48,7 @@ type ConfigUpdateInput = Omit<Parameters<typeof updateControlCenterConfig>[1], "
 export interface ControlCenterStore {
   workflows: Map<string, ControlCenterWorkflow>;
   stages: Map<string, ControlCenterStage>;
+  executions: Map<string, ControlCenterWorkflowExecution>;
   templates: Map<string, ControlCenterEmailTemplate>;
   folders: Map<string, ControlCenterTemplateFolder>;
   callAgentConfig?: ControlCenterCallAgentConfig;
@@ -74,6 +78,7 @@ export interface ControlCenterTemplatePreviewContext {
 export interface ControlCenterPersistenceSnapshot {
   workflows: ControlCenterWorkflow[];
   stages: ControlCenterStage[];
+  executions: ControlCenterWorkflowExecution[];
   templates: ControlCenterEmailTemplate[];
   folders: ControlCenterTemplateFolder[];
   callAgentConfig?: ControlCenterCallAgentConfig;
@@ -86,6 +91,8 @@ export interface ControlCenterPersistence {
   deleteWorkflow(workflowId: string): void;
   upsertStage(stage: ControlCenterStage): void;
   deleteStage(stageId: string): void;
+  upsertExecution(execution: ControlCenterWorkflowExecution): void;
+  deleteExecution(executionId: string): void;
   upsertTemplate(template: ControlCenterEmailTemplate): void;
   upsertFolder(folder: ControlCenterTemplateFolder): void;
   upsertCallAgentConfig(config: ControlCenterCallAgentConfig): void;
@@ -112,6 +119,7 @@ function toActor(principal: Principal): { actorId: string; actorRole: ActivityAc
 export class InMemoryControlCenterStore implements ControlCenterStore {
   readonly workflows = new Map<string, ControlCenterWorkflow>();
   readonly stages = new Map<string, ControlCenterStage>();
+  readonly executions = new Map<string, ControlCenterWorkflowExecution>();
   readonly templates = new Map<string, ControlCenterEmailTemplate>();
   readonly folders = new Map<string, ControlCenterTemplateFolder>();
   callAgentConfig?: ControlCenterCallAgentConfig;
@@ -146,6 +154,7 @@ export class ControlCenterService {
     tenantId: string;
     workflows?: ControlCenterWorkflow[];
     stages?: ControlCenterStage[];
+    executions?: ControlCenterWorkflowExecution[];
     templates?: ControlCenterEmailTemplate[];
     folders?: ControlCenterTemplateFolder[];
     callAgentConfig?: ControlCenterCallAgentConfig;
@@ -156,6 +165,9 @@ export class ControlCenterService {
     }
     for (const stage of input.stages ?? []) {
       this.store.stages.set(stage.id, stage);
+    }
+    for (const execution of input.executions ?? []) {
+      this.store.executions.set(execution.id, execution);
     }
     for (const template of input.templates ?? []) {
       this.store.templates.set(template.id, template);
@@ -175,6 +187,7 @@ export class ControlCenterService {
     return {
       workflows: [...this.store.workflows.values()],
       stages: [...this.store.stages.values()],
+      executions: [...this.store.executions.values()],
       templates: [...this.store.templates.values()],
       folders: [...this.store.folders.values()],
       callAgentConfig: this.store.callAgentConfig,
@@ -186,8 +199,10 @@ export class ControlCenterService {
     return [...this.store.workflows.values()]
       .map((workflow) => ({
         ...workflow,
-        approxTargetCount: Number(workflow.metadata.demoCustomerCount ?? 0),
+        approxTargetCount:
+          this.listWorkflowExecutions(workflow.id).length || Number(workflow.metadata.demoCustomerCount ?? 0),
         stages: this.listStagesForWorkflow(workflow.id),
+        executions: this.listWorkflowExecutions(workflow.id),
       }))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
@@ -195,6 +210,187 @@ export class ControlCenterService {
   getWorkflowDetail(workflowId: string): { workflow: ControlCenterWorkflow; stages: ControlCenterStage[] } {
     const workflow = this.requireWorkflow(workflowId);
     return { workflow, stages: this.listStagesForWorkflow(workflowId) };
+  }
+
+  listWorkflowExecutions(workflowId: string): ControlCenterWorkflowExecution[] {
+    this.requireWorkflow(workflowId);
+    return [...this.store.executions.values()]
+      .filter((execution) => execution.workflowId === workflowId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  assignWorkflowCustomer(input: {
+    principal: Principal;
+    tenantId: string;
+    workflowId: string;
+    billingAccountId: string;
+    parentAccountId: string;
+    currentTrack?: ControlCenterWorkflowExecution["currentTrack"];
+    metadata?: Record<string, unknown>;
+  }) {
+    this.requireWorkflow(input.workflowId);
+    const existing = [...this.store.executions.values()].find(
+      (execution) =>
+        execution.workflowId === input.workflowId && execution.billingAccountId === input.billingAccountId,
+    );
+    if (existing) {
+      return { execution: existing, created: false as const };
+    }
+
+    const execution = createControlCenterWorkflowExecution({
+      id: this.idGenerator("cc_execution"),
+      tenantId: input.tenantId,
+      actor: toActor(input.principal),
+      at: this.now(),
+      workflowId: input.workflowId,
+      billingAccountId: input.billingAccountId,
+      parentAccountId: input.parentAccountId,
+      ...(input.currentTrack ? { currentTrack: input.currentTrack } : {}),
+      metadata: {
+        ...(input.metadata ?? {}),
+        assignedBy: input.principal.id,
+      },
+    });
+    this.store.executions.set(execution.id, execution);
+    this.persistExecution(execution);
+    const activityEntry = this.audit.append({
+      actorId: input.principal.id,
+      actorRole: toActor(input.principal).actorRole,
+      action: "control_center.workflow_customer_assigned",
+      entityType: "control_center_workflow_execution",
+      entityId: execution.id,
+      metadata: {
+        workflowId: execution.workflowId,
+        billingAccountId: execution.billingAccountId,
+        parentAccountId: execution.parentAccountId,
+      },
+      after: execution as unknown as Record<string, unknown>,
+    });
+    return { execution, created: true as const, activityEntry };
+  }
+
+  pauseWorkflowCustomer(input: {
+    principal: Principal;
+    workflowId: string;
+    executionId: string;
+    reason?: string;
+    effectiveUntil?: string;
+  }) {
+    this.requireWorkflow(input.workflowId);
+    const execution = this.requireExecution(input.executionId, input.workflowId);
+    const updated = applyControlCenterWorkflowDecision(execution, {
+      actor: toActor(input.principal),
+      at: this.now(),
+      decision: {
+        action: "pause",
+        reason: input.reason ?? "workflow_customer_paused",
+        confidence: 1,
+        ...(input.effectiveUntil ? { effectiveUntil: input.effectiveUntil } : {}),
+        requiresHumanReview: false,
+        rationaleSummary:
+          input.reason ?? "Workflow enrollment was paused by an authorized operator.",
+        reasoningMetadata: {
+          source: "control_center_manual_action",
+          manualAction: "pause",
+          actorId: input.principal.id,
+        },
+      },
+      metadata: {
+        ...execution.metadata,
+        lastChangedBy: "human",
+        enrollmentState: "paused",
+      },
+    });
+    this.store.executions.set(updated.id, updated);
+    this.persistExecution(updated);
+    const activityEntry = this.audit.append({
+      actorId: input.principal.id,
+      actorRole: toActor(input.principal).actorRole,
+      action: "control_center.workflow_customer_paused",
+      entityType: "control_center_workflow_execution",
+      entityId: updated.id,
+      metadata: {
+        workflowId: updated.workflowId,
+        billingAccountId: updated.billingAccountId,
+        ...(updated.effectiveUntil ? { effectiveUntil: updated.effectiveUntil } : {}),
+      },
+      before: execution as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+    });
+    return { execution: updated, activityEntry };
+  }
+
+  resumeWorkflowCustomer(input: {
+    principal: Principal;
+    workflowId: string;
+    executionId: string;
+    reason?: string;
+  }) {
+    this.requireWorkflow(input.workflowId);
+    const execution = this.requireExecution(input.executionId, input.workflowId);
+    const updated = applyControlCenterWorkflowDecision(execution, {
+      actor: toActor(input.principal),
+      at: this.now(),
+      decision: {
+        action: "continue",
+        reason: input.reason ?? "workflow_customer_resumed",
+        confidence: 1,
+        requiresHumanReview: false,
+        rationaleSummary:
+          input.reason ?? "Workflow enrollment was resumed by an authorized operator.",
+        reasoningMetadata: {
+          source: "control_center_manual_action",
+          manualAction: "resume",
+          actorId: input.principal.id,
+        },
+      },
+      metadata: {
+        ...execution.metadata,
+        lastChangedBy: "human",
+        enrollmentState: "active",
+      },
+    });
+    this.store.executions.set(updated.id, updated);
+    this.persistExecution(updated);
+    const activityEntry = this.audit.append({
+      actorId: input.principal.id,
+      actorRole: toActor(input.principal).actorRole,
+      action: "control_center.workflow_customer_resumed",
+      entityType: "control_center_workflow_execution",
+      entityId: updated.id,
+      metadata: {
+        workflowId: updated.workflowId,
+        billingAccountId: updated.billingAccountId,
+      },
+      before: execution as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+    });
+    return { execution: updated, activityEntry };
+  }
+
+  unenrollWorkflowCustomer(input: {
+    principal: Principal;
+    workflowId: string;
+    executionId: string;
+  }) {
+    this.requireWorkflow(input.workflowId);
+    const execution = this.requireExecution(input.executionId, input.workflowId);
+    this.store.executions.delete(execution.id);
+    this.deps.persistence?.deleteExecution(execution.id);
+    const activityEntry = this.audit.append({
+      actorId: input.principal.id,
+      actorRole: toActor(input.principal).actorRole,
+      action: "control_center.workflow_customer_unenrolled",
+      entityType: "control_center_workflow_execution",
+      entityId: execution.id,
+      metadata: {
+        workflowId: execution.workflowId,
+        billingAccountId: execution.billingAccountId,
+        parentAccountId: execution.parentAccountId,
+      },
+      before: execution as unknown as Record<string, unknown>,
+    });
+    return { unenrolled: true, activityEntry };
   }
 
   createWorkflow(input: {
@@ -284,10 +480,15 @@ export class ControlCenterService {
   deleteWorkflow(workflowId: string, input: { principal: Principal }) {
     const workflow = this.requireWorkflow(workflowId);
     const removedStages = this.listStagesForWorkflow(workflowId);
+    const removedExecutions = this.listWorkflowExecutions(workflowId);
     this.store.workflows.delete(workflowId);
     for (const stage of removedStages) {
       this.store.stages.delete(stage.id);
       this.deps.persistence?.deleteStage(stage.id);
+    }
+    for (const execution of removedExecutions) {
+      this.store.executions.delete(execution.id);
+      this.deps.persistence?.deleteExecution(execution.id);
     }
     this.deps.persistence?.deleteWorkflow(workflowId);
     const entry = this.audit.append({
@@ -296,7 +497,11 @@ export class ControlCenterService {
       action: "control_center.workflow_deleted",
       entityType: "control_center_workflow",
       entityId: workflowId,
-      metadata: { tenantId: workflow.tenantId, stageCount: removedStages.length },
+      metadata: {
+        tenantId: workflow.tenantId,
+        stageCount: removedStages.length,
+        executionCount: removedExecutions.length,
+      },
       before: workflow as unknown as Record<string, unknown>,
     });
     return { deleted: true, activityEntry: entry };
@@ -764,6 +969,14 @@ export class ControlCenterService {
     return stage;
   }
 
+  private requireExecution(executionId: string, workflowId?: string) {
+    const execution = this.store.executions.get(executionId);
+    if (!execution || (workflowId && execution.workflowId !== workflowId)) {
+      throw new Error(`Workflow execution ${executionId} was not found.`);
+    }
+    return execution;
+  }
+
   private requireTemplate(templateId: string) {
     const template = this.store.templates.get(templateId);
     if (!template) {
@@ -809,6 +1022,10 @@ export class ControlCenterService {
 
   private persistStage(stage: ControlCenterStage) {
     this.deps.persistence?.upsertStage(stage);
+  }
+
+  private persistExecution(execution: ControlCenterWorkflowExecution) {
+    this.deps.persistence?.upsertExecution(execution);
   }
 
   private persistTemplate(template: ControlCenterEmailTemplate) {

@@ -2,6 +2,8 @@ import { createEntityMetadata, evolveEntityMetadata, type ActorContext } from ".
 import type {
   ControlCenterCallAgentConfig,
   ControlCenterConfig,
+  ControlCenterWorkflowDecision,
+  ControlCenterWorkflowExecution,
   ControlCenterEmailTemplate,
   ControlCenterStage,
   ControlCenterStageValidationResult,
@@ -55,6 +57,44 @@ export function createControlCenterWorkflow(input: {
   };
 }
 
+export function createControlCenterWorkflowExecution(input: {
+  id: string;
+  tenantId: string;
+  actor: ActorContext;
+  at: string;
+  workflowId: string;
+  billingAccountId: string;
+  parentAccountId: string;
+  currentTrack?: ControlCenterWorkflowExecution["currentTrack"];
+  status?: ControlCenterWorkflowExecution["status"];
+  requiresHumanReview?: boolean;
+  effectiveUntil?: string;
+  rationaleSummary?: string;
+  reasoningMetadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}): ControlCenterWorkflowExecution {
+  return {
+    id: input.id,
+    ...createEntityMetadata({
+      at: input.at,
+      tenantId: input.tenantId,
+      actorId: input.actor.actorId,
+      actorRole: input.actor.actorRole,
+    }),
+    tenantId: input.tenantId,
+    workflowId: input.workflowId,
+    billingAccountId: input.billingAccountId,
+    parentAccountId: input.parentAccountId,
+    status: input.status ?? "active",
+    currentTrack: input.currentTrack ?? "standard_reminders",
+    requiresHumanReview: input.requiresHumanReview ?? false,
+    ...(input.effectiveUntil ? { effectiveUntil: input.effectiveUntil } : {}),
+    ...(input.rationaleSummary ? { rationaleSummary: input.rationaleSummary } : {}),
+    reasoningMetadata: { ...(input.reasoningMetadata ?? {}) },
+    metadata: { ...(input.metadata ?? {}) },
+  };
+}
+
 export function updateControlCenterWorkflow(
   workflow: ControlCenterWorkflow,
   input: {
@@ -104,6 +144,51 @@ export function updateControlCenterWorkflow(
   assignOptionalString(updated, "testEmailRecipient", input.testEmailRecipient);
   assignOptionalString(updated, "testCallRecipient", input.testCallRecipient);
   return updated;
+}
+
+export function applyControlCenterWorkflowDecision(
+  execution: ControlCenterWorkflowExecution,
+  input: {
+    actor: ActorContext;
+    at: string;
+    decision: ControlCenterWorkflowDecision;
+    metadata?: Record<string, unknown>;
+  },
+): ControlCenterWorkflowExecution {
+  const preserveLockedState =
+    input.decision.action === "continue" && input.decision.reason === "manual_lock_active";
+  const nextStatus = nextExecutionStatus(execution, input.decision);
+  const nextEffectiveUntil =
+    input.decision.action === "pause"
+      ? input.decision.effectiveUntil
+      : preserveLockedState
+        ? execution.effectiveUntil
+        : undefined;
+  const { effectiveUntil: _priorEffectiveUntil, ...executionWithoutPauseWindow } = execution;
+
+  return {
+    ...executionWithoutPauseWindow,
+    ...evolveEntityMetadata(execution, {
+      at: input.at,
+      actorId: input.actor.actorId,
+      actorRole: input.actor.actorRole,
+    }),
+    status: nextStatus,
+    currentTrack: input.decision.targetTrack ?? execution.currentTrack,
+    lastDecisionAction: input.decision.action,
+    lastDecisionReason: input.decision.reason,
+    lastDecisionConfidence: input.decision.confidence,
+    requiresHumanReview: input.decision.requiresHumanReview,
+    ...(nextEffectiveUntil ? { effectiveUntil: nextEffectiveUntil } : {}),
+    ...(input.decision.rationaleSummary
+      ? { rationaleSummary: input.decision.rationaleSummary }
+      : {}),
+    reasoningMetadata: { ...input.decision.reasoningMetadata },
+    metadata: {
+      ...execution.metadata,
+      ...(input.metadata ?? {}),
+    },
+  };
 }
 
 export function createControlCenterStage(input: {
@@ -511,4 +596,26 @@ function assignOptionalEnum<T extends object>(
     return;
   }
   mutable[key as string] = value;
+}
+
+function nextExecutionStatus(
+  execution: ControlCenterWorkflowExecution,
+  decision: ControlCenterWorkflowDecision,
+): ControlCenterWorkflowExecution["status"] {
+  switch (decision.action) {
+    case "pause":
+      return "paused";
+    case "opt_out":
+      return "opted_out";
+    case "escalate_for_review":
+      return "manual_review";
+    case "switch_track":
+      return decision.requiresHumanReview ? "manual_review" : "active";
+    case "continue":
+      if (decision.reason === "manual_lock_active") {
+        return execution.status;
+      }
+    default:
+      return execution.status === "opted_out" ? "opted_out" : "active";
+  }
 }

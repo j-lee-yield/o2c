@@ -1,4 +1,4 @@
-import type { EmailThreadReference, SendingIdentity } from "@o2c/domain";
+import type { CommunicationAttempt, EmailThreadReference, SendingIdentity } from "@o2c/domain";
 import {
   executeSqlCommand,
   jsonLiteral,
@@ -80,6 +80,118 @@ type GmailOauthConnectionRow = GmailOauthConnectionRecord & {
   requestedByPrincipalRoles?: string[];
   metadata?: Record<string, unknown>;
 };
+
+export class PostgresCommunicationAttemptStore {
+  constructor(
+    private readonly databaseUrl: string,
+    private readonly tenantId = "default",
+  ) {}
+
+  save(attempt: CommunicationAttempt): void {
+    executeSqlCommand(
+      this.databaseUrl,
+      `
+        INSERT INTO communication_attempt (
+          id,
+          tenant_id,
+          version,
+          created_at,
+          updated_at,
+          deleted_at,
+          created_by_actor_id,
+          created_by_actor_role,
+          updated_by_actor_id,
+          updated_by_actor_role,
+          parent_account_id,
+          billing_account_id,
+          branch_id,
+          contact_id,
+          approval_request_id,
+          channel,
+          provider,
+          direction,
+          intent_type,
+          status,
+          recipient,
+          invoice_ids,
+          subject_line,
+          content_template_key,
+          body_preview,
+          provider_message_id,
+          blocked_reasons,
+          explanation,
+          metadata,
+          sender_identity_id,
+          sender_email,
+          sender_display_name,
+          provider_thread_id,
+          provider_conversation_id,
+          in_reply_to_provider_message_id
+        )
+        VALUES (
+          '${quoteLiteral(attempt.id)}'::uuid,
+          '${quoteLiteral(attempt.tenantId ?? this.tenantId)}',
+          ${attempt.version},
+          '${quoteLiteral(attempt.createdAt)}'::timestamptz,
+          '${quoteLiteral(attempt.updatedAt)}'::timestamptz,
+          ${attempt.deletedAt ? `'${quoteLiteral(attempt.deletedAt)}'::timestamptz` : "NULL"},
+          ${attempt.createdByActorId ? `'${quoteLiteral(attempt.createdByActorId)}'` : "NULL"},
+          ${attempt.createdByActorRole ? `'${quoteLiteral(attempt.createdByActorRole)}'` : "NULL"},
+          ${attempt.updatedByActorId ? `'${quoteLiteral(attempt.updatedByActorId)}'` : "NULL"},
+          ${attempt.updatedByActorRole ? `'${quoteLiteral(attempt.updatedByActorRole)}'` : "NULL"},
+          '${quoteLiteral(attempt.parentAccountId)}'::uuid,
+          ${attempt.billingAccountId ? `'${quoteLiteral(attempt.billingAccountId)}'::uuid` : "NULL"},
+          ${attempt.branchId ? `'${quoteLiteral(attempt.branchId)}'::uuid` : "NULL"},
+          ${attempt.contactId ? `'${quoteLiteral(attempt.contactId)}'::uuid` : "NULL"},
+          ${attempt.approvalRequestId ? `'${quoteLiteral(attempt.approvalRequestId)}'::uuid` : "NULL"},
+          '${quoteLiteral(attempt.channel)}',
+          '${quoteLiteral(attempt.provider)}',
+          '${quoteLiteral(attempt.direction)}',
+          '${quoteLiteral(attempt.intentType)}',
+          '${quoteLiteral(attempt.status)}',
+          '${jsonLiteral(attempt.recipient)}'::jsonb,
+          '${jsonLiteral(attempt.invoiceIds)}'::jsonb,
+          ${attempt.subjectLine ? `'${quoteLiteral(attempt.subjectLine)}'` : "NULL"},
+          ${attempt.contentTemplateKey ? `'${quoteLiteral(attempt.contentTemplateKey)}'` : "NULL"},
+          ${attempt.bodyPreview ? `'${quoteLiteral(attempt.bodyPreview)}'` : "NULL"},
+          ${attempt.providerMessageId ? `'${quoteLiteral(attempt.providerMessageId)}'` : "NULL"},
+          '${jsonLiteral(attempt.blockedReasons)}'::jsonb,
+          '${jsonLiteral(attempt.explanation)}'::jsonb,
+          '${jsonLiteral(attempt.metadata)}'::jsonb,
+          ${attempt.senderIdentityId ? `'${quoteLiteral(attempt.senderIdentityId)}'::uuid` : "NULL"},
+          ${attempt.senderEmail ? `'${quoteLiteral(attempt.senderEmail)}'` : "NULL"},
+          ${attempt.senderDisplayName ? `'${quoteLiteral(attempt.senderDisplayName)}'` : "NULL"},
+          ${attempt.providerThreadId ? `'${quoteLiteral(attempt.providerThreadId)}'` : "NULL"},
+          ${attempt.providerConversationId ? `'${quoteLiteral(attempt.providerConversationId)}'` : "NULL"},
+          ${attempt.inReplyToProviderMessageId ? `'${quoteLiteral(attempt.inReplyToProviderMessageId)}'` : "NULL"}
+        )
+        ON CONFLICT (id)
+        DO UPDATE SET
+          updated_at = EXCLUDED.updated_at,
+          deleted_at = EXCLUDED.deleted_at,
+          updated_by_actor_id = EXCLUDED.updated_by_actor_id,
+          updated_by_actor_role = EXCLUDED.updated_by_actor_role,
+          provider = EXCLUDED.provider,
+          status = EXCLUDED.status,
+          recipient = EXCLUDED.recipient,
+          invoice_ids = EXCLUDED.invoice_ids,
+          subject_line = EXCLUDED.subject_line,
+          content_template_key = EXCLUDED.content_template_key,
+          body_preview = EXCLUDED.body_preview,
+          provider_message_id = EXCLUDED.provider_message_id,
+          blocked_reasons = EXCLUDED.blocked_reasons,
+          explanation = EXCLUDED.explanation,
+          metadata = EXCLUDED.metadata,
+          sender_identity_id = EXCLUDED.sender_identity_id,
+          sender_email = EXCLUDED.sender_email,
+          sender_display_name = EXCLUDED.sender_display_name,
+          provider_thread_id = EXCLUDED.provider_thread_id,
+          provider_conversation_id = EXCLUDED.provider_conversation_id,
+          in_reply_to_provider_message_id = EXCLUDED.in_reply_to_provider_message_id
+      `,
+    );
+  }
+}
 
 export class PostgresSendingIdentityStore {
   constructor(

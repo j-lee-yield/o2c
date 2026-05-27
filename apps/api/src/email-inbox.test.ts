@@ -65,7 +65,7 @@ describe("gmail inbox service", () => {
 
         if (
           input ===
-          "https://gmail.googleapis.com/gmail/v1/users/me/messages/msg_1?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject"
+          "https://gmail.googleapis.com/gmail/v1/users/me/messages/msg_1?format=full"
         ) {
           return jsonResponse({
             id: "msg_1",
@@ -74,6 +74,8 @@ describe("gmail inbox service", () => {
             internalDate: String(Date.parse("2026-04-06T01:00:00.000Z")),
             snippet: "Can you resend the SOA?",
             payload: {
+              mimeType: "text/plain",
+              body: { data: gmailBody("Can you resend the SOA?\nWe need it before payment release.") },
               headers: [
                 { name: "From", value: "AP Team <ap@example.com>" },
                 { name: "To", value: "Yield Collector <collector@example.com>" },
@@ -85,7 +87,7 @@ describe("gmail inbox service", () => {
 
         if (
           input ===
-          "https://gmail.googleapis.com/gmail/v1/users/me/messages/msg_2?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject"
+          "https://gmail.googleapis.com/gmail/v1/users/me/messages/msg_2?format=full"
         ) {
           return jsonResponse({
             id: "msg_2",
@@ -94,6 +96,8 @@ describe("gmail inbox service", () => {
             internalDate: String(Date.parse("2026-04-06T02:00:00.000Z")),
             snippet: "We will settle this on Friday.",
             payload: {
+              mimeType: "text/plain",
+              body: { data: gmailBody("We will settle this on Friday.\nPlease keep the thread open.") },
               headers: [
                 { name: "From", value: "Treasury <treasury@example.com>" },
                 { name: "To", value: "Yield Collector <collector@example.com>" },
@@ -105,7 +109,7 @@ describe("gmail inbox service", () => {
 
         if (
           input ===
-          "https://gmail.googleapis.com/gmail/v1/users/me/threads/thread_1?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject"
+          "https://gmail.googleapis.com/gmail/v1/users/me/threads/thread_1?format=full"
         ) {
           return jsonResponse({
             messages: [
@@ -116,6 +120,8 @@ describe("gmail inbox service", () => {
                 internalDate: String(Date.parse("2026-04-06T02:00:00.000Z")),
                 snippet: "We will settle this on Friday.",
                 payload: {
+                  mimeType: "text/plain",
+                  body: { data: gmailBody("We will settle this on Friday.\nPlease keep the thread open.") },
                   headers: [
                     { name: "From", value: "Treasury <treasury@example.com>" },
                     { name: "To", value: "Yield Collector <collector@example.com>" },
@@ -130,6 +136,8 @@ describe("gmail inbox service", () => {
                 internalDate: String(Date.parse("2026-04-06T01:00:00.000Z")),
                 snippet: "Can you resend the SOA?",
                 payload: {
+                  mimeType: "text/plain",
+                  body: { data: gmailBody("Can you resend the SOA?\nWe need it before payment release.") },
                   headers: [
                     { name: "From", value: "AP Team <ap@example.com>" },
                     { name: "To", value: "Yield Collector <collector@example.com>" },
@@ -189,6 +197,7 @@ describe("gmail inbox service", () => {
     expect(inbox.senderIdentity.senderEmail).toBe("collector@example.com");
     expect(inbox.messages).toHaveLength(2);
     expect(inbox.messages[0]?.fromEmail).toBe("treasury@example.com");
+    expect(inbox.messages[0]?.bodyText).toContain("Please keep the thread open.");
     expect(inbox.messages[1]?.unread).toBe(true);
 
     const thread = await gmailService.getInboxThread({
@@ -196,6 +205,7 @@ describe("gmail inbox service", () => {
     });
     expect(thread.thread.providerThreadId).toBe("thread_1");
     expect(thread.thread.messages).toHaveLength(2);
+    expect(thread.thread.messages[1]?.bodyText).toContain("We need it before payment release.");
     expect(thread.thread.participants).toContain("collector@example.com");
     expect(thread.thread.participants).toContain("ap@example.com");
   });
@@ -212,4 +222,8 @@ function jsonResponse(body: unknown) {
       return body;
     },
   };
+}
+
+function gmailBody(value: string) {
+  return Buffer.from(value, "utf8").toString("base64url");
 }

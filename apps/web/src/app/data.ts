@@ -1,11 +1,14 @@
 import { loadEnv } from "@o2c/config";
 import { listDataSourceRuntimeSnapshot } from "../modules/data-sources-runtime.js";
+import { getFallbackControlCenter } from "../modules/control-center-fallback.js";
 import { mergeInvoiceEntriesWithoutDuplicates } from "../modules/invoice-import-dedupe.js";
 import type {
   AccountProfileSummary,
+  AccessControlConsoleData,
   ControlCenterConsoleData,
   ControlCenterTemplatePreview,
   CustomerIndexItem,
+  CustomerProfileTabId,
   CustomerProfileTabSummary,
   CustomerProfileWorkspaceData,
   DashboardSummaryCard,
@@ -18,6 +21,7 @@ import type {
   InvoiceIndexEntry,
   InvoiceAgingAnalytics,
   InvoiceDetailData as ContractInvoiceDetailData,
+  InvoiceLinkedStatusItem,
   LinkedPaymentRemittanceSummary,
   InvoiceIndexProviderSummary,
   InvoiceIndexResponse,
@@ -30,6 +34,11 @@ import type {
   NextActionSummaryCard,
   OverdueExposureSummary,
   CollectibleVsDisputedSummary,
+  CallInboxCallRecord,
+  CallInboxDetailResponse,
+  CallInboxFilters,
+  CallInboxListItem,
+  CallInboxListResponse,
 } from "@o2c/contracts";
 import {
   buildDemoSeedBundle,
@@ -88,7 +97,42 @@ export interface AccountWorkspaceData {
   collectibleAmount?: string;
   disputedAmount?: string;
   linkedStatus?: string;
+  workflow?: WorkflowStateViewModel;
   learning?: LearningWorkspaceSummary;
+}
+
+export interface WorkflowTimelineItem {
+  id: string;
+  title: string;
+  summary: string;
+  at: string;
+  actor: "ai" | "human";
+  tags: string[];
+}
+
+export interface WorkflowPolicySummary {
+  autoPauseOutcomes: string[];
+  trackSwitchOutcomes: string[];
+  humanReviewOutcomes: string[];
+}
+
+export interface WorkflowStateViewModel {
+  status: "active" | "paused" | "opted_out" | "manual_review";
+  statusLabel: string;
+  pauseReason?: string;
+  resumeDate?: string;
+  optOutReason?: string;
+  currentTrack: string;
+  latestDecisionLabel: string;
+  latestDecisionAction: string;
+  latestChangeBy: "ai" | "human";
+  humanReviewRequired: boolean;
+  rationale: string;
+  evidenceSummary: string;
+  workflowName: string;
+  manualOverrideLabel?: string;
+  policySummary?: WorkflowPolicySummary;
+  timeline: WorkflowTimelineItem[];
 }
 
 export interface InvoiceDetailData extends ContractInvoiceDetailData {}
@@ -424,13 +468,144 @@ export interface TaskQueueItem {
   amountLabel: string;
   type: "collection" | "cash_app" | "deduction" | "integration" | "credit_line";
   customerName: string;
-  status: "open" | "in_progress" | "pending_approval";
+  status: "open" | "in_progress" | "pending_approval" | "completed" | "closed" | "deleted";
   priority: "high" | "medium" | "low";
   assigneeName: string;
   assigneeInitials: string;
+  createdAt?: string;
   createdLabel: string;
   dueDateLabel: string;
   actionPath: string;
+  sourceLabel?: string;
+  brief?: string;
+  recommendedNextAction?: string;
+  transcriptSnippet?: string;
+  ownerTeam?: string;
+  openInvoiceCount?: number;
+  balanceLabel?: string;
+  overdueLabel?: string;
+  invoiceContextLabel?: string;
+  invoiceContextDetail?: string;
+  invoiceContextItems?: Array<{
+    invoiceNumber: string;
+    amountLabel?: string;
+    dueDateLabel?: string;
+    statusLabel?: string;
+  }>;
+  callContextLabel?: string;
+  callContextHref?: string;
+  callContextDetail?: string;
+  replyAgingLabel?: string;
+  composeEmail?: {
+    account: {
+      id: string;
+      createdAt: string;
+      updatedAt: string;
+      parentAccountId: string;
+      branchId?: string;
+      accountNumber: string;
+      displayName: string;
+      currency: string;
+      accountTier: "standard" | "strategic";
+      status: "active" | "inactive";
+      centrallyPaid: boolean;
+      metadata: Record<string, unknown>;
+    };
+    contact: {
+      id: string;
+      createdAt: string;
+      updatedAt: string;
+      parentAccountId: string;
+      billingAccountId?: string;
+      branchId?: string;
+      invoiceId?: string;
+      scope: "parent_account" | "billing_account" | "branch" | "invoice";
+      scopeId: string;
+      fullName: string;
+      email?: string;
+      phone?: string;
+      role:
+        | "customer"
+        | "collector"
+        | "approver"
+        | "internal"
+        | "ap"
+        | "shared_finance"
+        | "treasury"
+        | "branch"
+        | "invoice";
+      isPrimary: boolean;
+      isVerified: boolean;
+      allowAutoSend: boolean;
+      recentSuccessfulResponses: number;
+      metadata: Record<string, unknown>;
+    };
+    invoices: Array<{
+      id: string;
+      createdAt: string;
+      updatedAt: string;
+      state:
+        | "uploaded_unmatched"
+        | "synced_open"
+        | "matched_to_erp"
+        | "partially_paid"
+        | "paid"
+        | "disputed_partial"
+        | "disputed_full"
+        | "credit_pending"
+        | "writeback_pending"
+        | "writeback_failed"
+        | "voided";
+      parentAccountId: string;
+      billingAccountId: string;
+      branchId?: string;
+      invoiceContactId?: string;
+      uploadedDocumentId?: string;
+      invoiceDate?: string;
+      invoiceNumber: string;
+      currency: string;
+      amountCents: number;
+      dueDate?: string;
+      disputedAmountCents?: number;
+      metadata: Record<string, unknown>;
+    }>;
+    draft: {
+      subjectLine: string;
+      body: string;
+      generatedBy: "llm" | "fallback";
+      note: string;
+    };
+    threadMessages?: Array<{
+      id: string;
+      fromEmail: string;
+      fromName?: string;
+      snippet: string;
+      receivedAt: string;
+    }>;
+    openTaskCount?: number;
+  };
+}
+
+export interface TaskComposeDraftState {
+  composeId: string;
+  generator: "ai" | "template";
+  subjectLine: string;
+  body: string;
+  note?: string;
+}
+
+export interface CollectionsComposeAttachmentDraft {
+  kind: "invoice" | "soa";
+  spec: string;
+  label: string;
+}
+
+export interface CollectionsComposeDraftState {
+  composeId: string;
+  generator: "ai" | "template";
+  subjectLine: string;
+  body: string;
+  attachments: CollectionsComposeAttachmentDraft[];
 }
 
 export interface ExceptionQueueItem {
@@ -500,6 +675,7 @@ export interface EmailInboxMessageItem {
   fromName?: string;
   toEmail?: string;
   snippet?: string;
+  bodyText?: string;
   receivedAt?: string;
   labelIds: string[];
   unread: boolean;
@@ -522,6 +698,17 @@ export interface EmailInboxData {
   resultSizeEstimate: number;
   messages: EmailInboxMessageItem[];
   selectedThread?: EmailInboxThreadItem;
+  error?: string;
+}
+
+export interface CallInboxData {
+  generatedAt: string;
+  source: SourceBadge;
+  total: number;
+  filters: CallInboxFilters;
+  items: CallInboxListItem[];
+  calls: CallInboxCallRecord[];
+  exportPath: string;
   error?: string;
 }
 
@@ -663,11 +850,31 @@ export interface InboxReplyErrorState {
 }
 
 export interface CollectionsComposeStatusState {
-  kind: "sent" | "approval_needed";
+  kind: "sent" | "approval_needed" | "attachment_ready";
   message: string;
 }
 
 export interface CollectionsComposeErrorState {
+  kind: "error";
+  message: string;
+}
+
+export interface TaskComposeStatusState {
+  kind: "sent" | "approval_needed" | "completed" | "closed" | "deleted";
+  message: string;
+}
+
+export interface TaskComposeErrorState {
+  kind: "error";
+  message: string;
+}
+
+export interface TaskInvoiceAttachmentStatusState {
+  kind: "attached";
+  message: string;
+}
+
+export interface TaskInvoiceAttachmentErrorState {
   kind: "error";
   message: string;
 }
@@ -738,6 +945,7 @@ export interface OperatorConsoleData {
   exceptionCounts: ExceptionCountSummary;
   customerIndex: CustomerIndexItem[];
   customerProfile: CustomerProfileWorkspaceData;
+  liveCustomerProfileDetail?: LiveCustomerProfileDetail;
   accountProfileSummaries: AccountProfileSummary[];
   nextActionSummaryCards: NextActionSummaryCard[];
   collectionsQueue: CollectionsQueueItem[];
@@ -758,6 +966,7 @@ export interface OperatorConsoleData {
   integrations: IntegrationItem[];
   emailSendingIdentities: EmailSendingIdentityItem[];
   emailInbox: EmailInboxData;
+  callInbox: CallInboxData;
   dataSourceIntegrations: DataSourceIntegrationItem[];
   dataSourceUploads: DataSourceUploadItem[];
   automationRules: AutomationRuleItem[];
@@ -777,6 +986,205 @@ export interface OperatorConsoleData {
   inboxReplyError?: InboxReplyErrorState;
   collectionsComposeStatus?: CollectionsComposeStatusState;
   collectionsComposeError?: CollectionsComposeErrorState;
+  collectionsComposeDraft?: CollectionsComposeDraftState;
+  taskComposeStatus?: TaskComposeStatusState;
+  taskComposeError?: TaskComposeErrorState;
+  taskInvoiceAttachmentStatus?: TaskInvoiceAttachmentStatusState;
+  taskInvoiceAttachmentError?: TaskInvoiceAttachmentErrorState;
+  taskComposeDraft?: TaskComposeDraftState;
+  accessControlAdmin?: AccessControlConsoleData;
+}
+
+interface LiveCustomerProfileIndexApiItem {
+  profileId: string;
+  canonicalName: string;
+  status: "active" | "pending_review" | "merged";
+  accountTier: "standard" | "strategic" | "unknown";
+  parentAccountId?: string;
+  parentAccountName?: string;
+  billingAccountId?: string;
+  billingAccountName?: string;
+  branchNames: string[];
+  primaryContactEmail?: string;
+  openAmountCents: number;
+  overdueAmountCents: number;
+  collectibleAmountCents: number;
+  disputedAmountCents: number;
+  openInvoiceCount: number;
+  taskCount: number;
+  completenessScore: number;
+  nextAction: string;
+  hasPendingReview: boolean;
+  tabs: Array<{
+    id: CustomerProfileTabId;
+    label: string;
+    itemCount: number;
+    status: "ready" | "attention" | "empty";
+  }>;
+}
+
+interface LiveCustomerProfileIndexApiResponse {
+  items: LiveCustomerProfileIndexApiItem[];
+}
+
+interface LiveCustomerProfileUnifiedResponse {
+  hierarchy?: {
+    parentAccount?: {
+      id: string;
+      name: string;
+    };
+    billingAccount?: {
+      id: string;
+      createdAt?: string;
+      updatedAt?: string;
+      parentAccountId: string;
+      accountNumber: string;
+      displayName: string;
+      currency: string;
+      accountTier: "standard" | "strategic";
+      status: "active" | "inactive";
+      centrallyPaid: boolean;
+      metadata?: Record<string, unknown>;
+    };
+    branches?: Array<{
+      id: string;
+      name: string;
+    }>;
+  };
+  contacts?: Array<{
+    id: string;
+    createdAt?: string;
+    updatedAt?: string;
+    fullName: string;
+    email?: string;
+    phone?: string;
+    role:
+      | "customer"
+      | "collector"
+      | "approver"
+      | "internal"
+      | "ap"
+      | "shared_finance"
+      | "treasury"
+      | "branch"
+      | "invoice";
+    isPrimaryEmail?: boolean;
+    isPrimaryPhone?: boolean;
+    allowAutoSend: boolean;
+    isVerified: boolean;
+  }>;
+  invoices?: NonNullable<TaskQueueItem["composeEmail"]>["invoices"];
+  payments?: Array<{
+    id: string;
+    paymentReference: string;
+    currency: string;
+    amountCents: number;
+    receivedAt: string;
+    state: string;
+    metadata?: Record<string, unknown>;
+  }>;
+  customerProfile: {
+    profileId: string;
+    overviewSummary: CustomerProfileWorkspaceData["overviewSummary"];
+    contactSummary: {
+      totalContacts: number;
+      verifiedContacts: number;
+      autoSendEligibleContacts: number;
+      sharedMailboxContacts: number;
+      hasVerifiedPrimaryContact: boolean;
+      primaryContact?: {
+        id: string;
+        fullName: string;
+        email?: string;
+        phone?: string;
+        role: string;
+        allowAutoSend: boolean;
+        isVerified: boolean;
+      };
+    };
+    insightSummary: {
+      conciseSummary: string;
+      preferredChannel?: string;
+      nextBestAction?: string;
+      remittanceQuality?: string;
+      centralizedPayerConfidence?: number;
+      duplicateReviewPending: boolean;
+      primaryContactReviewPending: boolean;
+      explanation: string[];
+    };
+    financialSummary: {
+      currency: string;
+      openAmountCents: number;
+      overdueAmountCents: number;
+      collectibleAmountCents: number;
+      disputedAmountCents: number;
+      unappliedCashAmountCents: number;
+      openInvoiceCount: number;
+      overdueInvoiceCount: number;
+      disputedInvoiceCount: number;
+      paymentCount: number;
+      remittanceCount: number;
+      lastPaymentAt?: string;
+    };
+    completenessCheck: {
+      score: number;
+      completedCount: number;
+      totalCount: number;
+      status: "complete" | "warning" | "missing";
+      items: CustomerProfileWorkspaceData["completenessCheck"]["items"];
+    };
+    notes: CustomerProfileWorkspaceData["notes"];
+    creditProfile: {
+      riskLevel: "low" | "medium" | "high" | "unknown";
+      hasCreditHold: boolean;
+      hasOverdueBalance: boolean;
+      internalCreditLimitCents?: number;
+      availableCreditCents?: number;
+      blockedReasons: string[];
+    };
+    tabs: CustomerProfileWorkspaceData["tabs"];
+  };
+}
+
+interface LiveCustomerProfileTasksApiResponse {
+  items: Array<{
+    id: string;
+    title: string;
+    description?: string;
+    kind: string;
+    status: "open" | "completed" | "closed" | "dismissed" | "deleted";
+    ownerId?: string;
+    dueAt?: string;
+    origin?: string;
+  }>;
+}
+
+interface LiveCustomerProfileDetail {
+  contacts: Array<{
+    name: string;
+    email: string;
+    verified: boolean;
+  }>;
+  payments: PaymentQueueItem[];
+  tasks: Array<{
+    id: string;
+    title: string;
+    subtitle: string;
+    status: string;
+    assignee: string;
+    priority: "high" | "medium" | "low";
+    dateLabel: string;
+  }>;
+  insights: string[];
+  sourceLabel: string;
+  externalId: string;
+  hierarchySummary: string;
+  primaryEmail: string;
+  primaryPhone: string;
+  portalStatus: string;
+  portalType: string;
+  portalStatementAccess: string;
+  rawComposeEmail?: TaskQueueItem["composeEmail"];
 }
 
 interface ApprovalQueueApiResponse {
@@ -830,13 +1238,32 @@ export async function loadOperatorConsoleData(options?: {
   emailConnected?: string | undefined;
   emailSender?: string | undefined;
   page?: string | undefined;
+  customerId?: string | undefined;
+  invoiceNumber?: string | undefined;
   inboxSenderIdentityId?: string | undefined;
   inboxThreadId?: string | undefined;
   inboxReplyStatus?: string | undefined;
   inboxReplyError?: string | undefined;
   collectionsComposeStatus?: string | undefined;
   collectionsComposeError?: string | undefined;
+  collectionsComposeDraftComposeId?: string | undefined;
+  collectionsComposeDraftGenerator?: string | undefined;
+  collectionsComposeDraftSubject?: string | undefined;
+  collectionsComposeDraftBody?: string | undefined;
+  collectionsComposeDraftAttachments?: string[] | undefined;
+  taskComposeStatus?: string | undefined;
+  taskComposeError?: string | undefined;
+  taskInvoiceAttachmentStatus?: string | undefined;
+  taskInvoiceAttachmentError?: string | undefined;
+  taskComposeDraftComposeId?: string | undefined;
+  taskComposeDraftGenerator?: string | undefined;
+  taskComposeDraftSubject?: string | undefined;
+  taskComposeDraftBody?: string | undefined;
+  taskComposeDraftNote?: string | undefined;
+  collectionsTab?: "email" | "call-inbox" | undefined;
+  collectionsCallFilters?: CallInboxFilters | undefined;
   controlCenterSelectedTemplateId?: string | undefined;
+  accessControlSelectedUserId?: string | undefined;
 }): Promise<OperatorConsoleData> {
   const apiConsoleData = await loadOperatorConsoleFromApi(options);
   const odooConnect = await loadOdooConnectSelection(options?.odooConnectState);
@@ -892,7 +1319,12 @@ export async function loadOperatorConsoleData(options?: {
             kind: "approval_needed" as const,
             message: "Collections email is queued for approval before it can be sent.",
           }
-        : undefined;
+        : options?.collectionsComposeStatus === "attachment_ready"
+          ? {
+              kind: "attachment_ready" as const,
+              message: "Attachment added to the draft.",
+            }
+          : undefined;
   const collectionsComposeError =
     options?.collectionsComposeError && options.collectionsComposeError.trim().length > 0
       ? {
@@ -900,9 +1332,87 @@ export async function loadOperatorConsoleData(options?: {
           message: options.collectionsComposeError.trim(),
         }
       : undefined;
+  const taskComposeStatus =
+    options?.taskComposeStatus === "sent"
+      ? {
+          kind: "sent" as const,
+          message: "Task email sent successfully.",
+        }
+      : options?.taskComposeStatus === "approval_needed"
+        ? {
+            kind: "approval_needed" as const,
+            message: "Task email is queued for approval before it can be sent.",
+          }
+        : options?.taskComposeStatus === "completed"
+          ? {
+              kind: "completed" as const,
+              message: "Task marked completed and archived from the active task list.",
+            }
+          : options?.taskComposeStatus === "closed"
+            ? {
+                kind: "closed" as const,
+                message: "Task closed.",
+              }
+            : options?.taskComposeStatus === "deleted"
+              ? {
+                  kind: "deleted" as const,
+                  message: "Task deleted from the active task list.",
+                }
+        : undefined;
+  const taskComposeError =
+    options?.taskComposeError && options.taskComposeError.trim().length > 0
+      ? {
+          kind: "error" as const,
+          message: options.taskComposeError.trim(),
+        }
+      : undefined;
+  const taskInvoiceAttachmentStatus =
+    options?.taskInvoiceAttachmentStatus && options.taskInvoiceAttachmentStatus.trim().length > 0
+      ? {
+          kind: "attached" as const,
+          message: options.taskInvoiceAttachmentStatus.trim(),
+        }
+      : undefined;
+  const taskInvoiceAttachmentError =
+    options?.taskInvoiceAttachmentError && options.taskInvoiceAttachmentError.trim().length > 0
+      ? {
+          kind: "error" as const,
+          message: options.taskInvoiceAttachmentError.trim(),
+        }
+      : undefined;
+  const taskComposeDraft =
+    options?.taskComposeDraftComposeId &&
+    options?.taskComposeDraftSubject &&
+    options?.taskComposeDraftBody
+      ? {
+          composeId: options.taskComposeDraftComposeId,
+          generator:
+            options.taskComposeDraftGenerator === "template" ? ("template" as const) : ("ai" as const),
+          subjectLine: options.taskComposeDraftSubject,
+          body: options.taskComposeDraftBody,
+          ...(options?.taskComposeDraftNote ? { note: options.taskComposeDraftNote } : {}),
+        }
+      : undefined;
+  const collectionsComposeDraft =
+    options?.collectionsComposeDraftComposeId &&
+    options?.collectionsComposeDraftSubject &&
+    options?.collectionsComposeDraftBody
+      ? {
+          composeId: options.collectionsComposeDraftComposeId,
+          generator:
+            options.collectionsComposeDraftGenerator === "template" ? ("template" as const) : ("ai" as const),
+          subjectLine: options.collectionsComposeDraftSubject,
+          body: options.collectionsComposeDraftBody,
+          attachments: (options.collectionsComposeDraftAttachments ?? [])
+            .map(parseCollectionsComposeAttachmentDraft)
+            .filter((attachment): attachment is CollectionsComposeAttachmentDraft => Boolean(attachment)),
+        }
+      : undefined;
   if (apiConsoleData) {
+    const resolvedInvoiceDetail = buildInvoiceDetailFromConsoleData(apiConsoleData, options?.invoiceNumber);
     return {
       ...apiConsoleData,
+      invoiceDetail: resolvedInvoiceDetail,
       ...(odooConnect ? { odooConnect } : {}),
       ...(odooConnectError ? { odooConnectError } : {}),
       ...(emailConnectError ? { emailConnectError } : {}),
@@ -911,6 +1421,13 @@ export async function loadOperatorConsoleData(options?: {
       ...(inboxReplyError ? { inboxReplyError } : {}),
       ...(collectionsComposeStatus ? { collectionsComposeStatus } : {}),
       ...(collectionsComposeError ? { collectionsComposeError } : {}),
+      ...(collectionsComposeDraft ? { collectionsComposeDraft } : {}),
+      ...(taskComposeStatus ? { taskComposeStatus } : {}),
+      ...(taskComposeError ? { taskComposeError } : {}),
+      ...(taskInvoiceAttachmentStatus ? { taskInvoiceAttachmentStatus } : {}),
+      ...(taskInvoiceAttachmentError ? { taskInvoiceAttachmentError } : {}),
+      ...(taskComposeDraft ? { taskComposeDraft } : {}),
+      ...(apiConsoleData.accessControlAdmin ? { accessControlAdmin: apiConsoleData.accessControlAdmin } : {}),
       ...(apiConsoleData.controlCenterTemplatePreview
         ? { controlCenterTemplatePreview: apiConsoleData.controlCenterTemplatePreview }
         : {}),
@@ -926,7 +1443,7 @@ export async function loadOperatorConsoleData(options?: {
   const approvals = await loadApprovalQueue();
   const invoiceIndex = await loadInvoiceIndex();
   const emailSendingIdentities = await loadEmailSendingIdentities();
-  const emailInbox = shouldLoadCollectionsInbox(options?.page)
+  const emailInbox = shouldLoadCollectionsInbox(options?.page, options?.collectionsTab)
     ? await loadEmailInbox({
         identities: emailSendingIdentities,
         ...(options?.inboxSenderIdentityId
@@ -940,45 +1457,11 @@ export async function loadOperatorConsoleData(options?: {
           ? { selectedSenderIdentityId: options.inboxSenderIdentityId }
           : {}),
       });
+  const callInbox = shouldLoadCallInbox(options?.page, options?.collectionsTab)
+    ? await loadCallInbox(options?.collectionsCallFilters)
+    : buildEmptyCallInbox(options?.collectionsCallFilters);
 
-  const collectionsQueue: CollectionsQueueItem[] = [
-    {
-      id: "queue-makati",
-      accountName: "Metro Retail Group - Makati",
-      accountTier: "Standard",
-      overdueAmount: formatCurrency(1500000),
-      promiseDue: "Today, 3:00 PM",
-      nextAction: "Confirm receipt and close promise if remittance arrives.",
-      rationale: "Invoice matched cleanly and the branch context is already preserved.",
-      ...(learningScenarios["billing_seed_1"]?.collections
-        ? { learning: learningScenarios["billing_seed_1"].collections }
-        : {}),
-    },
-    {
-      id: "queue-strategic",
-      accountName: "Metro Retail Group - Strategic Procurement",
-      accountTier: "Strategic",
-      overdueAmount: formatCurrency(2450000),
-      promiseDue: "Today, 5:30 PM",
-      nextAction: "Hold outreach until controller approves the strategic cash application.",
-      rationale: "Central payer behavior is active, but routing still stays on the billing account.",
-      ...(learningScenarios["billing_seed_1"]?.collections
-        ? { learning: learningScenarios["billing_seed_1"].collections }
-        : {}),
-    },
-    {
-      id: "queue-northpoint",
-      accountName: "Northpoint Wholesale - Manila",
-      accountTier: "Standard",
-      overdueAmount: formatCurrency(875000),
-      promiseDue: "No promise logged",
-      nextAction: "Call treasury contact to identify the payer before any application attempt.",
-      rationale: "Unknown payer remains unapplied by policy.",
-      ...(learningScenarios["billing_sparse_demo"]?.collections
-        ? { learning: learningScenarios["billing_sparse_demo"].collections }
-        : {}),
-    },
-  ];
+  const collectionsQueue: CollectionsQueueItem[] = [];
 
   const exceptionBreakdown = tallyExceptions(snapshot.scenarios);
   const demoApprovals = buildSeededApprovals(snapshot.scenarios);
@@ -1023,40 +1506,55 @@ export async function loadOperatorConsoleData(options?: {
       "Invoice remains branch-tagged as branch-hq for downstream reconciliation.",
       "No auto-chase task was created because the invoice is under tighter strategic controls.",
     ],
+    workflow: {
+      workflowName: "Standard Overdue Collections",
+      status: "paused",
+      statusLabel: "Paused",
+      pauseReason: "Customer promised payment by 2026-04-20",
+      resumeDate: "2026-04-20 17:30 PHT",
+      currentTrack: "Promise to pay follow-up",
+      latestDecisionLabel: "Paused by AI",
+      latestDecisionAction: "pause",
+      latestChangeBy: "ai",
+      humanReviewRequired: true,
+      rationale: "Workflow paused until the promise window closes because the customer committed to same-day payment and remittance proof is still pending.",
+      evidenceSummary: "Transcript captured: \"We will settle today once treasury releases the payment file.\"",
+      manualOverrideLabel: "Manual override",
+      policySummary: {
+        autoPauseOutcomes: ["Promise to pay", "Payment in process", "Callback requested"],
+        trackSwitchOutcomes: ["Promise to pay", "Invoice resend request", "Email only / do not call"],
+        humanReviewOutcomes: ["Dispute detected", "Low-confidence AI outcome", "Legal or strategic handling"],
+      },
+      timeline: [
+        {
+          id: "workflow-decision-1",
+          title: "Workflow paused until 2026-04-20 17:30 PHT",
+          summary: "Workflow paused until 2026-04-20 17:30 PHT because customer promised payment today.",
+          at: "12 minutes ago",
+          actor: "ai",
+          tags: ["Pause", "Promise to pay"],
+        },
+        {
+          id: "workflow-decision-2",
+          title: "Calls suppressed after preference update",
+          summary: "Calls suppressed because contact requested email only while the same promise is monitored.",
+          at: "38 minutes ago",
+          actor: "human",
+          tags: ["Email only", "Manual override"],
+        },
+        {
+          id: "workflow-decision-3",
+          title: "Moved to promise-to-pay track",
+          summary: "Moved to promise-to-pay track because the latest call captured a dated commitment with strong confidence.",
+          at: "45 minutes ago",
+          actor: "ai",
+          tags: ["Track switch", "PTP"],
+        },
+      ],
+    },
     ...(learningScenarios["billing_seed_1"]?.workspace
       ? { learning: learningScenarios["billing_seed_1"].workspace }
       : {}),
-  };
-
-  const invoiceDetail: InvoiceDetailData = {
-    invoiceNumber: demo.invoices[1]?.invoiceNumber ?? "SI-1002",
-    billingAccountId: demo.invoices[1]?.billingAccountId ?? "bill-2",
-    branchId: demo.invoices[1]?.branchId ?? "branch-hq",
-    status: "Disputed full",
-    amount: formatCurrency(demo.invoices[1]?.amountCents ?? 2450000),
-    dueDate: "2026-03-26",
-    disputeState: "Dispute hold in effect",
-    nextAction: "Wait for dispute resolution or controller decision before any collector follow-up.",
-    explanation: "The UI preserves branch routing on the invoice and blocks auto-chase while the dispute is open.",
-    collectibleAmount: formatCurrency(0),
-    disputedAmount: formatCurrency(demo.invoices[1]?.amountCents ?? 2450000),
-    linkedStatuses: [
-      {
-        id: "linked-payment-1",
-        kind: "payment",
-        reference: "RCPT-9001",
-        status: "Awaiting approval",
-        amount: formatCurrency(2450000),
-        detail: "Linked payment is held behind the strategic approval gate.",
-      },
-      {
-        id: "linked-remittance-1",
-        kind: "remittance",
-        reference: "RMT-STRAT-001",
-        status: "Awaiting dispute resolution",
-        detail: "Remittance proof is visible, but collections remain blocked while the invoice is disputed.",
-      },
-    ],
   };
 
   const paymentsQueue: PaymentQueueItem[] = [
@@ -1952,6 +2450,11 @@ export async function loadOperatorConsoleData(options?: {
     accountProfileSummaries,
     collectionsQueue,
   });
+  const invoiceDetail = buildInvoiceDetailFromRecords({
+    invoiceIndex,
+    customerIndex,
+    ...(options?.invoiceNumber ? { selectedInvoiceNumber: options.invoiceNumber } : {}),
+  });
   const customerProfile = buildCustomerProfileWorkspace({
     accountWorkspace,
     customerIndex,
@@ -1969,6 +2472,7 @@ export async function loadOperatorConsoleData(options?: {
     approvalsQueue,
     exceptionsQueue,
     cashApplicationQueue,
+    taskQueue,
   });
   const homeCollectionsMetrics = buildHomeCollectionsMetrics({
     aiFeedCount: aiFeed.length,
@@ -1986,7 +2490,7 @@ export async function loadOperatorConsoleData(options?: {
   });
   const homeAgingBalance = buildHomeAgingBalance(invoiceAgingAnalytics);
   const outreachIntelligence = buildSeedOutreachIntelligence();
-  const controlCenter = buildSeedControlCenter();
+  const controlCenter = getFallbackControlCenter(buildSeedControlCenter);
 
   const screenInventory: ScreenInventoryItem[] = [
     { screen: "Home / command center", source: "Pilot readiness API + seeds", status: "Implemented" },
@@ -2011,11 +2515,11 @@ export async function loadOperatorConsoleData(options?: {
   const seededTemplatePreview = options?.controlCenterSelectedTemplateId
     ? buildSeedControlCenterTemplatePreview(
         options.controlCenterSelectedTemplateId,
-        buildSeedControlCenter(),
+        getFallbackControlCenter(buildSeedControlCenter),
       )
     : undefined;
 
-  return {
+  const fallbackData: OperatorConsoleData = {
     generatedAt: snapshot.generatedAt,
     commandCenterSource: pilotReadiness.source,
     approvalsSource: approvals.source,
@@ -2058,6 +2562,7 @@ export async function loadOperatorConsoleData(options?: {
     integrations,
     emailSendingIdentities,
     emailInbox,
+    callInbox,
     dataSourceIntegrations: dataSourcesRuntime.integrations,
     dataSourceUploads: dataSourcesRuntime.uploads,
     automationRules,
@@ -2093,16 +2598,158 @@ export async function loadOperatorConsoleData(options?: {
     ...(inboxReplyError ? { inboxReplyError } : {}),
     ...(collectionsComposeStatus ? { collectionsComposeStatus } : {}),
     ...(collectionsComposeError ? { collectionsComposeError } : {}),
+    ...(collectionsComposeDraft ? { collectionsComposeDraft } : {}),
+    ...(taskComposeStatus ? { taskComposeStatus } : {}),
+    ...(taskComposeError ? { taskComposeError } : {}),
+    ...(taskInvoiceAttachmentStatus ? { taskInvoiceAttachmentStatus } : {}),
+    ...(taskInvoiceAttachmentError ? { taskInvoiceAttachmentError } : {}),
+    ...(taskComposeDraft ? { taskComposeDraft } : {}),
     ...(seededTemplatePreview ? { controlCenterTemplatePreview: seededTemplatePreview } : {}),
+  };
+
+  return isDemoDataEnabled() ? fallbackData : suppressDemoOperationalData(fallbackData);
+}
+
+function suppressDemoOperationalData(data: OperatorConsoleData): OperatorConsoleData {
+  const invoiceIndex =
+    data.invoiceIndex.source.kind === "seeded"
+      ? {
+          ...data.invoiceIndex,
+          source: {
+            kind: "live" as const,
+            label: "No live invoice data",
+            detail: "Demo invoice data is disabled for normal runtime.",
+          },
+          summary: {
+            totalInvoices: 0,
+            totalAmountCents: 0,
+            openAmountCents: 0,
+            openInvoiceCount: 0,
+            overdueInvoiceCount: 0,
+            disputedInvoiceCount: 0,
+            paidInvoiceCount: 0,
+            connectedProviderCount: 0,
+          },
+          providers: [],
+          statuses: [],
+          invoices: [],
+        }
+      : data.invoiceIndex;
+  const hasLiveInvoiceRows =
+    data.invoiceIndex.source.kind !== "seeded" && invoiceIndex.invoices.length > 0;
+
+  return {
+    ...data,
+    commandCenterSource: hasLiveInvoiceRows
+      ? data.commandCenterSource
+      : {
+          kind: "stub",
+          label: "No operational data loaded",
+          detail: "Demo data is disabled. Connect ERP, email, and task integrations to populate the console.",
+        },
+    invoiceIndex,
+    metrics: hasLiveInvoiceRows
+      ? data.metrics
+      : data.metrics.map((metric) => ({ ...metric, value: "0", detail: "No live operational data loaded." })),
+    actionSummaries: hasLiveInvoiceRows ? data.actionSummaries : [],
+    dashboardSummaryCards: hasLiveInvoiceRows ? data.dashboardSummaryCards : [],
+    homeTaskSummary: hasLiveInvoiceRows
+      ? data.homeTaskSummary
+      : {
+          ...data.homeTaskSummary,
+          views: data.homeTaskSummary.views.map((view) => ({ ...view, totalCount: 0, items: [] })),
+        },
+    homeCollectionsMetrics: hasLiveInvoiceRows
+      ? data.homeCollectionsMetrics
+      : {
+          ...data.homeCollectionsMetrics,
+          outreachActivityCount: 0,
+          collectedAmountCents: 0,
+          automatedTaskCount: 0,
+          totalCollectedAmountCents: 0,
+        },
+    homeSnapshotMetrics: hasLiveInvoiceRows
+      ? data.homeSnapshotMetrics
+      : {
+          ...data.homeSnapshotMetrics,
+          openInvoiceCount: 0,
+          outstandingBalanceCents: 0,
+          overdueInvoiceCount: 0,
+          overdueBalanceCents: 0,
+        },
+    homeAgingBalance: hasLiveInvoiceRows
+      ? data.homeAgingBalance
+      : {
+          ...data.homeAgingBalance,
+          buckets: data.homeAgingBalance.buckets.map((bucket) => ({
+            ...bucket,
+            openAmountCents: 0,
+            invoiceCount: 0,
+          })),
+        },
+    customerIndex: hasLiveInvoiceRows ? data.customerIndex : [],
+    accountProfileSummaries: hasLiveInvoiceRows ? data.accountProfileSummaries : [],
+    nextActionSummaryCards: hasLiveInvoiceRows ? data.nextActionSummaryCards : [],
+    collectionsQueue: hasLiveInvoiceRows ? data.collectionsQueue : [],
+    paymentsQueue: [],
+    loanDashboard: {
+      ...data.loanDashboard,
+      totalCommittedLimitCents: 0,
+      totalOutstandingCents: 0,
+      totalAvailableCents: 0,
+      dueThisWeekCents: 0,
+      overdueCents: 0,
+      facilityCount: 0,
+      facilitiesInArrearsCount: 0,
+      alertCount: 0,
+      taskCount: 0,
+    },
+    creditFacilities: [],
+    loanRepaymentHistory: [],
+    loanAlerts: [],
+    loanTasks: [],
+    taskQueue: hasLiveInvoiceRows ? data.taskQueue : [],
+    exceptionsQueue: [],
+    approvalsQueue: [],
+    aiFeed: [],
+    exceptionBreakdown: [],
+    screenStates: {
+      ...data.screenStates,
+      approvalsEmpty: {
+        kind: "empty",
+        title: "No live approvals",
+        message: "Demo approvals are hidden in normal runtime.",
+      },
+    },
+  };
+}
+
+function parseCollectionsComposeAttachmentDraft(value: string): CollectionsComposeAttachmentDraft | undefined {
+  const [kind, spec, label] = value.split("|");
+  if ((kind !== "invoice" && kind !== "soa") || !spec || !label) {
+    return undefined;
+  }
+  return {
+    kind,
+    spec,
+    label,
   };
 }
 
 async function loadOperatorConsoleFromApi(options?: {
   page?: string | undefined;
+  customerId?: string | undefined;
   inboxSenderIdentityId?: string | undefined;
   inboxThreadId?: string | undefined;
   controlCenterSelectedTemplateId?: string | undefined;
+  accessControlSelectedUserId?: string | undefined;
+  collectionsTab?: "email" | "call-inbox" | undefined;
+  collectionsCallFilters?: CallInboxFilters | undefined;
 }): Promise<OperatorConsoleData | undefined> {
+  if (isVitestRuntime() && !readEnv("O2C_API_BASE_URL")) {
+    return undefined;
+  }
+
   const apiBaseUrl = resolveApiBaseUrl();
   const runtimeFetch = getRuntimeFetch();
   const dataSourcesRuntime = listDataSourceRuntimeSnapshot();
@@ -2140,9 +2787,26 @@ async function loadOperatorConsoleFromApi(options?: {
       collectionsQueue: body.collectionsQueue ?? [],
       promisesDueToday: 2,
     });
+    const fallbackCustomerIndex = buildCustomerIndex({
+      accountProfileSummaries,
+      collectionsQueue: body.collectionsQueue ?? [],
+    });
+    const liveCustomerProfiles = await loadLiveCustomerProfiles({
+      apiBaseUrl,
+      runtimeFetch,
+      invoiceIndex,
+      ...(options?.customerId ? { customerId: options.customerId } : {}),
+    });
 
     const emailSendingIdentities = await loadEmailSendingIdentities();
-    const emailInbox = shouldLoadCollectionsInbox(options?.page)
+    const accessControlAdmin = shouldLoadAccessControlAdmin(options?.page)
+      ? await loadAccessControlAdmin({
+          ...(options?.accessControlSelectedUserId
+            ? { selectedUserId: options.accessControlSelectedUserId }
+            : {}),
+        })
+      : undefined;
+    const emailInbox = shouldLoadCollectionsInbox(options?.page, options?.collectionsTab)
       ? await loadEmailInbox({
           identities: emailSendingIdentities,
           ...(options?.inboxSenderIdentityId
@@ -2156,6 +2820,9 @@ async function loadOperatorConsoleFromApi(options?: {
             ? { selectedSenderIdentityId: options.inboxSenderIdentityId }
             : {}),
         });
+    const callInbox = shouldLoadCallInbox(options?.page, options?.collectionsTab)
+      ? await loadCallInbox(options?.collectionsCallFilters)
+      : buildEmptyCallInbox();
     let controlCenterTemplatePreview: ControlCenterTemplatePreview | undefined;
     if (options?.controlCenterSelectedTemplateId) {
       const previewResponse = await runtimeFetch(
@@ -2175,10 +2842,18 @@ async function loadOperatorConsoleFromApi(options?: {
     return {
       ...body,
       invoiceIndex,
-      accountProfileSummaries,
+      accountProfileSummaries: liveCustomerProfiles?.accountProfileSummaries ?? accountProfileSummaries,
+      customerIndex:
+        liveCustomerProfiles?.customerIndex ??
+        (body.customerIndex && body.customerIndex.length > 0 ? body.customerIndex : fallbackCustomerIndex),
+      ...(liveCustomerProfiles?.customerProfile ? { customerProfile: liveCustomerProfiles.customerProfile } : {}),
+      ...(liveCustomerProfiles?.liveCustomerProfileDetail
+        ? { liveCustomerProfileDetail: liveCustomerProfiles.liveCustomerProfileDetail }
+        : {}),
       screenInventory,
+      callInbox,
       outreachIntelligence: body.outreachIntelligence ?? buildSeedOutreachIntelligence(),
-      controlCenter: body.controlCenter ?? buildSeedControlCenter(),
+      controlCenter: body.controlCenter ?? getFallbackControlCenter(buildSeedControlCenter),
       loanDashboard:
         body.loanDashboard ??
         ({
@@ -2316,6 +2991,7 @@ async function loadOperatorConsoleFromApi(options?: {
         ] satisfies TaskQueueItem[]),
       emailSendingIdentities,
       emailInbox,
+      ...(accessControlAdmin ? { accessControlAdmin } : {}),
       ...(controlCenterTemplatePreview ? { controlCenterTemplatePreview } : {}),
       dataSourceIntegrations: dataSourcesRuntime.integrations,
       dataSourceUploads: dataSourcesRuntime.uploads,
@@ -2323,6 +2999,256 @@ async function loadOperatorConsoleFromApi(options?: {
   } catch {
     return undefined;
   }
+}
+
+async function loadAccessControlAdmin(options?: {
+  selectedUserId?: string;
+}): Promise<AccessControlConsoleData | undefined> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const runtimeFetch = getRuntimeFetch();
+
+  if (!apiBaseUrl || !runtimeFetch) {
+    return buildSeedAccessControlAdmin(options);
+  }
+
+  try {
+    const target = new URL(joinUrl(apiBaseUrl, "/v1/admin/access-control/console"));
+    if (options?.selectedUserId) {
+      target.searchParams.set("selectedUserId", options.selectedUserId);
+    }
+    const response = await runtimeFetch(target.toString(), {
+      headers: {
+        "x-principal-id": "user_platform_admin",
+      },
+    });
+    if (!response.ok) {
+      return buildSeedAccessControlAdmin(options);
+    }
+    return (await response.json()) as AccessControlConsoleData;
+  } catch {
+    return buildSeedAccessControlAdmin(options);
+  }
+}
+
+function buildSeedAccessControlAdmin(options?: {
+  selectedUserId?: string;
+}): AccessControlConsoleData {
+  const users: AccessControlConsoleData["users"] = [
+    {
+      id: "user_platform_admin",
+      tenantId: "default",
+      email: "platform.admin@yield.example",
+      fullName: "Pat Reyes",
+      status: "active",
+      primaryRole: "Platform Admin",
+      roleKeys: ["platform_admin"],
+      scopeSummary: "Tenant-wide",
+      lastActiveAt: "2026-04-20T08:00:00.000Z",
+      approvalAuthoritySummary: "No explicit approval authority",
+    },
+    {
+      id: "user_finance_head",
+      tenantId: "default",
+      email: "finance.head@yield.example",
+      fullName: "Alicia Santos",
+      status: "active",
+      primaryRole: "Finance Head",
+      roleKeys: ["finance_head"],
+      scopeSummary: "Tenant-wide",
+      lastActiveAt: "2026-04-20T10:00:00.000Z",
+      approvalAuthoritySummary: "cash_application",
+    },
+    {
+      id: "user_sales_manager",
+      tenantId: "default",
+      email: "sales.manager@yield.example",
+      fullName: "Miguel Cruz",
+      status: "active",
+      primaryRole: "Sales Manager",
+      roleKeys: ["commercial_head"],
+      scopeSummary: "Tenant-wide",
+      lastActiveAt: "2026-04-20T07:00:00.000Z",
+      approvalAuthoritySummary: "outreach_exception",
+    },
+    {
+      id: "user_ar_rep",
+      tenantId: "default",
+      email: "ar.rep@yield.example",
+      fullName: "Jamie Lim",
+      status: "active",
+      primaryRole: "AR Rep",
+      roleKeys: ["ar_rep"],
+      scopeSummary: "billing account:billing_seed_1",
+      lastActiveAt: "2026-04-20T11:00:00.000Z",
+      approvalAuthoritySummary: "No explicit approval authority",
+    },
+    {
+      id: "user_collections_rep",
+      tenantId: "default",
+      email: "collections.rep@yield.example",
+      fullName: "Tricia Dela Cruz",
+      status: "invited",
+      primaryRole: "Collections Rep",
+      roleKeys: ["collections_rep"],
+      scopeSummary: "team:team_ncr",
+      approvalAuthoritySummary: "No explicit approval authority",
+    },
+  ];
+
+  const selectedUser =
+    users.find((user) => user.id === options?.selectedUserId) ??
+    users[0];
+
+  return {
+    users,
+    ...(selectedUser
+      ? {
+          selectedUser: {
+            id: selectedUser.id,
+            tenantId: selectedUser.tenantId,
+            email: selectedUser.email,
+            fullName: selectedUser.fullName,
+            status: selectedUser.status,
+            ...(selectedUser.lastActiveAt ? { lastActiveAt: selectedUser.lastActiveAt } : {}),
+            assignments: [
+              {
+                id: `assignment_${selectedUser.id}`,
+                roleKey: selectedUser.roleKeys[0] ?? "platform_admin",
+                roleLabel: selectedUser.primaryRole ?? "Platform Admin",
+                scopeType:
+                  selectedUser.scopeSummary === "Tenant-wide"
+                    ? "tenant"
+                    : selectedUser.scopeSummary.startsWith("team:")
+                      ? "team"
+                      : "billing_account",
+                ...(selectedUser.scopeSummary === "Tenant-wide"
+                  ? {}
+                  : { scopeId: selectedUser.scopeSummary.split(":").slice(1).join(":") }),
+                grantedAt: "2026-04-20T00:00:00.000Z",
+                grantedByUserId: "system",
+              },
+            ],
+            approvalAuthorities:
+              selectedUser.approvalAuthoritySummary !== "No explicit approval authority"
+                ? [
+                    {
+                      id: `authority_${selectedUser.id}`,
+                      approvalType: selectedUser.approvalAuthoritySummary,
+                      scopeType: "tenant",
+                      grantedAt: "2026-04-20T00:00:00.000Z",
+                      grantedByUserId: "system",
+                      source: "role",
+                    },
+                  ]
+                : [],
+            recentAuditEvents: [
+              {
+                id: `audit_${selectedUser.id}`,
+                occurredAt: "2026-04-20T00:00:00.000Z",
+                action: "access_control.assignment.granted",
+                actorId: "system",
+                actorRole: "system",
+                entityType: "user_role_assignment",
+                entityId: `assignment_${selectedUser.id}`,
+                metadata: {},
+              },
+            ],
+          },
+        }
+      : {}),
+    roles: [
+      {
+        key: "commercial_head",
+        label: "Sales Manager",
+        description: "Commercial leadership role with workflow and template configuration authority.",
+        isSystemRole: true,
+        assignedUserCount: 1,
+        permissions: [],
+        capabilitySummary: {
+          view: ["accounts.read", "invoices.read", "collections.read"],
+          edit: ["customers.notes.write"],
+          approve: ["approvals.decide_outreach"],
+          configure: ["collections.templates.write", "collections.workflow_strategy.write"],
+        },
+      },
+      {
+        key: "finance_head",
+        label: "Finance Head",
+        description: "Finance leadership role with finance-sensitive approval authority.",
+        isSystemRole: true,
+        assignedUserCount: 1,
+        permissions: [],
+        capabilitySummary: {
+          view: ["payments.read", "remittances.read", "audit.read"],
+          edit: ["payments.review", "remittances.resolve"],
+          approve: ["approvals.decide_cash_application", "approvals.decide_exception_resolution"],
+          configure: ["tenant_config.manage"],
+        },
+      },
+      {
+        key: "ar_rep",
+        label: "AR Rep",
+        description: "Scoped receivables operator role.",
+        isSystemRole: true,
+        assignedUserCount: 1,
+        permissions: [],
+        capabilitySummary: {
+          view: ["accounts.read_scoped", "invoices.read_scoped"],
+          edit: ["promises_to_pay.write", "customers.notes.write"],
+          approve: [],
+          configure: [],
+        },
+      },
+      {
+        key: "collections_rep",
+        label: "Collections Rep",
+        description: "Scoped customer-facing collections role.",
+        isSystemRole: true,
+        assignedUserCount: 1,
+        permissions: [],
+        capabilitySummary: {
+          view: ["collections.read", "collections.work_queue.read"],
+          edit: ["collections.outreach.draft", "promises_to_pay.write"],
+          approve: [],
+          configure: [],
+        },
+      },
+      {
+        key: "platform_admin",
+        label: "Platform Admin",
+        description: "Tenant-wide admin for users, roles, and configuration.",
+        isSystemRole: true,
+        assignedUserCount: 1,
+        permissions: [],
+        capabilitySummary: {
+          view: ["users.read", "roles.read"],
+          edit: ["users.manage", "roles.manage"],
+          approve: ["user_role_admin"],
+          configure: ["tenant_config.manage", "integrations.manage"],
+        },
+      },
+    ],
+    permissions: [],
+    auditEvents: [
+      {
+        id: "audit_seed_1",
+        occurredAt: "2026-04-20T00:00:00.000Z",
+        action: "access_control.user.invited",
+        actorId: "system",
+        actorRole: "system",
+        entityType: "access_control_user",
+        entityId: "user_collections_rep",
+        metadata: {},
+      },
+    ],
+    currentUserAccess: {
+      userId: "user_platform_admin",
+      roleKeys: ["platform_admin"],
+      permissionKeys: ["users.manage", "roles.manage", "tenant_config.manage"],
+      scopedPermissions: [],
+      approvalAuthorities: [],
+    },
+  };
 }
 
 function buildSeedControlCenterTemplatePreview(
@@ -2391,8 +3317,7 @@ function buildLocalControlCenterTemplatePreview(
       : Math.max(invoice.amountCents - (invoice.disputedAmountCents ?? 0), 0);
   const overdueInvoices = eligibleInvoices.filter((invoice) => invoice.dueDate && invoice.dueDate < input.asOfDate);
   const upcomingInvoices = eligibleInvoices.filter((invoice) => invoice.dueDate && invoice.dueDate >= input.asOfDate);
-  const formatMoney = (cents: number, currency: string) =>
-    `${currency} ${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const formatMoney = (cents: number, currency: string) => formatAmountByCurrency(cents, currency);
   const formatDate = (value?: string) =>
     value
       ? new Date(`${value}T00:00:00.000Z`).toLocaleDateString("en-US", {
@@ -2818,8 +3743,362 @@ async function loadEmailSendingIdentities(): Promise<EmailSendingIdentityItem[]>
   }
 }
 
-function shouldLoadCollectionsInbox(page?: string) {
-  return page === "inbox" || page === "collections";
+function shouldLoadCollectionsInbox(page?: string, collectionsTab?: "email" | "call-inbox") {
+  return page === "inbox" || (page === "collections" && collectionsTab !== "call-inbox");
+}
+
+function shouldLoadCallInbox(page?: string, collectionsTab?: "email" | "call-inbox") {
+  return page === "customers" || (page === "collections" && collectionsTab === "call-inbox");
+}
+
+function isDemoDataEnabled() {
+  const demoDataOverride = process.env.ENABLE_DEMO_DATA?.trim().toLowerCase();
+  if (demoDataOverride !== undefined && ["false", "0", "no", "off"].includes(demoDataOverride)) {
+    return false;
+  }
+  if (demoDataOverride !== undefined && ["true", "1", "yes", "on"].includes(demoDataOverride)) {
+    return true;
+  }
+  try {
+    const env = loadEnv();
+    return env.ENABLE_DEMO_DATA === true || env.NODE_ENV === "test" || isVitestRuntime();
+  } catch {
+    return process.env.ENABLE_DEMO_DATA === "true" || process.env.NODE_ENV === "test" || isVitestRuntime();
+  }
+}
+
+function isVitestRuntime() {
+  return process.env.VITEST === "true" || process.argv.some((arg) => arg.includes("vitest"));
+}
+
+function shouldLoadAccessControlAdmin(page?: string) {
+  return page === "admin-users" || page === "admin-roles";
+}
+
+async function loadCallInbox(filters: CallInboxFilters = {}): Promise<CallInboxData> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const runtimeFetch = getRuntimeFetch();
+
+  if (!apiBaseUrl || !runtimeFetch) {
+    return isDemoDataEnabled() ? buildSeedCallInbox(filters) : buildEmptyCallInbox(filters);
+  }
+
+  try {
+    const listUrl = new URL(joinUrl(apiBaseUrl, "/v1/collections/call-inbox"));
+    appendCallInboxFilters(listUrl.searchParams, filters);
+    const listResponse = await runtimeFetch(listUrl.toString());
+    if (!listResponse.ok) {
+      return isDemoDataEnabled() ? buildSeedCallInbox(filters) : buildEmptyCallInbox(filters);
+    }
+
+    const list = (await listResponse.json()) as Partial<CallInboxListResponse>;
+    if (!Array.isArray(list.items)) {
+      return isDemoDataEnabled() ? buildSeedCallInbox(filters) : buildEmptyCallInbox(filters);
+    }
+
+    const generatedAt = typeof list.generatedAt === "string" ? list.generatedAt : new Date().toISOString();
+    const details = await Promise.all(
+      list.items.slice(0, 30).map(async (item) => {
+        try {
+          const detailResponse = await runtimeFetch(
+            joinUrl(apiBaseUrl, `/v1/collections/call-inbox/${encodeURIComponent(item.id)}`),
+          );
+          if (!detailResponse.ok) {
+            return undefined;
+          }
+          const detail = (await detailResponse.json()) as Partial<CallInboxDetailResponse>;
+          return detail.call;
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    const detailById = new Map(
+      details
+        .filter((call): call is CallInboxCallRecord => Boolean(call?.id))
+        .map((call) => [call.id, call]),
+    );
+    const calls = list.items.map((item) => detailById.get(item.id) ?? callRecordFromListItem(item, generatedAt));
+
+    return {
+      generatedAt,
+      source: list.source
+        ? {
+            kind: list.source.kind === "empty" ? "stub" : list.source.kind,
+            label: list.source.label,
+            detail: list.source.detail,
+          }
+        : {
+            kind: "live",
+            label: "Call inbox API",
+            detail: "Loaded from normalized call inbox read models.",
+          },
+      total: typeof list.total === "number" ? list.total : list.items.length,
+      filters: list.filters ?? filters,
+      items: list.items,
+      calls,
+      exportPath: buildCallInboxExportPath(list.filters ?? filters),
+    };
+  } catch {
+    return isDemoDataEnabled() ? buildSeedCallInbox(filters) : buildEmptyCallInbox(filters);
+  }
+}
+
+function buildEmptyCallInbox(filters: CallInboxFilters = {}): CallInboxData {
+  return {
+    generatedAt: new Date().toISOString(),
+    source: {
+      kind: "stub",
+      label: "Call inbox not loaded",
+      detail: "Call records are loaded only for the Collections workspace.",
+    },
+    total: 0,
+    filters,
+    items: [],
+    calls: [],
+    exportPath: buildCallInboxExportPath(filters),
+  };
+}
+
+function buildSeedCallInbox(filters: CallInboxFilters = {}): CallInboxData {
+  const now = new Date();
+  const startedAt = new Date(now.getTime() - 13 * 60_000).toISOString();
+  const endedAt = new Date(new Date(startedAt).getTime() + 56_000).toISOString();
+  const record: CallInboxCallRecord = {
+    id: "seed-call-inbox-perkins",
+    tenantId: "default",
+    provider: "retell",
+    providerCallId: "retell_seed_perkins_001",
+    communicationAttemptId: "comm_seed_perkins_001",
+    preCallPlanId: "precall_seed_perkins_001",
+    parentAccountId: "parent-perkins",
+    billingAccountId: "billing-perkins",
+    branchId: "branch-west",
+    contactId: "contact-perkins-ap",
+    customerName: "Perkins, Wong and Evans",
+    customerPhone: "+1 716 860 9532",
+    fromNumber: "+1 213 561 6499",
+    toNumber: "+1 716 860 9532",
+    direction: "outbound",
+    status: "completed",
+    providerStatus: "ended",
+    disposition: "connected",
+    startedAt,
+    endedAt,
+    durationSeconds: 56,
+    voicemail: false,
+    sentiment: "positive",
+    classifications: ["Payment promise", "Support request"],
+    workflowId: "workflow-overdue-outbound",
+    workflowName: "Overdue collections",
+    requestedBy: "Matthew Breckon",
+    approverName: "Juan Cruz",
+    invoiceRefs: [
+      "PER-FS6667",
+      "PER-DFD11C",
+      "PER-51AA18",
+      "PER-64B34F",
+      "PER-0F3110",
+      "PER-0FAFB",
+      "PER-FCB451",
+    ].map((invoiceNumber) => ({
+      invoiceNumber,
+      billingAccountId: "billing-perkins",
+      branchId: "branch-west",
+    })),
+    summary:
+      "The user inquired about overdue invoices and requested that the agent send them via email along with a payment link. The agent confirmed the request and noted the user's intention to pay two out of three invoices by check the following day. The user also asked for a Spanish translation, which the agent could not provide.",
+    transcriptSegments: [
+      { speaker: "agent", text: "Hi there! This is Cino, an AI assistant from Yield. Do you have a moment to chat about your account?" },
+      { speaker: "customer", text: "I see. Well, yeah, which invoices do I have that are overdue?" },
+      { speaker: "agent", text: "Alright, so you've got 3 overdue invoices. Here are their numbers: PF-E..." },
+      { speaker: "customer", text: "Actually can you just send those invoices email? Because that'll be easier. And then also, can you send me a payment link?" },
+      { speaker: "customer", text: "Because I plan on paying two out of three tomorrow." },
+      { speaker: "customer", text: "Check." },
+      { speaker: "agent", text: "Got it. I'll send over the overdue invoices to your email along with the payment link. You mentioned you'll be paying two out of the three tomorrow by check." },
+      { speaker: "customer", text: "Yeah." },
+      { speaker: "customer", text: "You repeat that in Spanish, please?" },
+      { speaker: "agent", text: "Oh, I wish I could help with that, but I don't speak Spanish. I can definitely send the invoices and payment link to your email though." },
+    ],
+    taskRefs: [
+      {
+        id: "task-seed-payment-promises",
+        title: "Payment promises",
+        status: "open",
+        taskType: "promise_to_pay",
+        ownerTeam: "collections",
+      },
+      {
+        id: "task-seed-send-documents",
+        title: "Send invoice copies and payment link",
+        status: "open",
+        taskType: "support_request",
+        ownerTeam: "collections",
+      },
+    ],
+    openTasksCount: 2,
+    metadata: {
+      source: "seeded_call_inbox",
+      providerEvent: "call_analyzed",
+    },
+    createdAt: startedAt,
+    updatedAt: endedAt,
+  };
+
+  const matchesFilters = callInboxListItemMatchesFilters(callInboxListItemFromRecord(record), filters);
+  const item = callInboxListItemFromRecord(record);
+  const items = matchesFilters ? [item] : [];
+  const calls = matchesFilters ? [record] : [];
+
+  return {
+    generatedAt: now.toISOString(),
+    source: {
+      kind: "seeded",
+      label: "Seeded Retell call inbox",
+      detail: "Demo call record shown when the live call inbox API is unavailable.",
+    },
+    total: items.length,
+    filters,
+    items,
+    calls,
+    exportPath: buildCallInboxExportPath(filters),
+  };
+}
+
+function appendCallInboxFilters(searchParams: URLSearchParams, filters: CallInboxFilters): void {
+  if (filters.direction) {
+    searchParams.set("direction", filters.direction);
+  }
+  if (filters.status) {
+    searchParams.set("status", filters.status);
+  }
+  if (filters.voicemail !== undefined) {
+    searchParams.set("voicemail", filters.voicemail ? "true" : "false");
+  }
+  if (filters.customer?.trim()) {
+    searchParams.set("customer", filters.customer.trim());
+  }
+  if (filters.classification?.trim()) {
+    searchParams.set("classification", filters.classification.trim());
+  }
+  if (filters.workflow?.trim()) {
+    searchParams.set("workflow", filters.workflow.trim());
+  }
+  if (filters.dateFrom?.trim()) {
+    searchParams.set("dateFrom", filters.dateFrom.trim());
+  }
+  if (filters.dateTo?.trim()) {
+    searchParams.set("dateTo", filters.dateTo.trim());
+  }
+}
+
+function buildCallInboxExportPath(filters: CallInboxFilters): string {
+  const searchParams = new URLSearchParams();
+  appendCallInboxFilters(searchParams, filters);
+  const query = searchParams.toString();
+  return query ? `/collections/call-inbox/export?${query}` : "/collections/call-inbox/export";
+}
+
+function callInboxListItemMatchesFilters(item: CallInboxListItem, filters: CallInboxFilters): boolean {
+  const customerFilter = filters.customer?.trim().toLowerCase();
+  const classificationFilter = filters.classification?.trim().toLowerCase();
+  const workflowFilter = filters.workflow?.trim().toLowerCase();
+  if (filters.direction && item.direction !== filters.direction) {
+    return false;
+  }
+  if (filters.status && item.status !== filters.status) {
+    return false;
+  }
+  if (filters.voicemail !== undefined && item.voicemail !== filters.voicemail) {
+    return false;
+  }
+  if (
+    customerFilter &&
+    !item.customerName.toLowerCase().includes(customerFilter) &&
+    !item.billingAccountId?.toLowerCase().includes(customerFilter)
+  ) {
+    return false;
+  }
+  if (
+    classificationFilter &&
+    !item.classifications.some((classification) =>
+      classification.toLowerCase().includes(classificationFilter),
+    )
+  ) {
+    return false;
+  }
+  if (workflowFilter && !item.workflowName?.toLowerCase().includes(workflowFilter)) {
+    return false;
+  }
+  const startedAt = new Date(item.startedAt).getTime();
+  if (filters.dateFrom && startedAt < new Date(`${filters.dateFrom}T00:00:00+08:00`).getTime()) {
+    return false;
+  }
+  if (filters.dateTo && startedAt > new Date(`${filters.dateTo}T23:59:59.999+08:00`).getTime()) {
+    return false;
+  }
+  return true;
+}
+
+function callRecordFromListItem(item: CallInboxListItem, generatedAt: string): CallInboxCallRecord {
+  return {
+    id: item.id,
+    tenantId: "default",
+    provider: "retell",
+    providerCallId: item.providerCallId,
+    customerName: item.customerName,
+    ...(item.customerPhone ? { customerPhone: item.customerPhone } : {}),
+    ...(item.billingAccountId ? { billingAccountId: item.billingAccountId } : {}),
+    ...(item.branchId ? { branchId: item.branchId } : {}),
+    direction: item.direction,
+    status: item.status,
+    ...(item.providerStatus ? { providerStatus: item.providerStatus } : {}),
+    startedAt: item.startedAt,
+    ...(item.endedAt ? { endedAt: item.endedAt } : {}),
+    ...(item.durationSeconds !== undefined ? { durationSeconds: item.durationSeconds } : {}),
+    voicemail: item.voicemail,
+    sentiment: item.sentiment,
+    classifications: item.classifications,
+    ...(item.workflowName ? { workflowName: item.workflowName } : {}),
+    ...(item.requestedBy ? { requestedBy: item.requestedBy } : {}),
+    ...(item.approverName ? { approverName: item.approverName } : {}),
+    invoiceRefs: item.invoiceNumbers.map((invoiceNumber) => ({
+      invoiceNumber,
+      ...(item.billingAccountId ? { billingAccountId: item.billingAccountId } : {}),
+      ...(item.branchId ? { branchId: item.branchId } : {}),
+    })),
+    transcriptSegments: [],
+    taskRefs: [],
+    openTasksCount: item.openTasksCount,
+    metadata: {},
+    createdAt: generatedAt,
+    updatedAt: generatedAt,
+  };
+}
+
+function callInboxListItemFromRecord(record: CallInboxCallRecord): CallInboxListItem {
+  return {
+    id: record.id,
+    providerCallId: record.providerCallId,
+    customerName: record.customerName,
+    ...(record.customerPhone ? { customerPhone: record.customerPhone } : {}),
+    ...(record.billingAccountId ? { billingAccountId: record.billingAccountId } : {}),
+    ...(record.branchId ? { branchId: record.branchId } : {}),
+    direction: record.direction,
+    status: record.status,
+    ...(record.providerStatus ? { providerStatus: record.providerStatus } : {}),
+    startedAt: record.startedAt,
+    ...(record.endedAt ? { endedAt: record.endedAt } : {}),
+    ...(record.durationSeconds !== undefined ? { durationSeconds: record.durationSeconds } : {}),
+    voicemail: record.voicemail,
+    sentiment: record.sentiment,
+    classifications: [...record.classifications],
+    ...(record.workflowName ? { workflowName: record.workflowName } : {}),
+    ...(record.requestedBy ? { requestedBy: record.requestedBy } : {}),
+    ...(record.approverName ? { approverName: record.approverName } : {}),
+    invoiceNumbers: record.invoiceRefs.map((invoice) => invoice.invoiceNumber),
+    openTasksCount: record.openTasksCount,
+  };
 }
 
 async function loadEmailInbox(input: {
@@ -2935,6 +4214,7 @@ function toEmailInboxMessageItem(input: Record<string, unknown>, index: number):
     ...(typeof input.fromName === "string" ? { fromName: input.fromName } : {}),
     ...(typeof input.toEmail === "string" ? { toEmail: input.toEmail } : {}),
     ...(typeof input.snippet === "string" ? { snippet: input.snippet } : {}),
+    ...(typeof input.bodyText === "string" ? { bodyText: input.bodyText } : {}),
     ...(typeof input.receivedAt === "string" ? { receivedAt: input.receivedAt } : {}),
     labelIds: Array.isArray(input.labelIds)
       ? input.labelIds.filter((value): value is string => typeof value === "string")
@@ -3057,6 +4337,334 @@ async function loadInvoiceIndex(): Promise<InvoiceIndexResponse> {
   } catch {
     return mergeRuntimeInvoicesIntoIndex(buildSeedInvoiceIndex(), runtimeImports);
   }
+}
+
+async function loadLiveCustomerProfiles(input: {
+  apiBaseUrl: string;
+  runtimeFetch: NonNullable<ReturnType<typeof getRuntimeFetch>>;
+  invoiceIndex: InvoiceIndexResponse;
+  customerId?: string;
+}) {
+  try {
+    const indexResponse = await input.runtimeFetch(joinUrl(input.apiBaseUrl, "/v1/customer_profiles/index"));
+    if (!indexResponse.ok) {
+      return undefined;
+    }
+
+    const indexBody = (await indexResponse.json()) as Partial<LiveCustomerProfileIndexApiResponse>;
+    if (!Array.isArray(indexBody.items) || indexBody.items.length === 0) {
+      return undefined;
+    }
+
+    const customerIndex = indexBody.items.map(mapLiveCustomerIndexItem);
+    const accountProfileSummaries = indexBody.items.map(mapLiveAccountProfileSummary);
+    const selectedProfileId =
+      input.customerId && customerIndex.some((item) => item.profileId === input.customerId || item.billingAccountId === input.customerId)
+        ? customerIndex.find((item) => item.profileId === input.customerId || item.billingAccountId === input.customerId)?.profileId
+        : customerIndex[0]?.profileId;
+
+    if (!selectedProfileId) {
+      return {
+        customerIndex,
+        accountProfileSummaries,
+      };
+    }
+
+    const [detailResponse, taskResponse] = await Promise.all([
+      input.runtimeFetch(joinUrl(input.apiBaseUrl, `/v1/customer_profiles/${encodeURIComponent(selectedProfileId)}`)),
+      input.runtimeFetch(joinUrl(input.apiBaseUrl, `/v1/customer_profiles/${encodeURIComponent(selectedProfileId)}/tasks`)),
+    ]);
+
+    if (!detailResponse.ok) {
+      return {
+        customerIndex,
+        accountProfileSummaries,
+      };
+    }
+
+    const detailBody = (await detailResponse.json()) as Partial<LiveCustomerProfileUnifiedResponse>;
+    if (!detailBody.customerProfile) {
+      return {
+        customerIndex,
+        accountProfileSummaries,
+      };
+    }
+
+    const taskBody = taskResponse.ok
+      ? ((await taskResponse.json()) as Partial<LiveCustomerProfileTasksApiResponse>)
+      : undefined;
+    const liveDetail = detailBody as LiveCustomerProfileUnifiedResponse & Pick<
+      LiveCustomerProfileUnifiedResponse,
+      "customerProfile"
+    >;
+
+    return {
+      customerIndex,
+      accountProfileSummaries,
+      customerProfile: mapLiveCustomerWorkspace(liveDetail),
+      liveCustomerProfileDetail: mapLiveCustomerDetail(liveDetail, taskBody, input.invoiceIndex),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function mapLiveCustomerIndexItem(item: LiveCustomerProfileIndexApiItem): CustomerIndexItem {
+  return {
+    profileId: item.profileId,
+    canonicalName: item.canonicalName,
+    status: item.status,
+    accountTier: item.accountTier,
+    ...(item.parentAccountName ? { parentAccountName: item.parentAccountName } : {}),
+    ...(item.billingAccountId ? { billingAccountId: item.billingAccountId } : {}),
+    ...(item.billingAccountName ? { billingAccountName: item.billingAccountName } : {}),
+    branchNames: item.branchNames,
+    ...(item.primaryContactEmail ? { primaryContactEmail: item.primaryContactEmail } : {}),
+    openAmount: formatCustomerCurrency(item.openAmountCents),
+    overdueAmount: formatCustomerCurrency(item.overdueAmountCents),
+    collectibleAmount: formatCustomerCurrency(item.collectibleAmountCents),
+    disputedAmount: formatCustomerCurrency(item.disputedAmountCents),
+    openInvoiceCount: item.openInvoiceCount,
+    taskCount: item.taskCount,
+    completenessScore: item.completenessScore,
+    nextAction: item.nextAction,
+    hasPendingReview: item.hasPendingReview,
+    tabs: item.tabs,
+  };
+}
+
+function mapLiveAccountProfileSummary(item: LiveCustomerProfileIndexApiItem): AccountProfileSummary {
+  return {
+    billingAccountId: item.billingAccountId ?? item.profileId,
+    accountName: item.billingAccountName ?? item.canonicalName,
+    ...(item.parentAccountName ? { parentAccountName: item.parentAccountName } : {}),
+    accountTier: item.accountTier,
+    openAmount: formatCustomerCurrency(item.openAmountCents),
+    overdueAmount: formatCustomerCurrency(item.overdueAmountCents),
+    collectibleAmount: formatCustomerCurrency(item.collectibleAmountCents),
+    disputedAmount: formatCustomerCurrency(item.disputedAmountCents),
+    openInvoiceCount: item.openInvoiceCount,
+    promisesDueToday: 0,
+    nextAction: item.nextAction,
+    linkedStatus: item.hasPendingReview ? "Pending review" : "Profile synced",
+  };
+}
+
+function mapLiveCustomerWorkspace(
+  detail: Pick<LiveCustomerProfileUnifiedResponse, "customerProfile">,
+): CustomerProfileWorkspaceData {
+  const profile = detail.customerProfile;
+  const primaryContact = profile.contactSummary.primaryContact;
+
+  return {
+    profileId: profile.profileId,
+    overviewSummary: profile.overviewSummary,
+    contactSummary: {
+      totalContacts: profile.contactSummary.totalContacts,
+      verifiedContacts: profile.contactSummary.verifiedContacts,
+      autoSendEligibleContacts: profile.contactSummary.autoSendEligibleContacts,
+      sharedMailboxContacts: profile.contactSummary.sharedMailboxContacts,
+      hasVerifiedPrimaryContact: profile.contactSummary.hasVerifiedPrimaryContact,
+      ...(primaryContact ? {
+        primaryContactName: primaryContact.fullName,
+        primaryContactEmail: primaryContact.email,
+        primaryContactPhone: primaryContact.phone,
+        primaryContactRole: primaryContact.role,
+      } : {}),
+    },
+    insightSummary: profile.insightSummary,
+    financialSummary: {
+      currency: profile.financialSummary.currency,
+      openAmount: formatCustomerCurrency(profile.financialSummary.openAmountCents),
+      overdueAmount: formatCustomerCurrency(profile.financialSummary.overdueAmountCents),
+      collectibleAmount: formatCustomerCurrency(profile.financialSummary.collectibleAmountCents),
+      disputedAmount: formatCustomerCurrency(profile.financialSummary.disputedAmountCents),
+      unappliedCashAmount: formatCustomerCurrency(profile.financialSummary.unappliedCashAmountCents),
+      openInvoiceCount: profile.financialSummary.openInvoiceCount,
+      overdueInvoiceCount: profile.financialSummary.overdueInvoiceCount,
+      disputedInvoiceCount: profile.financialSummary.disputedInvoiceCount,
+      paymentCount: profile.financialSummary.paymentCount,
+      remittanceCount: profile.financialSummary.remittanceCount,
+      ...(profile.financialSummary.lastPaymentAt ? { lastPaymentAt: profile.financialSummary.lastPaymentAt } : {}),
+    },
+    completenessCheck: profile.completenessCheck,
+    notes: profile.notes,
+    creditProfile: {
+      riskLevel: profile.creditProfile.riskLevel,
+      hasCreditHold: profile.creditProfile.hasCreditHold,
+      hasOverdueBalance: profile.creditProfile.hasOverdueBalance,
+      ...(typeof profile.creditProfile.internalCreditLimitCents === "number"
+        ? { internalCreditLimit: formatCustomerCurrency(profile.creditProfile.internalCreditLimitCents) }
+        : {}),
+      ...(typeof profile.creditProfile.availableCreditCents === "number"
+        ? { availableCredit: formatCustomerCurrency(profile.creditProfile.availableCreditCents) }
+        : {}),
+      blockedReasons: profile.creditProfile.blockedReasons,
+    },
+    tabs: profile.tabs,
+  };
+}
+
+function mapLiveCustomerDetail(
+  detail: LiveCustomerProfileUnifiedResponse & Pick<LiveCustomerProfileUnifiedResponse, "customerProfile">,
+  taskBody: Partial<LiveCustomerProfileTasksApiResponse> | undefined,
+  invoiceIndex: InvoiceIndexResponse,
+): LiveCustomerProfileDetail {
+  const profile = detail.customerProfile;
+  const contacts = Array.isArray(detail.contacts) ? detail.contacts : [];
+  const invoices = Array.isArray(detail.invoices) ? detail.invoices : [];
+  const payments = Array.isArray(detail.payments) ? detail.payments : [];
+  const billingAccount = detail.hierarchy?.billingAccount;
+  const primaryContact =
+    contacts.find((contact) => contact.isPrimaryEmail && contact.email) ??
+    contacts.find((contact) => contact.email && contact.allowAutoSend) ??
+    contacts.find((contact) => contact.email) ??
+    contacts[0];
+
+  const composeInvoices = invoices.map((invoice) => ({
+    ...invoice,
+    metadata: invoice.metadata ?? {},
+  }));
+  const composeEmail =
+    billingAccount && primaryContact?.email && composeInvoices.length > 0
+      ? {
+          account: {
+            id: billingAccount.id,
+            createdAt: billingAccount.createdAt ?? new Date().toISOString(),
+            updatedAt: billingAccount.updatedAt ?? new Date().toISOString(),
+            parentAccountId: billingAccount.parentAccountId,
+            accountNumber: billingAccount.accountNumber,
+            displayName: billingAccount.displayName,
+            currency: billingAccount.currency,
+            accountTier: billingAccount.accountTier,
+            status: billingAccount.status,
+            centrallyPaid: billingAccount.centrallyPaid,
+            metadata: billingAccount.metadata ?? {},
+          },
+          contact: {
+            id: primaryContact.id,
+            createdAt: primaryContact.createdAt ?? new Date().toISOString(),
+            updatedAt: primaryContact.updatedAt ?? new Date().toISOString(),
+            parentAccountId: detail.hierarchy?.parentAccount?.id ?? billingAccount.parentAccountId,
+            billingAccountId: billingAccount.id,
+            scope: "billing_account" as const,
+            scopeId: billingAccount.id,
+            fullName: primaryContact.fullName,
+            ...(primaryContact.email ? { email: primaryContact.email } : {}),
+            ...(primaryContact.phone ? { phone: primaryContact.phone } : {}),
+            role: primaryContact.role,
+            isPrimary: Boolean(primaryContact.isPrimaryEmail || primaryContact.isPrimaryPhone),
+            isVerified: primaryContact.isVerified,
+            allowAutoSend: primaryContact.allowAutoSend,
+            recentSuccessfulResponses: 0,
+            metadata: {},
+          },
+          invoices: composeInvoices,
+          draft: buildCustomerEmailDraft({
+            customerName: billingAccount.displayName,
+            contactName: primaryContact.fullName,
+            invoices: composeInvoices,
+          }),
+        } satisfies NonNullable<TaskQueueItem["composeEmail"]>
+      : undefined;
+
+  const liveTasks = Array.isArray(taskBody?.items)
+    ? taskBody.items.filter((task) => task.status === "open")
+    : [];
+
+  return {
+    contacts: contacts
+      .filter((contact) => Boolean(contact.email))
+      .map((contact) => ({
+        name: contact.fullName,
+        email: contact.email ?? "No email",
+        verified: contact.isVerified,
+      })),
+    payments: payments.map((payment) => ({
+      id: payment.id,
+      paymentReference: payment.paymentReference,
+      accountName: profile.overviewSummary.canonicalName,
+      amount: formatAmountByCurrency(payment.amountCents, payment.currency),
+      state: humanize(payment.state),
+      recommendation:
+        Array.isArray(payment.metadata?.linkedInvoiceIds) && payment.metadata?.linkedInvoiceIds.length > 0
+          ? "Linked to imported invoice history."
+          : "Review for invoice match or remittance evidence.",
+      source: "Business Central",
+    })),
+    tasks: liveTasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      subtitle: task.description ?? humanize(task.kind),
+      status: task.status,
+      assignee: task.ownerId ? humanizeIdentifier(task.ownerId) : "Unassigned",
+      priority: task.origin === "manual" ? "medium" : "high",
+      dateLabel: task.dueAt ?? "Open",
+    })),
+    insights: profile.insightSummary.explanation,
+    sourceLabel: "Business Central sync",
+    externalId: billingAccount?.accountNumber ?? profile.profileId,
+    hierarchySummary: profile.overviewSummary.hierarchySummary,
+    primaryEmail: primaryContact?.email ?? "No verified email",
+    primaryPhone: primaryContact?.phone ?? "No verified phone",
+    portalStatus: primaryContact?.email ? "Configured" : "Needs setup",
+    portalType: detail.hierarchy?.parentAccount ? "Customer portal with centralized payer access" : "Customer portal",
+    portalStatementAccess: invoiceIndex.invoices.some((invoice) => invoice.billingAccountId === billingAccount?.id) ? "Statements available" : "No open statements",
+    ...(composeEmail ? { rawComposeEmail: composeEmail } : {}),
+  };
+}
+
+function buildCustomerEmailDraft(input: {
+  customerName: string;
+  contactName: string;
+  invoices: NonNullable<TaskQueueItem["composeEmail"]>["invoices"];
+}) {
+  const totalAmountCents = input.invoices.reduce((sum, invoice) => sum + invoice.amountCents, 0);
+  const invoiceSummary = input.invoices
+    .map((invoice) => `- ${invoice.invoiceNumber}: ${formatPhp(invoice.amountCents)} due ${invoice.dueDate ?? "soon"}`)
+    .join("\n");
+
+  return {
+    subjectLine: `Follow-up on open invoices for ${input.customerName}`,
+    body: [
+      `Hi ${input.contactName},`,
+      "",
+      "I wanted to follow up on the open invoices currently on your account.",
+      "",
+      invoiceSummary,
+      "",
+      `The total open amount is ${formatPhp(totalAmountCents)}. If payment has already been arranged, please feel free to share the remittance reference so we can review it safely on our side.`,
+      "",
+      "Thank you,",
+      "Yield AROS Collections",
+    ].join("\n"),
+    generatedBy: "fallback" as const,
+    note: "Draft generated from the imported customer profile and linked invoices.",
+  };
+}
+
+function formatCustomerCurrency(amountCents: number) {
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency: "PHP",
+    minimumFractionDigits: 2,
+  }).format(amountCents / 100);
+}
+
+function humanizeIdentifier(value: string): string {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatPhp(valueCents: number) {
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency: "PHP",
+    maximumFractionDigits: 2,
+  }).format(valueCents / 100);
 }
 
 async function loadPilotReadinessSnapshot(): Promise<{
@@ -3315,6 +4923,7 @@ function buildHomeTaskSummary(input: {
   approvalsQueue: ApprovalQueueItem[];
   exceptionsQueue: ExceptionQueueItem[];
   cashApplicationQueue: CashApplicationQueueData;
+  taskQueue: TaskQueueItem[];
 }): HomeTaskSummaryReadModel {
   const tasksByCustomer = input.accountProfileSummaries
     .map((profile) => {
@@ -3373,16 +4982,23 @@ function buildHomeTaskSummary(input: {
     },
   ].filter((item) => item.count > 0);
 
-  const allTasks = [
-    ...tasksByType,
-    {
-      id: "all_customer_work",
-      label: "All customer work",
-      detail: "Combined operational workload across customers and task types.",
-      count: tasksByCustomer.reduce((sum, item) => sum + item.count, 0),
-      actionPath: "/inbox",
-    },
-  ].filter((item) => item.count > 0);
+  const canonicalOpenTaskCount = input.taskQueue.filter(
+    (task) =>
+      task.status === "open" ||
+      task.status === "in_progress" ||
+      task.status === "pending_approval",
+  ).length;
+  const allTasks = canonicalOpenTaskCount > 0
+    ? [
+        {
+          id: "open_tasks",
+          label: "Open tasks",
+          detail: "Canonical task queue count; completed, archived, closed, and deleted tasks are excluded.",
+          count: canonicalOpenTaskCount,
+          actionPath: "/inbox",
+        },
+      ]
+    : [];
 
   return {
     title: "Tasks",
@@ -3479,23 +5095,38 @@ function buildInvoiceAgingAnalytics(
     if (invoice.openAmountCents <= 0) {
       continue;
     }
-    const bucketId = invoice.daysPastDue === undefined || invoice.daysPastDue <= 0
-      ? "current"
-      : invoice.daysPastDue <= 30
-        ? "days_1_30"
-        : invoice.daysPastDue <= 60
-          ? "days_31_60"
-          : invoice.daysPastDue <= 90
-            ? "days_61_90"
-            : "days_90_plus";
-    const bucket = buckets.find((item) => item.id === bucketId);
-    if (!bucket) {
-      continue;
+    const overdueAmountCents = getOverdueOpenAmountCents(invoice);
+    const currentAmountCents = Math.max(invoice.openAmountCents - overdueAmountCents, 0);
+
+    if (currentAmountCents > 0) {
+      const currentBucket = buckets.find((item) => item.id === "current");
+      if (currentBucket) {
+        currentBucket.invoiceCount += 1;
+        currentBucket.openAmountCents += currentAmountCents;
+        currentBucket.collectibleAmountCents += Math.min(getCollectibleOpenAmountCents(invoice), currentAmountCents);
+        currentBucket.disputedAmountCents += Math.max(
+          currentAmountCents - Math.min(getCollectibleOpenAmountCents(invoice), currentAmountCents),
+          0,
+        );
+      }
     }
-    bucket.invoiceCount += 1;
-    bucket.openAmountCents += invoice.openAmountCents;
-    bucket.collectibleAmountCents += getCollectibleOpenAmountCents(invoice);
-    bucket.disputedAmountCents += getDisputedOpenAmountCents(invoice);
+
+    if (overdueAmountCents > 0) {
+      const bucketId = bucketIdForDaysPastDue(
+        readInvoiceExtendedNumber(invoice, "oldestOverdueInstallmentDaysPastDue") ?? invoice.daysPastDue ?? 0,
+      );
+      const bucket = buckets.find((item) => item.id === bucketId);
+      if (!bucket) {
+        continue;
+      }
+      bucket.invoiceCount += 1;
+      bucket.openAmountCents += overdueAmountCents;
+      bucket.collectibleAmountCents += Math.min(getCollectibleOpenAmountCents(invoice), overdueAmountCents);
+      bucket.disputedAmountCents += Math.max(
+        overdueAmountCents - Math.min(getCollectibleOpenAmountCents(invoice), overdueAmountCents),
+        0,
+      );
+    }
   }
 
   return {
@@ -3507,16 +5138,34 @@ function buildInvoiceAgingAnalytics(
   };
 }
 
+function bucketIdForDaysPastDue(daysPastDue: number) {
+  if (daysPastDue <= 30) {
+    return "days_1_30";
+  }
+  if (daysPastDue <= 60) {
+    return "days_31_60";
+  }
+  if (daysPastDue <= 90) {
+    return "days_61_90";
+  }
+  return "days_90_plus";
+}
+
 function buildOverdueExposure(invoiceIndex: InvoiceIndexResponse): OverdueExposureSummary {
-  const overdueInvoices = invoiceIndex.invoices.filter((invoice) => (invoice.daysPastDue ?? 0) > 0 && invoice.openAmountCents > 0);
-  const severe = overdueInvoices.filter((invoice) => (invoice.daysPastDue ?? 0) > 60);
+  const overdueInvoices = invoiceIndex.invoices.filter((invoice) => getOverdueOpenAmountCents(invoice) > 0);
+  const severe = overdueInvoices.filter(
+    (invoice) => (readInvoiceExtendedNumber(invoice, "oldestOverdueInstallmentDaysPastDue") ?? invoice.daysPastDue ?? 0) > 60,
+  );
   return {
     overdueInvoiceCount: overdueInvoices.length,
-    overdueOpenAmountCents: overdueInvoices.reduce((sum, invoice) => sum + invoice.openAmountCents, 0),
-    overdueCollectibleAmountCents: overdueInvoices.reduce((sum, invoice) => sum + getCollectibleOpenAmountCents(invoice), 0),
+    overdueOpenAmountCents: overdueInvoices.reduce((sum, invoice) => sum + getOverdueOpenAmountCents(invoice), 0),
+    overdueCollectibleAmountCents: overdueInvoices.reduce(
+      (sum, invoice) => sum + Math.min(getCollectibleOpenAmountCents(invoice), getOverdueOpenAmountCents(invoice)),
+      0,
+    ),
     blockedDisputedAmountCents: overdueInvoices.reduce((sum, invoice) => sum + getDisputedOpenAmountCents(invoice), 0),
     severeOverdueInvoiceCount: severe.length,
-    severeOverdueAmountCents: severe.reduce((sum, invoice) => sum + invoice.openAmountCents, 0),
+    severeOverdueAmountCents: severe.reduce((sum, invoice) => sum + getOverdueOpenAmountCents(invoice), 0),
   };
 }
 
@@ -3525,10 +5174,10 @@ function buildCollectibleVsDisputed(invoiceIndex: InvoiceIndexResponse): Collect
   const collectibleOpenAmountCents = openInvoices.reduce((sum, invoice) => sum + getCollectibleOpenAmountCents(invoice), 0);
   const disputedOpenAmountCents = openInvoices.reduce((sum, invoice) => sum + getDisputedOpenAmountCents(invoice), 0);
   const partialDisputeCollectibleAmountCents = openInvoices
-    .filter((invoice) => invoice.status === "disputed" && typeof invoice.collectibleAmountCents === "number")
+    .filter((invoice) => invoice.status === "disputed" && typeof readInvoiceExtendedNumber(invoice, "collectibleAmountCents") === "number")
     .reduce((sum, invoice) => sum + getCollectibleOpenAmountCents(invoice), 0);
   const fullyDisputedAmountCents = openInvoices
-    .filter((invoice) => invoice.status === "disputed" && !invoice.collectibleAmountCents)
+    .filter((invoice) => invoice.status === "disputed" && typeof readInvoiceExtendedNumber(invoice, "collectibleAmountCents") !== "number")
     .reduce((sum, invoice) => sum + invoice.openAmountCents, 0);
 
   return {
@@ -3574,8 +5223,8 @@ function buildAccountProfileSummaries(input: {
       current.collectibleAmountCents += getCollectibleOpenAmountCents(invoice);
       current.disputedAmountCents += getDisputedOpenAmountCents(invoice);
       current.openInvoiceCount += 1;
-      if ((invoice.daysPastDue ?? 0) > 0) {
-        current.overdueAmountCents += invoice.openAmountCents;
+      if (getOverdueOpenAmountCents(invoice) > 0) {
+        current.overdueAmountCents += getOverdueOpenAmountCents(invoice);
       }
     }
     grouped.set(key, current);
@@ -3780,6 +5429,113 @@ function buildCustomerProfileWorkspace(input: {
   };
 }
 
+function buildInvoiceDetailFromConsoleData(
+  data: OperatorConsoleData,
+  selectedInvoiceNumber?: string,
+): InvoiceDetailData {
+  return buildInvoiceDetailFromRecords({
+    invoiceIndex: data.invoiceIndex,
+    customerIndex: data.customerIndex,
+    ...(selectedInvoiceNumber ? { selectedInvoiceNumber } : {}),
+    fallback: data.invoiceDetail,
+  });
+}
+
+function buildInvoiceDetailFromRecords(input: {
+  invoiceIndex: InvoiceIndexResponse;
+  customerIndex: CustomerIndexItem[];
+  selectedInvoiceNumber?: string;
+  fallback?: InvoiceDetailData;
+}): InvoiceDetailData {
+  const selectedInvoice =
+    input.invoiceIndex.invoices.find((invoice) => invoice.invoiceNumber === input.selectedInvoiceNumber) ??
+    input.invoiceIndex.invoices[0];
+
+  if (!selectedInvoice) {
+    return input.fallback ?? {
+      invoiceNumber: "Unknown invoice",
+      billingAccountId: "—",
+      branchId: "—",
+      status: "Unknown",
+      amount: formatCurrency(0),
+      dueDate: "—",
+      disputeState: "No invoice selected",
+      nextAction: "Select an invoice from the invoice ledger.",
+      explanation: "Invoice detail could not be resolved from the available records.",
+      linkedStatuses: [],
+    };
+  }
+
+  const customer =
+    input.customerIndex.find((item) =>
+      item.profileId === selectedInvoice.billingAccountId ||
+      item.billingAccountId === selectedInvoice.billingAccountId ||
+      item.canonicalName === selectedInvoice.customerName,
+    );
+  const overdueAmountCents = getOverdueOpenAmountCents(selectedInvoice);
+  const collectibleAmountCents = getCollectibleOpenAmountCents(selectedInvoice);
+  const disputedAmountCents = getDisputedOpenAmountCents(selectedInvoice);
+  const hasDispute = selectedInvoice.status === "disputed" || disputedAmountCents > 0;
+
+  return {
+    invoiceNumber: selectedInvoice.invoiceNumber,
+    billingAccountId: selectedInvoice.billingAccountId ?? customer?.billingAccountId ?? selectedInvoice.customerName,
+    branchId: selectedInvoice.branchId ?? "—",
+    status: humanize(selectedInvoice.status),
+    amount: formatAmountByCurrency(selectedInvoice.totalAmountCents, selectedInvoice.currency),
+    dueDate: selectedInvoice.dueDate ?? "—",
+    disputeState: hasDispute ? "Dispute hold in effect" : "No dispute hold",
+    nextAction:
+      hasDispute
+        ? "Wait for dispute resolution or controller decision before any collector follow-up."
+        : overdueAmountCents > 0
+          ? "Follow the standard collections workflow using the billing-account route."
+          : "Monitor the invoice and keep promise-to-pay dates updated when available.",
+    explanation:
+      hasDispute
+        ? "The UI preserves branch routing on the invoice and blocks auto-chase while the dispute is open."
+        : overdueAmountCents > 0
+          ? "The invoice remains collectible and visible on the billing account while preserving branch context."
+          : "The invoice is available for monitoring with no active payment or dispute blockers.",
+    ...(typeof collectibleAmountCents === "number"
+      ? { collectibleAmount: formatAmountByCurrency(collectibleAmountCents, selectedInvoice.currency) }
+      : {}),
+    ...(typeof disputedAmountCents === "number" && disputedAmountCents > 0
+      ? { disputedAmount: formatAmountByCurrency(disputedAmountCents, selectedInvoice.currency) }
+      : {}),
+    linkedStatuses: buildInvoiceLinkedStatuses(selectedInvoice),
+  };
+}
+
+function buildInvoiceLinkedStatuses(invoice: InvoiceIndexEntry): InvoiceLinkedStatusItem[] {
+  if (invoice.status === "disputed") {
+    return [
+      {
+        id: `${invoice.id}-remittance`,
+        kind: "remittance",
+        reference: `RMT-${invoice.invoiceNumber}`,
+        status: "Awaiting dispute resolution",
+        detail: "Remittance proof is visible, but collections remain blocked while the invoice is disputed.",
+      },
+    ];
+  }
+
+  if (invoice.openAmountCents < invoice.totalAmountCents) {
+    return [
+      {
+        id: `${invoice.id}-payment`,
+        kind: "payment",
+        reference: `RCPT-${invoice.invoiceNumber}`,
+        status: "Partially applied",
+        amount: formatAmountByCurrency(invoice.totalAmountCents - invoice.openAmountCents, invoice.currency),
+        detail: "A payment has been posted against this invoice and the remaining balance is still open.",
+      },
+    ];
+  }
+
+  return [];
+}
+
 function buildNextActionSummaryCards(input: {
   approvalsPending: number;
   exceptionCount: number;
@@ -3820,16 +5576,34 @@ function buildNextActionSummaryCards(input: {
 
 function getCollectibleOpenAmountCents(invoice: InvoiceIndexEntry) {
   if (invoice.status === "disputed") {
-    return Math.min(invoice.collectibleAmountCents ?? 0, invoice.openAmountCents);
+    return Math.min(readInvoiceExtendedNumber(invoice, "collectibleAmountCents") ?? 0, invoice.openAmountCents);
   }
   return invoice.openAmountCents;
+}
+
+function getOverdueOpenAmountCents(invoice: InvoiceIndexEntry) {
+  const overdueAmountCents = readInvoiceExtendedNumber(invoice, "overdueAmountCents");
+  if (typeof overdueAmountCents === "number") {
+    return overdueAmountCents;
+  }
+  return (invoice.daysPastDue ?? 0) > 0 ? invoice.openAmountCents : 0;
 }
 
 function getDisputedOpenAmountCents(invoice: InvoiceIndexEntry) {
   if (invoice.status !== "disputed") {
     return 0;
   }
-  return Math.max(invoice.openAmountCents - getCollectibleOpenAmountCents(invoice), 0);
+  const overdueAmountCents = readInvoiceExtendedNumber(invoice, "overdueAmountCents");
+  const disputedBase = typeof overdueAmountCents === "number" ? overdueAmountCents : invoice.openAmountCents;
+  return Math.max(disputedBase - Math.min(getCollectibleOpenAmountCents(invoice), disputedBase), 0);
+}
+
+function readInvoiceExtendedNumber(
+  invoice: InvoiceIndexEntry,
+  key: "collectibleAmountCents" | "overdueAmountCents" | "oldestOverdueInstallmentDaysPastDue",
+) {
+  const value = (invoice as InvoiceIndexEntry & Partial<Record<typeof key, unknown>>)[key];
+  return typeof value === "number" ? value : undefined;
 }
 
 function formatCurrency(valueCents: number) {
@@ -3838,6 +5612,13 @@ function formatCurrency(valueCents: number) {
     currency: "PHP",
     maximumFractionDigits: 2,
   }).format(valueCents / 100);
+}
+
+function formatAmountByCurrency(valueCents: number, currency: string) {
+  return `${currency} ${(valueCents / 100).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 function humanize(value: string) {
@@ -3984,7 +5765,7 @@ function buildSeedOutreachIntelligence(): OutreachConsoleData {
   };
 }
 
-function buildSeedControlCenter(): ControlCenterConsoleData {
+export function buildSeedControlCenter(): ControlCenterConsoleData {
   return {
     workflows: [
       {
@@ -3994,19 +5775,75 @@ function buildSeedControlCenter(): ControlCenterConsoleData {
         createdAt: "2026-04-15T09:00:00.000Z",
         updatedAt: "2026-04-15T09:00:00.000Z",
         category: "collections",
-        name: "Standard Overdue Collections",
+        name: "Request for remittance outreach",
         enabled: true,
-        senderEmail: "collections@yieldaros.example",
-        testEmailRecipient: "qa-collections@yieldaros.example",
-        testCallRecipient: "+639171110000",
+        senderEmail: "dylan@paywithyield.com",
+        testEmailRecipient: "",
+        testCallRecipient: "",
         timezone: "Asia/Manila",
-        outreachWindowStart: "08:00",
-        outreachWindowEnd: "17:30",
+        outreachWindowStart: "09:00",
+        outreachWindowEnd: "10:00",
         outreachDays: ["monday", "tuesday", "wednesday", "thursday", "friday"],
         weekendCallingEnabled: false,
         stageCount: 2,
-        metadata: { demoCustomerCount: 42, seeded: true },
-        approxTargetCount: 42,
+        metadata: { demoCustomerCount: 2, seeded: true },
+        approxTargetCount: 2,
+        executions: [
+          {
+            id: "cc_execution_seed_1",
+            tenantId: "default",
+            version: 1,
+            createdAt: "2026-01-15T09:00:00.000Z",
+            updatedAt: "2026-01-15T09:00:00.000Z",
+            workflowId: "cc_workflow_seed_1",
+            billingAccountId: "ACC001",
+            parentAccountId: "parent_seed_1",
+            status: "active",
+            currentTrack: "standard_reminders",
+            lastDecisionAction: "continue",
+            lastDecisionReason: "Customer remains on the standard reminder track.",
+            lastDecisionConfidence: 1,
+            requiresHumanReview: false,
+            rationaleSummary: "Standard remittance outreach remains active.",
+            reasoningMetadata: {},
+            metadata: {
+              seeded: true,
+              customerName: "SM Retail Inc.",
+              accountNumber: "ACC001",
+              overdueAmount: "₱458,333",
+              openInvoiceCount: 3,
+              selected: true,
+              lastChangedBy: "human",
+            },
+          },
+          {
+            id: "cc_execution_seed_2",
+            tenantId: "default",
+            version: 1,
+            createdAt: "2026-02-01T09:00:00.000Z",
+            updatedAt: "2026-02-01T09:00:00.000Z",
+            workflowId: "cc_workflow_seed_1",
+            billingAccountId: "ACC003",
+            parentAccountId: "parent_seed_2",
+            status: "paused",
+            currentTrack: "promise_to_pay",
+            lastDecisionAction: "pause",
+            lastDecisionReason: "Customer promised payment before the next follow-up.",
+            lastDecisionConfidence: 0.94,
+            requiresHumanReview: false,
+            effectiveUntil: "2026-02-07T00:00:00.000Z",
+            rationaleSummary: "Workflow paused while payment promise is outstanding.",
+            reasoningMetadata: {},
+            metadata: {
+              seeded: true,
+              customerName: "Robinson Supermarket",
+              accountNumber: "ACC003",
+              overdueAmount: "₱541,667",
+              openInvoiceCount: 2,
+              lastChangedBy: "ai",
+            },
+          },
+        ],
         stages: [
           {
             id: "cc_stage_seed_1",
@@ -4064,6 +5901,7 @@ function buildSeedControlCenter(): ControlCenterConsoleData {
         stageCount: 1,
         metadata: { demoCustomerCount: 18, seeded: true },
         approxTargetCount: 18,
+        executions: [],
         stages: [
           {
             id: "cc_stage_seed_3",
@@ -4430,78 +6268,26 @@ class OperatorConsoleSourceError extends Error {
 }
 
 function buildSeedInvoiceIndex(): InvoiceIndexResponse {
-  const demo = buildDemoSeedBundle();
-  const billingAccountById = new Map(
-    demo.billingAccounts.map((billingAccount) => [billingAccount.id, billingAccount]),
-  );
-  const parentAccountById = new Map(
-    demo.parentAccounts.map((parentAccount) => [parentAccount.id, parentAccount]),
-  );
-  const branchById = new Map(demo.branches.map((branch) => [branch.id, branch]));
-
-  const invoices: InvoiceIndexEntry[] = demo.invoices.map((invoice) => {
-    const billingAccount = billingAccountById.get(invoice.billingAccountId);
-    const parentAccount = parentAccountById.get(invoice.parentAccountId);
-    const branch = invoice.branchId ? branchById.get(invoice.branchId) : undefined;
-    const status = normalizeSeedInvoiceStatus(invoice.state);
-    const openAmountCents = deriveSeedOpenAmount(invoice.amountCents, status);
-    const daysPastDue = computeDaysPastDue(invoice.dueDate);
-
-    return {
-      id: `seed_demo:${invoice.id}`,
-      sourceProvider: "seed_demo",
-      sourceKind: "seed",
-      sourceLabel: "Seed demo catalog",
-      importMode: "seed_fallback",
-      canonicalInvoiceId: invoice.id,
-      customerName: billingAccount?.displayName ?? invoice.billingAccountId,
-      parentAccountId: invoice.parentAccountId,
-      ...(parentAccount?.name ? { parentAccountName: parentAccount.name } : {}),
-      billingAccountId: invoice.billingAccountId,
-      ...(billingAccount?.displayName ? { billingAccountName: billingAccount.displayName } : {}),
-      ...(invoice.branchId ? { branchId: invoice.branchId } : {}),
-      ...(branch?.name ? { branchName: branch.name } : {}),
-      invoiceNumber: invoice.invoiceNumber,
-      currency: invoice.currency,
-      totalAmountCents: invoice.amountCents,
-      openAmountCents,
-      paidAmountCents: Math.max(invoice.amountCents - openAmountCents, 0),
-      status,
-      sourceStatus: invoice.state,
-      ...(invoice.invoiceDate ? { issuedAt: invoice.invoiceDate } : {}),
-      ...(invoice.dueDate ? { dueDate: invoice.dueDate } : {}),
-      ...(invoice.updatedAt ? { lastImportedAt: invoice.updatedAt } : {}),
-      ...(daysPastDue !== undefined ? { daysPastDue } : {}),
-      tags: [
-        "seeded",
-        status,
-        ...(invoice.branchId ? ["branch-tagged"] : []),
-        ...(invoice.state.startsWith("disputed_") ? ["collections-blocked"] : []),
-      ],
-      metadata: { ...invoice.metadata },
-    };
-  });
-
   return {
     generatedAt: new Date().toISOString(),
     source: {
-      kind: "seeded",
-      label: "Seed-backed invoice index",
-      detail: "API invoice index was unavailable, so the web app fell back to demo invoice fixtures.",
+      kind: "live",
+      label: "Empty invoice index",
+      detail: "API invoice index was unavailable and demo invoice fixtures are disabled.",
     },
     summary: {
-      totalInvoices: invoices.length,
-      totalAmountCents: invoices.reduce((sum, invoice) => sum + invoice.totalAmountCents, 0),
-      openAmountCents: invoices.reduce((sum, invoice) => sum + invoice.openAmountCents, 0),
-      openInvoiceCount: invoices.filter((invoice) => invoice.status === "open" || invoice.status === "partial").length,
-      overdueInvoiceCount: invoices.filter((invoice) => (invoice.daysPastDue ?? 0) > 0 && invoice.openAmountCents > 0).length,
-      disputedInvoiceCount: invoices.filter((invoice) => invoice.status === "disputed").length,
-      paidInvoiceCount: invoices.filter((invoice) => invoice.status === "paid").length,
+      totalInvoices: 0,
+      totalAmountCents: 0,
+      openAmountCents: 0,
+      openInvoiceCount: 0,
+      overdueInvoiceCount: 0,
+      disputedInvoiceCount: 0,
+      paidInvoiceCount: 0,
       connectedProviderCount: 0,
     },
-    providers: buildProviderSummaries(invoices),
-    statuses: buildStatusSummaries(invoices),
-    invoices,
+    providers: [],
+    statuses: buildStatusSummaries([]),
+    invoices: [],
   };
 }
 
@@ -4572,6 +6358,128 @@ function deriveSeedOpenAmount(amountCents: number, status: InvoiceIndexStatus) {
     default:
       return amountCents;
   }
+}
+
+function deriveInstallmentSummaryFromMetadata(metadata: Record<string, unknown>): {
+  totalRemainingBalanceCents: number;
+  futureInstallmentsBalanceCents: number;
+  dueNowInstallmentsBalanceCents: number;
+  overdueInstallmentsBalanceCents: number;
+  oldestOverdueInstallmentDaysPastDue?: number;
+  missedInstallmentCount: number;
+  nextInstallmentDueDate?: string;
+  nextInstallmentAmountCents?: number;
+  installmentPlanId?: string;
+} | undefined {
+  const plan = readMetadataRecord(metadata, "installmentPlan");
+  const lineRecords = readMetadataRecordArray(metadata, "installmentLines");
+  if (lineRecords.length === 0) {
+    return undefined;
+  }
+
+  const activeLines = lineRecords.filter(
+    (line) => (readMetadataNumber(line, "remainingAmountCents") ?? 0) > 0,
+  );
+  const overdueLines = activeLines.filter((line) => {
+    const status = readMetadataString(line, "status");
+    return status === "overdue" || (readMetadataNumber(line, "daysPastDue") ?? 0) > 0;
+  });
+  const dueNowLines = activeLines.filter((line) => {
+    const status = readMetadataString(line, "status");
+    return status === "due" || status === "partially_paid" || status === "promised";
+  });
+  const futureLines = activeLines.filter((line) => readMetadataString(line, "status") === "future");
+  const nextLine = activeLines
+    .filter((line) => readMetadataString(line, "status") !== "overdue")
+    .sort((left, right) => {
+      const leftDate = readMetadataString(left, "dueDate") ?? "";
+      const rightDate = readMetadataString(right, "dueDate") ?? "";
+      if (leftDate !== rightDate) {
+        return leftDate.localeCompare(rightDate);
+      }
+      return (readMetadataNumber(left, "sequenceNumber") ?? 0) - (readMetadataNumber(right, "sequenceNumber") ?? 0);
+    })[0];
+  const nextInstallmentDueDate = nextLine ? readMetadataString(nextLine, "dueDate") : undefined;
+  const nextInstallmentAmountCents = nextLine ? readMetadataNumber(nextLine, "remainingAmountCents") : undefined;
+  const installmentPlanId = readMetadataString(plan, "installmentPlanId");
+
+  return {
+    totalRemainingBalanceCents: activeLines.reduce(
+      (sum, line) => sum + (readMetadataNumber(line, "remainingAmountCents") ?? 0),
+      0,
+    ),
+    futureInstallmentsBalanceCents: futureLines.reduce(
+      (sum, line) => sum + (readMetadataNumber(line, "remainingAmountCents") ?? 0),
+      0,
+    ),
+    dueNowInstallmentsBalanceCents: dueNowLines.reduce(
+      (sum, line) => sum + (readMetadataNumber(line, "remainingAmountCents") ?? 0),
+      0,
+    ),
+    overdueInstallmentsBalanceCents: overdueLines.reduce(
+      (sum, line) => sum + (readMetadataNumber(line, "remainingAmountCents") ?? 0),
+      0,
+    ),
+    ...(overdueLines.length > 0
+      ? {
+          oldestOverdueInstallmentDaysPastDue: Math.max(
+            ...overdueLines.map((line) => readMetadataNumber(line, "daysPastDue") ?? 0),
+          ),
+        }
+      : {}),
+    missedInstallmentCount: overdueLines.length,
+    ...(nextInstallmentDueDate
+      ? {
+          nextInstallmentDueDate,
+        }
+      : {}),
+    ...(typeof nextInstallmentAmountCents === "number"
+      ? {
+          nextInstallmentAmountCents,
+        }
+      : {}),
+    ...(installmentPlanId
+      ? {
+          installmentPlanId,
+        }
+      : {}),
+  };
+}
+
+function readMetadataRecord(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): Record<string, unknown> | undefined {
+  const candidate = value?.[key];
+  return candidate && typeof candidate === "object" && !Array.isArray(candidate)
+    ? (candidate as Record<string, unknown>)
+    : undefined;
+}
+
+function readMetadataRecordArray(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): Record<string, unknown>[] {
+  const candidate = value?.[key];
+  return Array.isArray(candidate)
+    ? candidate.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+    : [];
+}
+
+function readMetadataString(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const candidate = value?.[key];
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+}
+
+function readMetadataNumber(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const candidate = value?.[key];
+  return Number.isInteger(candidate) ? (candidate as number) : undefined;
 }
 
 function mergeRuntimeInvoicesIntoIndex(

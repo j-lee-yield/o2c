@@ -228,7 +228,7 @@ export function buildSeedTasks(): Task[] {
 }
 
 function makeTask(
-  input: Omit<Task, "status" | "auditTrail" | "tenantId" | "version" | "createdAt" | "updatedAt" | "createdByActorId" | "createdByActorRole" | "updatedByActorId" | "updatedByActorRole"> & {
+  input: Omit<Task, "taskType" | "status" | "auditTrail" | "tenantId" | "version" | "createdAt" | "updatedAt" | "createdByActorId" | "createdByActorRole" | "updatedByActorId" | "updatedByActorRole"> & {
     occurredAt: string;
   },
 ): Task {
@@ -245,6 +245,7 @@ function makeTask(
     title: input.title,
     ...(input.description ? { description: input.description } : {}),
     kind: input.kind,
+    taskType: input.kind,
     status: "open",
     origin: input.origin,
     surfaces: input.surfaces,

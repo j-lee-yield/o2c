@@ -183,6 +183,7 @@ function createPersistenceTracker() {
     loadSnapshot: () => ({
       workflows: [],
       stages: [],
+      executions: [],
       templates: [],
       folders: [],
       callAgentConfig: undefined,
@@ -192,6 +193,8 @@ function createPersistenceTracker() {
     deleteWorkflowCalls: [] as string[],
     upsertStageCalls: [] as string[],
     deleteStageCalls: [] as string[],
+    upsertExecutionCalls: [] as string[],
+    deleteExecutionCalls: [] as string[],
     upsertTemplateCalls: [] as string[],
     upsertFolderCalls: [] as string[],
     upsertCallAgentConfigCalls: [] as string[],
@@ -207,6 +210,12 @@ function createPersistenceTracker() {
     },
     deleteStage(stageId: string) {
       this.deleteStageCalls.push(stageId);
+    },
+    upsertExecution(execution: { id: string }) {
+      this.upsertExecutionCalls.push(execution.id);
+    },
+    deleteExecution(executionId: string) {
+      this.deleteExecutionCalls.push(executionId);
     },
     upsertTemplate(template: { id: string }) {
       this.upsertTemplateCalls.push(template.id);
@@ -386,6 +395,140 @@ describe("ControlCenterService", () => {
     expect(persistence.upsertStageCalls).toContain(stage.id);
     expect(persistence.deleteStageCalls).toContain(stage.id);
     expect(persistence.deleteWorkflowCalls).toContain(workflow.id);
+  });
+
+  it("assigns billing accounts into workflows idempotently and counts live assignments", () => {
+    const persistence = createPersistenceTracker();
+    const service = new ControlCenterService({
+      activityStore: new InMemoryImmutableActivityLogStore(),
+      store: new InMemoryControlCenterStore(),
+      persistence,
+      generatedContentDeps: createGeneratedContentDeps(),
+    });
+    service.initializeBaseConfig({
+      principal,
+      tenantId: "default",
+      callAgentConfig: {
+        phoneNumber: "+63 2 8555 0188",
+        smsEnabled: true,
+        outboundCallingEnabled: true,
+        handoffToHumanEnabled: true,
+        manualAgentInstructions: "Help",
+        callRecordingDisclaimerEnabled: true,
+        defaultBehaviorFlags: [],
+      },
+      config: {
+        defaultTimezone: "Asia/Manila",
+        defaultSenderBehavior: "workflow_specific",
+        allowedChannels: ["email", "sms", "call"],
+        channelFallbackPolicy: "manual_review_only",
+        sandboxMode: "test_recipients_only",
+        defaultRiskApprovalMode: "strict",
+      },
+    });
+    const workflow = service.createWorkflow({
+      principal,
+      tenantId: "default",
+      category: "collections",
+      name: "Assigned Workflow",
+      timezone: "Asia/Manila",
+      outreachWindowStart: "08:00",
+      outreachWindowEnd: "17:00",
+      outreachDays: ["monday"],
+    }).workflow;
+
+    const first = service.assignWorkflowCustomer({
+      principal,
+      tenantId: "default",
+      workflowId: workflow.id,
+      billingAccountId: "11111111-1111-4111-8111-111111111111",
+      parentAccountId: "22222222-2222-4222-8222-222222222222",
+    });
+    const duplicate = service.assignWorkflowCustomer({
+      principal,
+      tenantId: "default",
+      workflowId: workflow.id,
+      billingAccountId: "11111111-1111-4111-8111-111111111111",
+      parentAccountId: "22222222-2222-4222-8222-222222222222",
+    });
+
+    expect(first.created).toBe(true);
+    expect(duplicate.created).toBe(false);
+    expect(service.listWorkflowExecutions(workflow.id)).toHaveLength(1);
+    expect(service.listWorkflows().find((item) => item.id === workflow.id)?.approxTargetCount).toBe(1);
+    expect(persistence.upsertExecutionCalls).toContain(first.execution.id);
+  });
+
+  it("pauses, resumes, and unenrolls workflow customers", () => {
+    const persistence = createPersistenceTracker();
+    const service = new ControlCenterService({
+      activityStore: new InMemoryImmutableActivityLogStore(),
+      store: new InMemoryControlCenterStore(),
+      persistence,
+      generatedContentDeps: createGeneratedContentDeps(),
+    });
+    service.initializeBaseConfig({
+      principal,
+      tenantId: "default",
+      callAgentConfig: {
+        phoneNumber: "+63 2 8555 0188",
+        smsEnabled: true,
+        outboundCallingEnabled: true,
+        handoffToHumanEnabled: true,
+        manualAgentInstructions: "Help",
+        callRecordingDisclaimerEnabled: true,
+        defaultBehaviorFlags: [],
+      },
+      config: {
+        defaultTimezone: "Asia/Manila",
+        defaultSenderBehavior: "workflow_specific",
+        allowedChannels: ["email", "sms", "call"],
+        channelFallbackPolicy: "manual_review_only",
+        sandboxMode: "test_recipients_only",
+        defaultRiskApprovalMode: "strict",
+      },
+    });
+    const workflow = service.createWorkflow({
+      principal,
+      tenantId: "default",
+      category: "collections",
+      name: "Managed Enrollments",
+      timezone: "Asia/Manila",
+      outreachWindowStart: "08:00",
+      outreachWindowEnd: "17:00",
+      outreachDays: ["monday"],
+    }).workflow;
+    const assigned = service.assignWorkflowCustomer({
+      principal,
+      tenantId: "default",
+      workflowId: workflow.id,
+      billingAccountId: "33333333-3333-4333-8333-333333333333",
+      parentAccountId: "44444444-4444-4444-8444-444444444444",
+    }).execution;
+
+    const paused = service.pauseWorkflowCustomer({
+      principal,
+      workflowId: workflow.id,
+      executionId: assigned.id,
+      reason: "Operator paused this customer while reviewing account health.",
+    }).execution;
+    expect(paused.status).toBe("paused");
+
+    const resumed = service.resumeWorkflowCustomer({
+      principal,
+      workflowId: workflow.id,
+      executionId: assigned.id,
+    }).execution;
+    expect(resumed.status).toBe("active");
+
+    const unenrolled = service.unenrollWorkflowCustomer({
+      principal,
+      workflowId: workflow.id,
+      executionId: assigned.id,
+    });
+    expect(unenrolled.unenrolled).toBe(true);
+    expect(service.listWorkflowExecutions(workflow.id)).toHaveLength(0);
+    expect(persistence.deleteExecutionCalls).toContain(assigned.id);
   });
 
   it("generates conservative channel outputs and records feedback", () => {

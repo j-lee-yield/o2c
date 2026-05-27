@@ -15,9 +15,12 @@ export type SeedScenario = {
 };
 
 export * from "./canonical/schema.js";
+export * from "./access-control.js";
 export * from "./collections/email.js";
+export * from "./collections/call-inbox.js";
 export * from "./collections/outreach.js";
 export * from "./collections/replies.js";
+export * from "./collections/voice-pre-call.js";
 export * from "./communications.js";
 export * from "./communication-providers.js";
 export * from "./control-center.js";

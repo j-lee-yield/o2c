@@ -53,6 +53,13 @@ export class DeductionSyncBlockedError extends Error {
   }
 }
 
+function toActivitySnapshot(value: unknown): Record<string, unknown> | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
 type RelatedApproval = Pick<ApprovalRequest, "id" | "status" | "requestType">;
 type RelatedInvoice = Pick<CustomerInvoice, "id" | "state" | "invoiceNumber" | "amountCents" | "currency">;
 type RelatedPayment = Pick<Payment, "id" | "state" | "paymentReference" | "amountCents" | "currency">;
@@ -853,7 +860,7 @@ function createDeductionsWorkspaceService(input: {
         action: "deductions.upload_hook_recorded",
         entityType: "deduction_case",
         entityId: record.deductionCase.id,
-        after: record.deductionCase,
+        after: toActivitySnapshot(record.deductionCase),
         metadata: {
           sourceChannel: record.deductionCase.sourceChannel,
           targetAmountCents: record.deductionCase.targetAmountCents,
@@ -874,7 +881,7 @@ function createDeductionsWorkspaceService(input: {
         action: "deductions.ap_portal_hook_recorded",
         entityType: "deduction_case",
         entityId: record.deductionCase.id,
-        after: record.deductionCase,
+        after: toActivitySnapshot(record.deductionCase),
         metadata: {
           sourceChannel: record.deductionCase.sourceChannel,
           targetAmountCents: record.deductionCase.targetAmountCents,
@@ -913,11 +920,13 @@ function createDeductionsWorkspaceService(input: {
         );
 
       const totalAmountCents = draftLines.reduce((sum, line) => sum + line.amountCents, 0);
-      const draft: CreditMemoDraft = {
-        ...(record.creditMemoDraft ?? { id: draftId }),
-        ...(record.creditMemoDraft
-          ? evolveEntityMetadata(record.creditMemoDraft, { at: now, actorId: principal.id, actorRole: "user" })
-          : createEntityMetadata({ at: now, actorId: principal.id, actorRole: "user" })),
+      const draftState: CreditMemoDraft["state"] = record.deductionCase.approvalRequestId
+        ? "approval_pending"
+        : "ready_for_review";
+      const draftErpSyncStatus: CreditMemoDraft["erpSyncStatus"] = record.deductionCase.approvalRequestId
+        ? "blocked"
+        : "ready";
+      const draftFields = {
         id: draftId,
         deductionCaseId: record.deductionCase.id,
         ...(record.deductionCase.invoiceId ? { invoiceId: record.deductionCase.invoiceId } : {}),
@@ -927,19 +936,33 @@ function createDeductionsWorkspaceService(input: {
           ? { approvalRequestId: record.deductionCase.approvalRequestId }
           : {}),
         ...(record.creditMemoDraft?.memoNumber ? { memoNumber: record.creditMemoDraft.memoNumber } : {}),
-        state: record.deductionCase.approvalRequestId ? "approval_pending" : "ready_for_review",
+        state: draftState,
         reasonCode: record.deductionCase.reasonCode,
         currency: record.deductionCase.currency,
         subtotalAmountCents: totalAmountCents,
         totalAmountCents,
         lastRefreshedAt: now,
         ...(record.creditMemoDraft?.lastSyncedAt ? { lastSyncedAt: record.creditMemoDraft.lastSyncedAt } : {}),
-        erpSyncStatus: record.deductionCase.approvalRequestId ? "blocked" : "ready",
+        erpSyncStatus: draftErpSyncStatus,
         metadata: {
           ...(record.creditMemoDraft?.metadata ?? {}),
           refreshedBy: principal.id,
         },
       };
+      const draft: CreditMemoDraft = record.creditMemoDraft
+        ? {
+            ...record.creditMemoDraft,
+            ...evolveEntityMetadata(record.creditMemoDraft, {
+              at: now,
+              actorId: principal.id,
+              actorRole: "user",
+            }),
+            ...draftFields,
+          }
+        : {
+            ...createEntityMetadata({ at: now, actorId: principal.id, actorRole: "user" }),
+            ...draftFields,
+          };
 
       const deductionCase: DeductionCase = {
         ...record.deductionCase,
@@ -960,8 +983,8 @@ function createDeductionsWorkspaceService(input: {
         action: "deductions.credit_memo_refreshed",
         entityType: "deduction_case",
         entityId: caseId,
-        before: record.creditMemoDraft ?? null,
-        after: draft,
+        before: toActivitySnapshot(record.creditMemoDraft),
+        after: toActivitySnapshot(draft),
         metadata: {
           lineCount: draftLines.length,
           totalAmountCents,
@@ -1036,8 +1059,8 @@ function createDeductionsWorkspaceService(input: {
         action: "deductions.credit_memo_synced",
         entityType: "deduction_case",
         entityId: caseId,
-        before: record.creditMemoDraft,
-        after: creditMemoDraft,
+        before: toActivitySnapshot(record.creditMemoDraft),
+        after: toActivitySnapshot(creditMemoDraft),
         metadata: {
           totalAmountCents: creditMemoDraft.totalAmountCents,
           approvalRequestId: record.approval?.id ?? null,
@@ -1203,13 +1226,15 @@ function mapQueueItem(record: DeductionWorkspaceRecord) {
 
   return {
     deductionCaseId: record.deductionCase.id,
-    invoiceId: record.deductionCase.invoiceId,
-    paymentId: record.deductionCase.paymentId,
-    exceptionId: record.deductionCase.exceptionId,
-    approvalRequestId: record.deductionCase.approvalRequestId,
+    ...(record.deductionCase.invoiceId ? { invoiceId: record.deductionCase.invoiceId } : {}),
+    ...(record.deductionCase.paymentId ? { paymentId: record.deductionCase.paymentId } : {}),
+    ...(record.deductionCase.exceptionId ? { exceptionId: record.deductionCase.exceptionId } : {}),
+    ...(record.deductionCase.approvalRequestId
+      ? { approvalRequestId: record.deductionCase.approvalRequestId }
+      : {}),
     accountName: record.account.displayName,
-    invoiceNumber: record.invoice?.invoiceNumber,
-    paymentReference: record.payment?.paymentReference,
+    ...(record.invoice?.invoiceNumber ? { invoiceNumber: record.invoice.invoiceNumber } : {}),
+    ...(record.payment?.paymentReference ? { paymentReference: record.payment.paymentReference } : {}),
     reasonCode: record.deductionCase.reasonCode,
     queueStatus: record.deductionCase.queueStatus,
     priority: record.deductionCase.priority,
@@ -1218,7 +1243,7 @@ function mapQueueItem(record: DeductionWorkspaceRecord) {
     currency: record.deductionCase.currency,
     missingDocumentCount,
     claimCount,
-    creditMemoState: record.creditMemoDraft?.state,
+    ...(record.creditMemoDraft?.state ? { creditMemoState: record.creditMemoDraft.state } : {}),
     detectedAt: record.deductionCase.detectedAt,
     nextAction,
   };
@@ -1237,8 +1262,10 @@ function mapDetail(record: DeductionWorkspaceRecord): DeductionDetailReadModel {
       currency: record.deductionCase.currency,
       detectedAt: record.deductionCase.detectedAt,
       openedAt: record.deductionCase.openedAt,
-      externalClaimReference: record.deductionCase.externalClaimReference,
-      ownerRole: record.deductionCase.ownerRole,
+      ...(record.deductionCase.externalClaimReference
+        ? { externalClaimReference: record.deductionCase.externalClaimReference }
+        : {}),
+      ...(record.deductionCase.ownerRole ? { ownerRole: record.deductionCase.ownerRole } : {}),
       metadata: record.deductionCase.metadata,
     },
     relatedRecords: {
@@ -1289,7 +1316,7 @@ function mapDetail(record: DeductionWorkspaceRecord): DeductionDetailReadModel {
       category: line.category,
       description: line.description,
       disputedAmountCents: line.disputedAmountCents,
-      acceptedAmountCents: line.acceptedAmountCents,
+      ...(typeof line.acceptedAmountCents === "number" ? { acceptedAmountCents: line.acceptedAmountCents } : {}),
       status: line.status,
     })),
     claims: record.claims.map((claim) => ({
@@ -1299,7 +1326,7 @@ function mapDetail(record: DeductionWorkspaceRecord): DeductionDetailReadModel {
       sourceChannel: claim.sourceChannel,
       assertedAmountCents: claim.assertedAmountCents,
       assertedAt: claim.assertedAt,
-      claimantName: claim.claimantName,
+      ...(claim.claimantName ? { claimantName: claim.claimantName } : {}),
     })),
     ...(record.documentBundle
       ? {
@@ -1320,9 +1347,9 @@ function mapDetail(record: DeductionWorkspaceRecord): DeductionDetailReadModel {
             subtotalAmountCents: record.creditMemoDraft.subtotalAmountCents,
             totalAmountCents: record.creditMemoDraft.totalAmountCents,
             erpSyncStatus: record.creditMemoDraft.erpSyncStatus,
-            memoNumber: record.creditMemoDraft.memoNumber,
+            ...(record.creditMemoDraft.memoNumber ? { memoNumber: record.creditMemoDraft.memoNumber } : {}),
             lastRefreshedAt: record.creditMemoDraft.lastRefreshedAt,
-            lastSyncedAt: record.creditMemoDraft.lastSyncedAt,
+            ...(record.creditMemoDraft.lastSyncedAt ? { lastSyncedAt: record.creditMemoDraft.lastSyncedAt } : {}),
             lines: record.creditMemoDraftLines.map((line) => ({
               id: line.id,
               lineNumber: line.lineNumber,
@@ -1342,11 +1369,12 @@ async function buildRecordFromUpload(
   const now = input.detectedAt;
   const existing = input.caseId ? await repository.get(input.caseId) : undefined;
   const caseId = input.caseId ?? randomUUID();
-  const deductionCase: DeductionCase = {
-    ...(existing?.deductionCase ?? { id: caseId }),
-    ...(existing
-      ? evolveEntityMetadata(existing.deductionCase, { at: now, actorId: "upload_job", actorRole: "system" })
-      : createEntityMetadata({ at: now, actorId: "upload_job", actorRole: "system" })),
+  const deductionState: DeductionCase["state"] = input.missingDocumentTypes?.length ? "gathering_support" : "triaged";
+  const deductionQueueStatus: DeductionCase["queueStatus"] = input.missingDocumentTypes?.length
+    ? "needs_documents"
+    : "ready_for_review";
+  const deductionSourceChannel: DeductionCase["sourceChannel"] = "upload";
+  const deductionCaseFields = {
     id: caseId,
     parentAccountId: input.parentAccountId,
     billingAccountId: input.billingAccountId,
@@ -1356,11 +1384,11 @@ async function buildRecordFromUpload(
     ...(input.exceptionId ? { exceptionId: input.exceptionId } : {}),
     ...(input.approvalRequestId ? { approvalRequestId: input.approvalRequestId } : {}),
     ...(input.externalClaimReference ? { externalClaimReference: input.externalClaimReference } : {}),
-    state: input.missingDocumentTypes?.length ? "gathering_support" : "triaged",
-    queueStatus: input.missingDocumentTypes?.length ? "needs_documents" : "ready_for_review",
+    state: deductionState,
+    queueStatus: deductionQueueStatus,
     reasonCode: normalizeReasonCode(input.reasonCode),
     priority: normalizePriority(input.priority),
-    sourceChannel: "upload",
+    sourceChannel: deductionSourceChannel,
     ...(input.ownerRole ? { ownerRole: input.ownerRole } : {}),
     detectedAt: input.detectedAt,
     openedAt: existing?.deductionCase.openedAt ?? input.detectedAt,
@@ -1368,6 +1396,43 @@ async function buildRecordFromUpload(
     currency: input.currency,
     metadata: input.metadata ?? {},
   };
+  const deductionCase: DeductionCase = existing
+    ? {
+        ...existing.deductionCase,
+        ...evolveEntityMetadata(existing.deductionCase, { at: now, actorId: "upload_job", actorRole: "system" }),
+        ...deductionCaseFields,
+      }
+    : {
+        ...createEntityMetadata({ at: now, actorId: "upload_job", actorRole: "system" }),
+        ...deductionCaseFields,
+      };
+
+  const documentBundleId = existing?.documentBundle?.id ?? randomUUID();
+  const documentBundleFields = {
+    id: documentBundleId,
+    deductionCaseId: caseId,
+    ...(input.invoiceId ? { invoiceId: input.invoiceId } : {}),
+    ...(input.paymentId ? { paymentId: input.paymentId } : {}),
+    status: bundleStatus(input.uploadedDocumentIds, input.missingDocumentTypes),
+    completenessScore: completenessScore(input.uploadedDocumentIds, input.missingDocumentTypes),
+    missingDocumentTypes: input.missingDocumentTypes ?? [],
+    documentIds: input.uploadedDocumentIds,
+    metadata: {},
+  };
+  const documentBundle: DeductionDocumentBundle = existing?.documentBundle
+    ? {
+        ...existing.documentBundle,
+        ...evolveEntityMetadata(existing.documentBundle, {
+          at: now,
+          actorId: "upload_job",
+          actorRole: "system",
+        }),
+        ...documentBundleFields,
+      }
+    : {
+        ...createEntityMetadata({ at: now, actorId: "upload_job", actorRole: "system" }),
+        ...documentBundleFields,
+      };
 
   return {
     deductionCase,
@@ -1380,9 +1445,9 @@ async function buildRecordFromUpload(
       existing: existing?.lineItems ?? [],
       input: input.lineItems ?? [],
       caseId,
-      invoiceId: input.invoiceId,
-      paymentId: input.paymentId,
-      exceptionId: input.exceptionId,
+      ...(input.invoiceId ? { invoiceId: input.invoiceId } : {}),
+      ...(input.paymentId ? { paymentId: input.paymentId } : {}),
+      ...(input.exceptionId ? { exceptionId: input.exceptionId } : {}),
       now,
       actorId: "upload_job",
     }),
@@ -1390,29 +1455,15 @@ async function buildRecordFromUpload(
       existing: existing?.claims ?? [],
       input: input.claims ?? [],
       caseId,
-      invoiceId: input.invoiceId,
-      paymentId: input.paymentId,
-      exceptionId: input.exceptionId,
+      ...(input.invoiceId ? { invoiceId: input.invoiceId } : {}),
+      ...(input.paymentId ? { paymentId: input.paymentId } : {}),
+      ...(input.exceptionId ? { exceptionId: input.exceptionId } : {}),
       sourceChannel: "upload",
       currency: input.currency,
       now,
       actorId: "upload_job",
     }),
-    documentBundle: {
-      ...(existing?.documentBundle ?? { id: existing?.documentBundle?.id ?? randomUUID() }),
-      ...(existing?.documentBundle
-        ? evolveEntityMetadata(existing.documentBundle, { at: now, actorId: "upload_job", actorRole: "system" })
-        : createEntityMetadata({ at: now, actorId: "upload_job", actorRole: "system" })),
-      id: existing?.documentBundle?.id ?? randomUUID(),
-      deductionCaseId: caseId,
-      ...(input.invoiceId ? { invoiceId: input.invoiceId } : {}),
-      ...(input.paymentId ? { paymentId: input.paymentId } : {}),
-      status: bundleStatus(input.uploadedDocumentIds, input.missingDocumentTypes),
-      completenessScore: completenessScore(input.uploadedDocumentIds, input.missingDocumentTypes),
-      missingDocumentTypes: input.missingDocumentTypes ?? [],
-      documentIds: input.uploadedDocumentIds,
-      metadata: {},
-    },
+    documentBundle,
     ...(existing?.creditMemoDraft ? { creditMemoDraft: existing.creditMemoDraft } : {}),
     creditMemoDraftLines: existing?.creditMemoDraftLines ?? [],
   };
@@ -1423,23 +1474,23 @@ async function buildRecordFromApPortal(
   input: DeductionApPortalJobHookInput,
 ): Promise<DeductionWorkspaceRecord> {
   const base = await buildRecordFromUpload(repository, {
-    caseId: input.caseId,
-    tenantId: input.tenantId,
+    ...(input.caseId ? { caseId: input.caseId } : {}),
+    ...(input.tenantId ? { tenantId: input.tenantId } : {}),
     parentAccountId: input.parentAccountId,
     billingAccountId: input.billingAccountId,
-    branchId: input.branchId,
-    invoiceId: input.invoiceId,
-    paymentId: input.paymentId,
-    exceptionId: input.exceptionId,
-    approvalRequestId: input.approvalRequestId,
+    ...(input.branchId ? { branchId: input.branchId } : {}),
+    ...(input.invoiceId ? { invoiceId: input.invoiceId } : {}),
+    ...(input.paymentId ? { paymentId: input.paymentId } : {}),
+    ...(input.exceptionId ? { exceptionId: input.exceptionId } : {}),
+    ...(input.approvalRequestId ? { approvalRequestId: input.approvalRequestId } : {}),
     externalClaimReference: input.externalClaimReference,
     targetAmountCents: input.targetAmountCents,
     currency: input.currency,
     reasonCode: input.reasonCode,
-    priority: input.priority,
+    ...(input.priority ? { priority: input.priority } : {}),
     detectedAt: input.detectedAt,
     uploadedDocumentIds: input.documentIds ?? [],
-    lineItems: input.lineItems,
+    ...(input.lineItems ? { lineItems: input.lineItems } : {}),
     claims: [input.claim],
     metadata: {
       ...input.metadata,

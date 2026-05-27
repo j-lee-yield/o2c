@@ -16,6 +16,7 @@ export function createPromiseToPayFromReply(params: {
   now: string;
   account: BillingAccount;
   invoices: CustomerInvoice[];
+  installmentLineIds?: string[];
   analysis: CollectionReplyAnalysis;
   contact?: Contact;
 }): PromiseToPay {
@@ -31,6 +32,9 @@ export function createPromiseToPayFromReply(params: {
     parentAccountId: params.account.parentAccountId,
     billingAccountId: params.account.id,
     ...(params.contact ? { contactId: params.contact.id } : {}),
+    ...(params.installmentLineIds && params.installmentLineIds.length > 0
+      ? { installmentLineIds: [...params.installmentLineIds] }
+      : {}),
     promisedAmountCents:
       params.analysis.ptp?.promisedAmountCents ?? primaryInvoice?.amountCents ?? 0,
     currency: params.analysis.ptp?.currency ?? primaryInvoice?.currency ?? params.account.currency,
@@ -38,6 +42,7 @@ export function createPromiseToPayFromReply(params: {
     state: "detected_unconfirmed",
     metadata: {
       invoiceIds: params.invoices.map((invoice) => invoice.id),
+      installmentLineIds: params.installmentLineIds ?? [],
       extractionConfidence: params.analysis.ptp?.confidence ?? params.analysis.confidence,
       extractionRiskFlags: params.analysis.ptp?.riskFlags ?? [],
     },

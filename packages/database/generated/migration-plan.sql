@@ -1047,6 +1047,97 @@ CREATE INDEX idx_sending_identity_owner
 CREATE INDEX idx_gmail_oauth_connection_tenant_email
   ON gmail_oauth_connection (tenant_id, sender_email, updated_at DESC);
 
+-- 0010_installment_receivables.sql
+CREATE TYPE installment_plan_status AS ENUM (
+  'active',
+  'completed',
+  'defaulted',
+  'restructured',
+  'cancelled'
+);
+
+CREATE TYPE installment_cadence AS ENUM (
+  'weekly',
+  'monthly',
+  'quarterly',
+  'custom'
+);
+
+CREATE TYPE installment_line_status AS ENUM (
+  'future',
+  'due',
+  'partially_paid',
+  'overdue',
+  'promised',
+  'disputed',
+  'paid',
+  'restructured'
+);
+
+CREATE TABLE installment_plan (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL DEFAULT 'default',
+  version integer NOT NULL DEFAULT 1,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  deleted_at timestamptz,
+  created_by_actor_id text,
+  created_by_actor_role text,
+  updated_by_actor_id text,
+  updated_by_actor_role text,
+  billing_account_id uuid NOT NULL REFERENCES billing_account(id),
+  branch_id uuid REFERENCES branch(id),
+  parent_invoice_id uuid REFERENCES invoice(id),
+  erp_reference text,
+  currency text NOT NULL,
+  total_contract_amount_cents bigint NOT NULL,
+  number_of_installments integer NOT NULL,
+  cadence installment_cadence NOT NULL,
+  plan_start_date date NOT NULL,
+  state installment_plan_status NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE installment_line (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL DEFAULT 'default',
+  version integer NOT NULL DEFAULT 1,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  deleted_at timestamptz,
+  created_by_actor_id text,
+  created_by_actor_role text,
+  updated_by_actor_id text,
+  updated_by_actor_role text,
+  installment_plan_id uuid NOT NULL REFERENCES installment_plan(id),
+  parent_invoice_id uuid REFERENCES invoice(id),
+  billing_account_id uuid NOT NULL REFERENCES billing_account(id),
+  branch_id uuid REFERENCES branch(id),
+  currency text NOT NULL,
+  sequence_number integer NOT NULL,
+  due_date date NOT NULL,
+  scheduled_amount_cents bigint NOT NULL,
+  paid_amount_cents bigint NOT NULL DEFAULT 0,
+  remaining_amount_cents bigint NOT NULL,
+  state installment_line_status NOT NULL,
+  days_past_due integer NOT NULL DEFAULT 0,
+  last_promise_to_pay_date date,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+ALTER TABLE payment_application
+  ADD COLUMN installment_plan_id uuid REFERENCES installment_plan(id),
+  ADD COLUMN installment_line_id uuid REFERENCES installment_line(id);
+
+ALTER TABLE promise_to_pay
+  ADD COLUMN installment_line_ids jsonb;
+
+CREATE INDEX idx_installment_plan_billing_account
+  ON installment_plan (tenant_id, billing_account_id, state);
+
+CREATE INDEX idx_installment_line_plan_due
+  ON installment_line (tenant_id, installment_plan_id, due_date, state);
+
 -- 0011_deductions_workspace.sql
 DO $$
 BEGIN
@@ -1772,3 +1863,274 @@ CREATE INDEX IF NOT EXISTS idx_odoo_connection_updated_at
   ON odoo_connection (updated_at DESC);
 
 COMMIT;
+
+-- 0019_access_control_rbac.sql
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS access_control_user (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  last_active_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ,
+  created_by_actor_id TEXT,
+  created_by_actor_role TEXT,
+  updated_by_actor_id TEXT,
+  updated_by_actor_role TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_access_control_user_tenant_email
+  ON access_control_user (tenant_id, lower(email));
+
+CREATE TABLE IF NOT EXISTS access_control_role (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT,
+  key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  description TEXT NOT NULL,
+  is_system_role BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ,
+  created_by_actor_id TEXT,
+  created_by_actor_role TEXT,
+  updated_by_actor_id TEXT,
+  updated_by_actor_role TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_access_control_role_tenant_key
+  ON access_control_role (COALESCE(tenant_id, '__system__'), key);
+
+CREATE TABLE IF NOT EXISTS access_control_permission (
+  id TEXT PRIMARY KEY,
+  key TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL,
+  description TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ,
+  created_by_actor_id TEXT,
+  created_by_actor_role TEXT,
+  updated_by_actor_id TEXT,
+  updated_by_actor_role TEXT
+);
+
+CREATE TABLE IF NOT EXISTS access_control_role_permission (
+  role_id TEXT NOT NULL REFERENCES access_control_role(id),
+  permission_id TEXT NOT NULL REFERENCES access_control_permission(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (role_id, permission_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_role_assignment (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL REFERENCES access_control_user(id),
+  role_id TEXT NOT NULL REFERENCES access_control_role(id),
+  scope_type TEXT NOT NULL,
+  scope_id TEXT,
+  granted_by_user_id TEXT NOT NULL,
+  granted_at TIMESTAMPTZ NOT NULL,
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ,
+  created_by_actor_id TEXT,
+  created_by_actor_role TEXT,
+  updated_by_actor_id TEXT,
+  updated_by_actor_role TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_role_assignment_user_scope
+  ON user_role_assignment (user_id, scope_type, scope_id);
+
+CREATE TABLE IF NOT EXISTS approval_authority (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT REFERENCES access_control_user(id),
+  role_id TEXT REFERENCES access_control_role(id),
+  approval_type TEXT NOT NULL,
+  scope_type TEXT NOT NULL,
+  scope_id TEXT,
+  granted_by_user_id TEXT NOT NULL,
+  granted_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ,
+  created_by_actor_id TEXT,
+  created_by_actor_role TEXT,
+  updated_by_actor_id TEXT,
+  updated_by_actor_role TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_authority_user_scope
+  ON approval_authority (user_id, approval_type, scope_type, scope_id);
+
+CREATE INDEX IF NOT EXISTS idx_approval_authority_role_scope
+  ON approval_authority (role_id, approval_type, scope_type, scope_id);
+
+COMMIT;
+
+-- 0020_control_center_workflow_executions.sql
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS control_center_workflow_execution (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  deleted_at TIMESTAMPTZ,
+  created_by_actor_id TEXT,
+  created_by_actor_role TEXT,
+  updated_by_actor_id TEXT,
+  updated_by_actor_role TEXT,
+  workflow_id TEXT NOT NULL REFERENCES control_center_workflow(id) ON DELETE CASCADE,
+  billing_account_id UUID NOT NULL REFERENCES billing_account(id) ON DELETE CASCADE,
+  parent_account_id UUID NOT NULL REFERENCES parent_account(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  current_track TEXT NOT NULL,
+  last_decision_action TEXT,
+  last_decision_reason TEXT,
+  last_decision_confidence DOUBLE PRECISION,
+  requires_human_review BOOLEAN NOT NULL DEFAULT FALSE,
+  effective_until TIMESTAMPTZ,
+  rationale_summary TEXT,
+  reasoning_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  UNIQUE (tenant_id, workflow_id, billing_account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_center_workflow_execution_workflow
+  ON control_center_workflow_execution (tenant_id, workflow_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_control_center_workflow_execution_billing_account
+  ON control_center_workflow_execution (tenant_id, billing_account_id, updated_at DESC);
+
+COMMIT;
+
+-- 0021_call_inbox_records.sql
+CREATE TABLE IF NOT EXISTS call_inbox_record (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL DEFAULT 'default',
+  provider text NOT NULL,
+  provider_call_id text NOT NULL,
+  communication_attempt_id text,
+  pre_call_plan_id text,
+  parent_account_id text,
+  billing_account_id text,
+  branch_id text,
+  contact_id text,
+  customer_name text NOT NULL,
+  customer_phone text,
+  from_number text,
+  to_number text,
+  direction text NOT NULL,
+  status text NOT NULL,
+  provider_status text,
+  disposition text,
+  started_at timestamptz NOT NULL,
+  ended_at timestamptz,
+  duration_seconds integer,
+  voicemail boolean NOT NULL DEFAULT false,
+  sentiment text NOT NULL DEFAULT 'unknown',
+  classifications jsonb NOT NULL DEFAULT '[]'::jsonb,
+  workflow_id text,
+  workflow_name text,
+  requested_by text,
+  approver_id text,
+  approver_name text,
+  invoice_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
+  summary text,
+  transcript_uri text,
+  transcript_segments jsonb NOT NULL DEFAULT '[]'::jsonb,
+  recording_url text,
+  recording_expires_at timestamptz,
+  public_log_url text,
+  task_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
+  open_tasks_count integer NOT NULL DEFAULT 0,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  raw_provider_payload jsonb,
+  deleted_at timestamptz,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  UNIQUE (tenant_id, provider, provider_call_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_inbox_record_tenant_started
+  ON call_inbox_record (tenant_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_call_inbox_record_customer
+  ON call_inbox_record (tenant_id, customer_name);
+
+CREATE INDEX IF NOT EXISTS idx_call_inbox_record_direction
+  ON call_inbox_record (tenant_id, direction, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_call_inbox_record_billing_account
+  ON call_inbox_record (tenant_id, billing_account_id, started_at DESC);
+
+-- 0022_task_records.sql
+CREATE TABLE IF NOT EXISTS task_record (
+  id text NOT NULL,
+  tenant_id text NOT NULL DEFAULT 'default',
+  version integer NOT NULL DEFAULT 1,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  created_by_actor_id text,
+  created_by_actor_role text,
+  updated_by_actor_id text,
+  updated_by_actor_role text,
+  title text NOT NULL,
+  description text,
+  kind text NOT NULL,
+  task_type text NOT NULL,
+  status text NOT NULL,
+  origin text NOT NULL,
+  surfaces jsonb NOT NULL DEFAULT '[]'::jsonb,
+  customer_profile_id text,
+  billing_account_id text,
+  contact_id text,
+  branch_id text,
+  owner_id text,
+  owner_role text,
+  owner_team text,
+  source text,
+  call_id text,
+  plan_id text,
+  linked_invoice_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  priority text,
+  due_at timestamptz,
+  completed_at timestamptz,
+  closed_at timestamptz,
+  dismissed_at timestamptz,
+  summary text,
+  recommended_next_action text,
+  transcript_snippet text,
+  requires_human_review boolean,
+  source_links jsonb NOT NULL DEFAULT '[]'::jsonb,
+  audit_trail jsonb NOT NULL DEFAULT '[]'::jsonb,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_record_tenant_status_due
+  ON task_record (tenant_id, status, due_at, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_task_record_billing_account
+  ON task_record (tenant_id, billing_account_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_task_record_customer_profile
+  ON task_record (tenant_id, customer_profile_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_task_record_call
+  ON task_record (tenant_id, call_id);

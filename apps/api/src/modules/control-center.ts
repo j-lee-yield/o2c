@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { buildControlCenterConsoleData, getControlCenterService } from "../bootstrap/control-center-service.js";
+import { getEmailOutboundService } from "../bootstrap/email-integration-service.js";
 
 const registeredApps = new WeakSet<FastifyInstance>();
 
@@ -141,6 +142,38 @@ const feedbackSchema = z.object({
   notes: z.string().optional(),
 });
 
+const testEmailSchema = z.object({
+  principal: principalSchema,
+  senderIdentityId: z.string().optional(),
+  recipientEmail: z.string().email(),
+  workflowId: z.string().optional(),
+  workflowName: z.string().optional(),
+});
+
+const workflowCustomerAssignmentSchema = z.object({
+  principal: principalSchema,
+  tenantId: z.string().default("default"),
+  billingAccountId: z.string().min(1),
+  parentAccountId: z.string().min(1),
+  currentTrack: z
+    .enum([
+      "standard_reminders",
+      "promise_to_pay",
+      "issue_resolution",
+      "email_only",
+      "call_assisted",
+      "manual_review",
+    ])
+    .optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const workflowCustomerActionSchema = z.object({
+  principal: principalSchema,
+  reason: z.string().optional(),
+  effectiveUntil: z.string().optional(),
+});
+
 export const registerControlCenterRoutes = (app: FastifyInstance): void => {
   if (registeredApps.has(app)) {
     return;
@@ -149,6 +182,44 @@ export const registerControlCenterRoutes = (app: FastifyInstance): void => {
 
   app.get("/v1/control-center", async () => buildControlCenterConsoleData());
 
+  app.post("/v1/control-center/test-email", async (request, reply) => {
+    const parsed = testEmailSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: "Invalid control-center test email payload.", issues: parsed.error.issues });
+    }
+
+    const now = new Date().toISOString();
+    const workflowName = parsed.data.workflowName?.trim() || "Control Center workflow";
+    const context = buildControlCenterTestEmailContext({
+      now,
+      recipientEmail: parsed.data.recipientEmail,
+      workflowId: parsed.data.workflowId ?? "control-center-test",
+    });
+    const result = await getEmailOutboundService().sendWorkflowEmail({
+      principal: parsed.data.principal,
+      ...(parsed.data.senderIdentityId ? { senderIdentityId: parsed.data.senderIdentityId } : {}),
+      workflowKind: "request_remittance",
+      account: context.account,
+      invoices: context.invoices,
+      contact: context.contact,
+      subjectLine: `Control Center test: ${workflowName}`,
+      bodyPreview: [
+        "This is a Control Center test email from Yield AROS.",
+        "",
+        "It confirms the configured sender identity can send operator-approved workflow outreach.",
+      ].join("\n"),
+    });
+
+    return reply.send({
+      ...result,
+      testContext: {
+        billingAccountId: context.account.id,
+        parentAccountId: context.account.parentAccountId,
+        invoiceIds: context.invoices.map((invoice) => invoice.id),
+      },
+    });
+  });
+
   app.get("/v1/control-center/workflows", async () => {
     return { workflows: getControlCenterService().listWorkflows() };
   });
@@ -156,6 +227,11 @@ export const registerControlCenterRoutes = (app: FastifyInstance): void => {
   app.get("/v1/control-center/workflows/:workflowId", async (request) => {
     const params = z.object({ workflowId: z.string() }).parse(request.params);
     return getControlCenterService().getWorkflowDetail(params.workflowId);
+  });
+
+  app.get("/v1/control-center/workflows/:workflowId/customers", async (request) => {
+    const params = z.object({ workflowId: z.string() }).parse(request.params);
+    return { executions: getControlCenterService().listWorkflowExecutions(params.workflowId) };
   });
 
   app.post("/v1/control-center/workflows", async (request, reply) => {
@@ -183,6 +259,82 @@ export const registerControlCenterRoutes = (app: FastifyInstance): void => {
       ...(parsed.data.metadata ? { metadata: parsed.data.metadata } : {}),
     });
   });
+
+  app.post("/v1/control-center/workflows/:workflowId/customers", async (request, reply) => {
+    const params = z.object({ workflowId: z.string() }).parse(request.params);
+    const parsed = workflowCustomerAssignmentSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .status(400)
+        .send({ message: "Invalid workflow customer assignment payload.", issues: parsed.error.issues });
+    }
+    return getControlCenterService().assignWorkflowCustomer({
+      principal: parsed.data.principal,
+      tenantId: parsed.data.tenantId,
+      workflowId: params.workflowId,
+      billingAccountId: parsed.data.billingAccountId,
+      parentAccountId: parsed.data.parentAccountId,
+      ...(parsed.data.currentTrack ? { currentTrack: parsed.data.currentTrack } : {}),
+      ...(parsed.data.metadata ? { metadata: parsed.data.metadata } : {}),
+    });
+  });
+
+  app.post(
+    "/v1/control-center/workflows/:workflowId/customers/:executionId/pause",
+    async (request, reply) => {
+      const params = z.object({ workflowId: z.string(), executionId: z.string() }).parse(request.params);
+      const parsed = workflowCustomerActionSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply
+          .status(400)
+          .send({ message: "Invalid workflow customer pause payload.", issues: parsed.error.issues });
+      }
+      return getControlCenterService().pauseWorkflowCustomer({
+        principal: parsed.data.principal,
+        workflowId: params.workflowId,
+        executionId: params.executionId,
+        ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
+        ...(parsed.data.effectiveUntil ? { effectiveUntil: parsed.data.effectiveUntil } : {}),
+      });
+    },
+  );
+
+  app.post(
+    "/v1/control-center/workflows/:workflowId/customers/:executionId/resume",
+    async (request, reply) => {
+      const params = z.object({ workflowId: z.string(), executionId: z.string() }).parse(request.params);
+      const parsed = workflowCustomerActionSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply
+          .status(400)
+          .send({ message: "Invalid workflow customer resume payload.", issues: parsed.error.issues });
+      }
+      return getControlCenterService().resumeWorkflowCustomer({
+        principal: parsed.data.principal,
+        workflowId: params.workflowId,
+        executionId: params.executionId,
+        ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
+      });
+    },
+  );
+
+  app.delete(
+    "/v1/control-center/workflows/:workflowId/customers/:executionId",
+    async (request, reply) => {
+      const params = z.object({ workflowId: z.string(), executionId: z.string() }).parse(request.params);
+      const parsed = z.object({ principal: principalSchema }).safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return reply
+          .status(400)
+          .send({ message: "Invalid workflow customer unenroll payload.", issues: parsed.error.issues });
+      }
+      return getControlCenterService().unenrollWorkflowCustomer({
+        principal: parsed.data.principal,
+        workflowId: params.workflowId,
+        executionId: params.executionId,
+      });
+    },
+  );
 
   app.put("/v1/control-center/workflows/:workflowId", async (request, reply) => {
     const params = z.object({ workflowId: z.string() }).parse(request.params);
@@ -386,7 +538,7 @@ export const registerControlCenterRoutes = (app: FastifyInstance): void => {
   });
 
   app.get("/v1/control-center/call-agent", async () => {
-    return { config: getControlCenterService().getCallAgentConfig() };
+    return { config: buildControlCenterConsoleData().callAgentConfig };
   });
 
   app.put("/v1/control-center/call-agent", async (request, reply) => {
@@ -507,5 +659,65 @@ function normalizeTriggerConfig(
     ...(input.paymentSignalType ? { paymentSignalType: input.paymentSignalType } : {}),
     ...(input.promiseState ? { promiseState: input.promiseState } : {}),
     ...(input.metadata ? { metadata: input.metadata } : {}),
+  };
+}
+
+function buildControlCenterTestEmailContext(input: {
+  now: string;
+  recipientEmail: string;
+  workflowId: string;
+}) {
+  const parentAccountId = "11111111-1111-4111-8111-111111111111";
+  const billingAccountId = "22222222-2222-4222-8222-222222222222";
+  const contactId = "33333333-3333-4333-8333-333333333333";
+  const invoiceId = "44444444-4444-4444-8444-444444444444";
+  const metadata = { source: "control_center_test", workflowId: input.workflowId };
+
+  return {
+    account: {
+      id: billingAccountId,
+      createdAt: input.now,
+      updatedAt: input.now,
+      parentAccountId,
+      accountNumber: "CONTROL-CENTER-TEST",
+      displayName: "Control Center Test Account",
+      currency: "PHP",
+      accountTier: "standard" as const,
+      status: "active" as const,
+      centrallyPaid: false,
+      metadata,
+    },
+    contact: {
+      id: contactId,
+      createdAt: input.now,
+      updatedAt: input.now,
+      parentAccountId,
+      billingAccountId,
+      scope: "billing_account" as const,
+      scopeId: billingAccountId,
+      fullName: "Control Center test recipient",
+      email: input.recipientEmail,
+      role: "ap" as const,
+      isPrimary: true,
+      isVerified: true,
+      allowAutoSend: true,
+      recentSuccessfulResponses: 1,
+      metadata,
+    },
+    invoices: [
+      {
+        id: invoiceId,
+        createdAt: input.now,
+        updatedAt: input.now,
+        state: "synced_open" as const,
+        parentAccountId,
+        billingAccountId,
+        invoiceNumber: "CC-TEST-001",
+        currency: "PHP",
+        amountCents: 100,
+        dueDate: input.now.slice(0, 10),
+        metadata,
+      },
+    ],
   };
 }

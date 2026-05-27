@@ -9,8 +9,10 @@ import {
 describe("domainModules", () => {
   it("keeps the Sprint 1 scaffold surface explicit", () => {
     expect(domainModules.map((module) => module.name)).toEqual([
+      "access_control",
       "accounts",
       "invoices",
+      "installments",
       "payments",
       "payment_applications",
       "remittances",
@@ -25,6 +27,7 @@ describe("domainModules", () => {
       "customer_profiles",
       "deductions",
       "collections",
+      "control-center",
       "cash_application",
     ]);
     expect(defaultRoutingLevel()).toBe("billing_account");

@@ -77,12 +77,94 @@ describe("control center API", () => {
     expect(toggle.statusCode).toBe(200);
     expect(toggle.json().workflow.enabled).toBe(true);
 
+    const assignment = await app.inject({
+      method: "POST",
+      url: `/v1/control-center/workflows/${workflowId}/customers`,
+      payload: {
+        principal,
+        tenantId: "default",
+        billingAccountId: "11111111-1111-4111-8111-111111111111",
+        parentAccountId: "22222222-2222-4222-8222-222222222222",
+      },
+    });
+    expect(assignment.statusCode).toBe(200);
+    expect(assignment.json().created).toBe(true);
+    expect(assignment.json().execution.workflowId).toBe(workflowId);
+
+    const customers = await app.inject({
+      method: "GET",
+      url: `/v1/control-center/workflows/${workflowId}/customers`,
+    });
+    expect(customers.statusCode).toBe(200);
+    expect(customers.json().executions).toHaveLength(1);
+    const executionId = customers.json().executions[0].id as string;
+
+    const pause = await app.inject({
+      method: "POST",
+      url: `/v1/control-center/workflows/${workflowId}/customers/${executionId}/pause`,
+      payload: { principal, reason: "Pause requested from the workflow detail view." },
+    });
+    expect(pause.statusCode).toBe(200);
+    expect(pause.json().execution.status).toBe("paused");
+
+    const resume = await app.inject({
+      method: "POST",
+      url: `/v1/control-center/workflows/${workflowId}/customers/${executionId}/resume`,
+      payload: { principal },
+    });
+    expect(resume.statusCode).toBe(200);
+    expect(resume.json().execution.status).toBe("active");
+
+    const unenroll = await app.inject({
+      method: "DELETE",
+      url: `/v1/control-center/workflows/${workflowId}/customers/${executionId}`,
+      payload: { principal },
+    });
+    expect(unenroll.statusCode).toBe(200);
+    expect(unenroll.json().unenrolled).toBe(true);
+
     const remove = await app.inject({
       method: "DELETE",
       url: `/v1/control-center/workflows/${workflowId}`,
       payload: { principal },
     });
     expect(remove.statusCode).toBe(200);
+  });
+
+  it("sends Control Center test email with UUID-safe test context", async () => {
+    const identityResponse = await app.inject({
+      method: "POST",
+      url: "/v1/email/sending-identities/connect",
+      payload: {
+        provider: "internal",
+        authMode: "other",
+        senderEmail: "collections@example.test",
+        displayName: "Collections",
+        scopes: ["internal.send"],
+        isDefault: true,
+      },
+    });
+    expect(identityResponse.statusCode, identityResponse.payload).toBe(200);
+    const identityId = identityResponse.json().id as string;
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/control-center/test-email",
+      payload: {
+        principal,
+        senderIdentityId: identityId,
+        recipientEmail: "ap@example.test",
+        workflowId: "wf-test",
+        workflowName: "Test Workflow",
+      },
+    });
+
+    expect(response.statusCode, response.payload).toBe(200);
+    expect(response.json().deliveryState).toBe("sent");
+    expect(response.json().testContext.billingAccountId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(response.payload).not.toContain("control-center-test-account");
   });
 
   it("supports templates, call-agent config, and AI generation endpoints", async () => {

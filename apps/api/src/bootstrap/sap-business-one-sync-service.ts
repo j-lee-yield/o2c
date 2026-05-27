@@ -38,10 +38,10 @@ function createInvoiceSyncService() {
 }
 
 class SapBusinessOneSyncService {
-  private timer?: NodeJS.Timeout;
+  private timer: NodeJS.Timeout | undefined;
   private running = false;
-  private nextRunAt?: string;
-  private lastAttemptedAt?: string;
+  private nextRunAt: string | undefined;
+  private lastAttemptedAt: string | undefined;
 
   start() {
     const env = loadEnv();

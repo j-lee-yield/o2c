@@ -2,10 +2,18 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { buildApiApp } from "./app.js";
 
+const originalEnableDemoData = process.env.ENABLE_DEMO_DATA;
+process.env.ENABLE_DEMO_DATA = "true";
+
 const app = buildApiApp();
 
 afterAll(async () => {
   await app.close();
+  if (originalEnableDemoData === undefined) {
+    delete process.env.ENABLE_DEMO_DATA;
+  } else {
+    process.env.ENABLE_DEMO_DATA = originalEnableDemoData;
+  }
 });
 
 describe("operator console API", () => {
@@ -86,6 +94,15 @@ describe("operator console API", () => {
     expect(payload.loanRepaymentHistory.length).toBeGreaterThan(0);
     expect(payload.loanAlerts.length).toBeGreaterThan(0);
     expect(payload.loanTasks.length).toBeGreaterThan(0);
+    expect(payload.taskQueue.length).toBeGreaterThan(0);
+    expect(payload.taskQueue.map((item: { status: string }) => item.status)).toEqual(
+      expect.arrayContaining(["completed", "closed"]),
+    );
+    const joshTask = payload.taskQueue.find(
+      (item: { customerName: string; composeEmail?: { draft?: { body?: string } } }) =>
+        item.customerName === "Josh",
+    );
+    expect(joshTask?.composeEmail?.draft?.body).toContain("JOSH-INV-1001");
     expect(payload.exceptionsQueue[0]?.learning?.exceptionPlaybookRecommendation?.nextStep).toBeTypeOf("string");
     expect(payload.approvalsQueue.length).toBeGreaterThan(0);
     expect(

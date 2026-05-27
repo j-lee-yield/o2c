@@ -4,6 +4,7 @@ import { loadEnv } from "@o2c/config";
 import {
   createDatabaseClientConfig,
   isDatabaseAvailable,
+  PostgresCommunicationAttemptStore,
   PostgresEmailThreadReferenceStore,
   PostgresGmailOauthConnectionStore,
   PostgresImmutableActivityLogStore,
@@ -66,6 +67,7 @@ export type GmailInboxMessage = {
   fromName?: string;
   toEmail?: string;
   snippet?: string;
+  bodyText?: string;
   receivedAt?: string;
   labelIds: string[];
   unread: boolean;
@@ -135,10 +137,17 @@ type GmailMessageDetail = {
   labelIds?: string[];
   internalDate?: string;
   snippet?: string;
-  payload?: {
-    headers?: Array<{ name?: string; value?: string }>;
-  };
+  payload?: GmailMessagePayload;
   messages?: GmailMessageDetail[];
+};
+
+type GmailMessagePayload = {
+  mimeType?: string;
+  body?: {
+    data?: string;
+  };
+  headers?: Array<{ name?: string; value?: string }>;
+  parts?: GmailMessagePayload[];
 };
 
 export class GmailConnectionService implements GmailAccessTokenProvider {
@@ -510,7 +519,7 @@ export class GmailConnectionService implements GmailAccessTokenProvider {
     const response = await this.fetchImpl(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(
         input.providerThreadId,
-      )}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject`,
+      )}?format=full`,
       {
         headers: {
           authorization: `Bearer ${accessToken}`,
@@ -669,7 +678,7 @@ export class GmailConnectionService implements GmailAccessTokenProvider {
     const response = await this.fetchImpl(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(
         gmailMessageId,
-      )}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject`,
+      )}?format=full`,
       {
         headers: {
           authorization: `Bearer ${accessToken}`,
@@ -696,6 +705,7 @@ export class GmailConnectionService implements GmailAccessTokenProvider {
     const fromName = extractDisplayName(fromHeader);
     const toEmail = extractEmailAddress(toHeader);
     const labelIds = message.labelIds ?? [];
+    const bodyText = extractGmailBodyText(message.payload);
 
     return {
       providerMessageId: message.id ? `${senderIdentityId}:${message.id}` : `${senderIdentityId}:unknown`,
@@ -705,6 +715,7 @@ export class GmailConnectionService implements GmailAccessTokenProvider {
       ...(fromName ? { fromName } : {}),
       ...(toEmail ? { toEmail } : {}),
       ...(message.snippet ? { snippet: message.snippet } : {}),
+      ...(bodyText ? { bodyText } : {}),
       ...(message.internalDate
         ? { receivedAt: new Date(Number(message.internalDate)).toISOString() }
         : {}),
@@ -774,6 +785,9 @@ function initializeEmailServices() {
   const threadStore = shouldUseDatabase
     ? new PostgresEmailThreadReferenceStore(db.connectionString)
     : new InMemoryEmailThreadReferenceStore();
+  const communicationAttemptStore = shouldUseDatabase
+    ? new PostgresCommunicationAttemptStore(db.connectionString)
+    : undefined;
   const gmailOauthStore = shouldUseDatabase
     ? new PostgresGmailOauthConnectionStore(db.connectionString)
     : undefined;
@@ -792,6 +806,7 @@ function initializeEmailServices() {
     activityStore,
     sendingIdentityStore,
     threadStore,
+    ...(communicationAttemptStore ? { communicationAttemptStore } : {}),
     providerRegistry,
     idGenerator: () => randomUUID(),
   });
@@ -834,6 +849,62 @@ function extractDisplayName(headerValue?: string) {
   }
   const cleaned = match.replace(/^"+|"+$/g, "").trim();
   return cleaned.length > 0 && cleaned !== headerValue ? cleaned : undefined;
+}
+
+function extractGmailBodyText(payload?: GmailMessagePayload): string | undefined {
+  if (!payload) {
+    return undefined;
+  }
+
+  const plainTextParts = collectGmailBodyParts(payload, "text/plain");
+  const htmlParts = collectGmailBodyParts(payload, "text/html");
+  const decoded =
+    plainTextParts.map(decodeGmailBodyPart).find((value) => value.trim().length > 0) ??
+    htmlParts
+      .map(decodeGmailBodyPart)
+      .map(stripHtmlForEmailPreview)
+      .find((value) => value.trim().length > 0);
+
+  return decoded?.trim();
+}
+
+function collectGmailBodyParts(payload: GmailMessagePayload, mimeType: string): GmailMessagePayload[] {
+  const matches: GmailMessagePayload[] = [];
+  if (payload.mimeType?.toLowerCase() === mimeType && payload.body?.data) {
+    matches.push(payload);
+  }
+  for (const part of payload.parts ?? []) {
+    matches.push(...collectGmailBodyParts(part, mimeType));
+  }
+  return matches;
+}
+
+function decodeGmailBodyPart(payload: GmailMessagePayload): string {
+  const data = payload.body?.data;
+  if (!data) {
+    return "";
+  }
+
+  try {
+    const normalized = data.replace(/-/g, "+").replace(/_/g, "/");
+    return Buffer.from(normalized, "base64").toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function stripHtmlForEmailPreview(value: string): string {
+  return value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ");
 }
 
 function compareInboxMessagesDesc(left: GmailInboxMessage, right: GmailInboxMessage) {

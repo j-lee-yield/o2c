@@ -344,6 +344,8 @@ function mapQuickBooksCustomerRow(customer: QuickBooksCustomerRow): QuickBooksCu
     customer.PrimaryPhone?.FreeFormNumber,
     customer.Mobile?.FreeFormNumber,
   );
+  const email = customer.PrimaryEmailAddr?.Address?.trim();
+  const billAddressSummary = summarizeAddress(customer.BillAddr);
 
   return {
     externalId: customer.Id,
@@ -351,14 +353,10 @@ function mapQuickBooksCustomerRow(customer: QuickBooksCustomerRow): QuickBooksCu
       readDefinedTrimmed(customer.DisplayName, customer.CompanyName) ?? "Unknown customer",
     ...(customer.ParentRef?.name ? { parentAccountName: customer.ParentRef.name.trim() } : {}),
     currencyCode: customer.CurrencyRef?.value?.trim() || "PHP",
-    ...(customer.PrimaryEmailAddr?.Address
-      ? { email: customer.PrimaryEmailAddr.Address.trim() }
-      : {}),
+    ...(email ? { email } : {}),
     ...(phone ? { phone } : {}),
     status: customer.Active === false ? "inactive" : "active",
-    ...(summarizeAddress(customer.BillAddr)
-      ? { billAddressSummary: summarizeAddress(customer.BillAddr) }
-      : {}),
+    ...(billAddressSummary ? { billAddressSummary } : {}),
   };
 }
 

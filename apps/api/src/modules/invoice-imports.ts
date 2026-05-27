@@ -56,7 +56,7 @@ const spreadsheetFileHeadersSchema = z.object({
 
 const inMemorySpreadsheetInvoiceStore = new InMemoryCanonicalInvoicePersistenceStore();
 
-function createInvoiceSyncService() {
+export function createInvoiceSyncService() {
   const databaseUrl = createDatabaseClientConfig().connectionString;
   const store =
     databaseUrl.length > 0 && isDatabaseAvailable(databaseUrl)

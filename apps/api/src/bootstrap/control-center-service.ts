@@ -1,4 +1,5 @@
 import { InMemoryImmutableActivityLogStore } from "@o2c/audit";
+import { loadEnv } from "@o2c/config";
 import {
   createDatabaseClientConfig,
   isDatabaseAvailable,
@@ -22,6 +23,11 @@ import { getOutreachIntelligenceService } from "./outreach-intelligence-service.
 
 const defaultPrincipal: Principal = { id: "control_center_seed", roles: ["admin"] };
 let controlCenterService: ControlCenterService | undefined;
+
+function isDemoDataEnabled() {
+  const env = loadEnv();
+  return env.ENABLE_DEMO_DATA === true || env.NODE_ENV === "test" || process.env.VITEST === "true";
+}
 
 export function getControlCenterService(): ControlCenterService {
   if (controlCenterService) {
@@ -82,31 +88,35 @@ export function getControlCenterService(): ControlCenterService {
       operatorIntent: request.stage.notes,
     };
 
-    if (channel === "email") {
-      const result = outreach.generateEmailDraft(generatedBase);
+    try {
+      if (channel === "email") {
+        const result = outreach.generateEmailDraft(generatedBase);
+        return {
+          channel,
+          retrievedContext: result.bundle.explanation,
+          policy: result.policy,
+          emailDraft: result.draft,
+        };
+      }
+      if (channel === "sms") {
+        const result = outreach.generateSmsDraft(generatedBase);
+        return {
+          channel,
+          retrievedContext: result.bundle.explanation,
+          policy: result.policy,
+          smsDraft: result.draft,
+        };
+      }
+      const result = outreach.generateVoiceAgentPayload(generatedBase);
       return {
         channel,
         retrievedContext: result.bundle.explanation,
         policy: result.policy,
-        emailDraft: result.draft,
+        voicePayload: result.payload,
       };
+    } catch (error) {
+      return safeGeneratedContentFallback(channel, error);
     }
-    if (channel === "sms") {
-      const result = outreach.generateSmsDraft(generatedBase);
-      return {
-        channel,
-        retrievedContext: result.bundle.explanation,
-        policy: result.policy,
-        smsDraft: result.draft,
-      };
-    }
-    const result = outreach.generateVoiceAgentPayload(generatedBase);
-    return {
-      channel,
-      retrievedContext: result.bundle.explanation,
-      policy: result.policy,
-      voicePayload: result.payload,
-    };
   };
 
   controlCenterService = new ControlCenterService({
@@ -151,24 +161,30 @@ export function getControlCenterService(): ControlCenterService {
 
 function hydrateOrSeedControlCenter(service: ControlCenterService) {
   const snapshot = service.getStoreSnapshot();
+  const demoDataEnabled = isDemoDataEnabled();
+  const env = loadEnv();
 
   if (!snapshot.callAgentConfig || !snapshot.config) {
     service.initializeBaseConfig({
       principal: defaultPrincipal,
       tenantId: "default",
       callAgentConfig: {
-        phoneNumber: "+63 2 8555 0188",
-        smsEnabled: true,
-        outboundCallingEnabled: true,
-        humanSupportNumber: "+63 2 8555 0199",
+        phoneNumber: env.RETELL_FROM_NUMBER ?? (demoDataEnabled ? "+63 2 8555 0188" : ""),
+        smsEnabled: false,
+        outboundCallingEnabled: Boolean(env.RETELL_FROM_NUMBER || demoDataEnabled),
+        humanSupportNumber: demoDataEnabled ? "+63 2 8555 0199" : "",
         handoffToHumanEnabled: true,
         manualAgentInstructions:
-          "Stay factual, ask for remittance or payment timing, and hand off disputes or ambiguity to a human operator.",
+          demoDataEnabled
+            ? "Stay factual, ask for remittance or payment timing, and hand off disputes or ambiguity to a human operator."
+            : "",
         overrideOpeningLine:
-          "Hello, this is Yield AROS following up on your supplier receivables account.",
+          demoDataEnabled
+            ? "Hello, this is Yield AROS following up on your supplier receivables account."
+            : "",
         callRecordingDisclaimerEnabled: true,
         providerType: "retell",
-        providerConfigMetadata: { environment: "preview", region: "ph" },
+        providerConfigMetadata: demoDataEnabled ? { environment: "preview", region: "ph" } : {},
         defaultBehaviorFlags: ["collect_branch_context", "capture_ptp", "escalate_on_dispute"],
       },
       config: {
@@ -178,31 +194,76 @@ function hydrateOrSeedControlCenter(service: ControlCenterService) {
         channelFallbackPolicy: "manual_review_only",
         sandboxMode: "test_recipients_only",
         defaultRiskApprovalMode: "strict",
-        seededDemoFlags: { showSeedTargetCounts: true, allowPreviewHandoffs: true },
+        seededDemoFlags: demoDataEnabled
+          ? { showSeedTargetCounts: true, allowPreviewHandoffs: true }
+          : {},
       },
     });
   }
 
-  if (snapshot.workflows.length > 0) {
+  if (snapshot.workflows.length > 0 || !demoDataEnabled) {
     return;
   }
 
   const collectionsWorkflow = service.createWorkflow({
     principal: defaultPrincipal,
     tenantId: "default",
-    name: "Standard Overdue Collections",
+    name: "Request for remittance outreach",
     category: "collections",
     enabled: true,
-    senderEmail: "collections@yieldaros.example",
-    testEmailRecipient: "qa-collections@yieldaros.example",
-    testCallRecipient: "+639171110000",
+    senderEmail: "dylan@paywithyield.com",
+    testEmailRecipient: "",
+    testCallRecipient: "",
     timezone: "Asia/Manila",
-    outreachWindowStart: "08:00",
-    outreachWindowEnd: "17:30",
+    outreachWindowStart: "09:00",
+    outreachWindowEnd: "10:00",
     outreachDays: ["monday", "tuesday", "wednesday", "thursday", "friday"],
     weekendCallingEnabled: false,
-    metadata: { demoCustomerCount: 42, seeded: true },
+    metadata: { demoCustomerCount: 2, seeded: true },
   }).workflow;
+
+  service.assignWorkflowCustomer({
+    principal: defaultPrincipal,
+    tenantId: "default",
+    workflowId: collectionsWorkflow.id,
+    billingAccountId: "ACC001",
+    parentAccountId: "parent_seed_1",
+    currentTrack: "standard_reminders",
+    metadata: {
+      seeded: true,
+      customerName: "SM Retail Inc.",
+      accountNumber: "ACC001",
+      overdueAmount: "₱458,333",
+      openInvoiceCount: 3,
+      selected: true,
+      lastChangedBy: "human",
+    },
+  });
+
+  const pausedSeedExecution = service.assignWorkflowCustomer({
+    principal: defaultPrincipal,
+    tenantId: "default",
+    workflowId: collectionsWorkflow.id,
+    billingAccountId: "ACC003",
+    parentAccountId: "parent_seed_2",
+    currentTrack: "promise_to_pay",
+    metadata: {
+      seeded: true,
+      customerName: "Robinson Supermarket",
+      accountNumber: "ACC003",
+      overdueAmount: "₱541,667",
+      openInvoiceCount: 2,
+      lastChangedBy: "ai",
+    },
+  }).execution;
+
+  service.pauseWorkflowCustomer({
+    principal: defaultPrincipal,
+    workflowId: collectionsWorkflow.id,
+    executionId: pausedSeedExecution.id,
+    reason: "Customer promised payment before the next follow-up.",
+    effectiveUntil: "2026-02-07T00:00:00.000Z",
+  });
 
   const paymentsWorkflow = service.createWorkflow({
     principal: defaultPrincipal,
@@ -298,6 +359,20 @@ function hydrateOrSeedControlCenter(service: ControlCenterService) {
 
 export function buildControlCenterConsoleData(principal: Principal = defaultPrincipal): ControlCenterConsoleData {
   const service = getControlCenterService();
+  const snapshot = service.getStoreSnapshot();
+  if (!snapshot.callAgentConfig || !snapshot.config) {
+    hydrateOrSeedControlCenter(service);
+  }
+  const env = loadEnv();
+  const callAgentConfig = service.getCallAgentConfig();
+  const resolvedCallAgentConfig =
+    env.RETELL_FROM_NUMBER && callAgentConfig.phoneNumber !== env.RETELL_FROM_NUMBER
+      ? {
+          ...callAgentConfig,
+          phoneNumber: env.RETELL_FROM_NUMBER,
+          outboundCallingEnabled: callAgentConfig.outboundCallingEnabled || Boolean(env.RETELL_FROM_NUMBER),
+        }
+      : callAgentConfig;
   const workflows = service.listWorkflows();
   const firstWorkflow = workflows[0];
   const firstEmailStage = workflows.flatMap((workflow) => workflow.stages).find((stage) => stage.outreachType === "email");
@@ -330,7 +405,7 @@ export function buildControlCenterConsoleData(principal: Principal = defaultPrin
     workflows,
     templates: service.listTemplates(),
     folders: service.listFolders(),
-    callAgentConfig: service.getCallAgentConfig(),
+    callAgentConfig: resolvedCallAgentConfig,
     config: service.getConfig(),
     generationPreview: { email, sms, voice },
     providerPreview: service.previewCallAgentPayload(),
@@ -367,6 +442,27 @@ function emptyGeneration(
         handoffAllowed: false,
       },
       rationale: ["No preview stage configured."],
+    },
+  };
+}
+
+function safeGeneratedContentFallback(
+  channel: "email" | "sms" | "voice_agent",
+  error: unknown,
+): ControlCenterGeneratedStageContent {
+  const fallback = emptyGeneration(channel);
+  const message =
+    error instanceof Error ? error.message : "Outreach context was unavailable.";
+
+  return {
+    ...fallback,
+    retrievedContext: {
+      ...fallback.retrievedContext,
+      notes: [`Control Center preview used a safe fallback: ${message}`],
+    },
+    policy: {
+      ...fallback.policy,
+      rationale: ["Outreach context was unavailable, so the preview was blocked for operator review."],
     },
   };
 }

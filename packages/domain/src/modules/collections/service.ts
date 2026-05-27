@@ -130,7 +130,7 @@ export function defaultCollectionSendWindow(): CollectionSendWindow {
   return {
     timezone: "Asia/Manila",
     startHour: 8,
-    endHour: 17,
+    endHour: 23,
     allowedWeekdays: [1, 2, 3, 4, 5],
   };
 }

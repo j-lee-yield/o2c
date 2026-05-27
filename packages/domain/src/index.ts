@@ -3,6 +3,8 @@ export * from "./shared/state-machine.js";
 
 export * from "./modules/accounts/schema.js";
 export * from "./modules/accounts/index.js";
+export * from "./modules/access-control/schema.js";
+export * from "./modules/access-control/index.js";
 
 export * from "./modules/activity-logs/schema.js";
 export * from "./modules/activity-logs/index.js";
@@ -18,6 +20,9 @@ export * from "./modules/learning-layer/index.js";
 export * from "./modules/invoices/schema.js";
 export * from "./modules/invoices/machine.js";
 export * from "./modules/invoices/index.js";
+export * from "./modules/installments/schema.js";
+export * from "./modules/installments/machine.js";
+export * from "./modules/installments/index.js";
 
 export * from "./modules/tasks/index.js";
 export * from "./modules/collections/index.js";
@@ -46,6 +51,7 @@ export * from "./modules/exceptions/machine.js";
 export * from "./modules/exceptions/index.js";
 
 import { accountsModule } from "./modules/accounts/index.js";
+import { accessControlModule } from "./modules/access-control/index.js";
 import { activityLogsModule } from "./modules/activity-logs/index.js";
 import { approvalsModule } from "./modules/approvals/index.js";
 import { creditFacilitiesModule } from "./modules/credit-facilities/index.js";
@@ -56,6 +62,7 @@ import { customerProfilesModule } from "./modules/customer-profiles/index.js";
 import { deductionsModule } from "./modules/deductions/index.js";
 import { exceptionsModule } from "./modules/exceptions/index.js";
 import { integrationsModule } from "./modules/integrations/index.js";
+import { installmentsModule } from "./modules/installments/index.js";
 import { learningLayerModule } from "./modules/learning-layer/index.js";
 import { invoicesModule } from "./modules/invoices/index.js";
 import { paymentApplicationsModule } from "./modules/payment-applications/index.js";
@@ -65,8 +72,10 @@ import { remittancesModule } from "./modules/remittances/index.js";
 import { tasksModule } from "./modules/tasks/index.js";
 
 export const domainModules = [
+  accessControlModule,
   accountsModule,
   invoicesModule,
+  installmentsModule,
   paymentsModule,
   paymentApplicationsModule,
   remittancesModule,

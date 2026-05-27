@@ -5,7 +5,7 @@ export interface AuditContext {
   occurredAt: string;
 }
 
-export type ActivityRole = "ar_collector" | "ar_manager" | "controller" | "admin";
+export type ActivityRole = string;
 
 export interface AuditEvent {
   action: string;
@@ -51,6 +51,12 @@ export interface ActivityMutationInput<TAfter> {
 
 export interface ImmutableActivityLogStore {
   append(entry: ImmutableActivityLogEntry): void | Promise<void>;
+  list?(filter?: {
+    entityType?: string;
+    entityId?: string;
+    actions?: string[];
+    occurredAtFrom?: string;
+  }): ImmutableActivityLogEntry[] | Promise<ImmutableActivityLogEntry[]>;
 }
 
 export class InMemoryAuditLogger implements AuditLogger {
@@ -66,6 +72,29 @@ export class InMemoryImmutableActivityLogStore implements ImmutableActivityLogSt
 
   append(entry: ImmutableActivityLogEntry): void {
     this.entries.push(entry);
+  }
+
+  list(filter: {
+    entityType?: string;
+    entityId?: string;
+    actions?: string[];
+    occurredAtFrom?: string;
+  } = {}): ImmutableActivityLogEntry[] {
+    return this.entries.filter((entry) => {
+      if (filter.entityType && entry.entityType !== filter.entityType) {
+        return false;
+      }
+      if (filter.entityId && entry.entityId !== filter.entityId) {
+        return false;
+      }
+      if (filter.actions && filter.actions.length > 0 && !filter.actions.includes(entry.action)) {
+        return false;
+      }
+      if (filter.occurredAtFrom && entry.occurredAt < filter.occurredAtFrom) {
+        return false;
+      }
+      return true;
+    });
   }
 }
 

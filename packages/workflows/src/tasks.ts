@@ -98,6 +98,22 @@ export class TaskWorkflowService {
     return updated;
   }
 
+  async deleteTask(
+    principal: Principal,
+    input: {
+      taskId: string;
+      occurredAt?: string;
+      summary?: string;
+    },
+  ) {
+    return this.updateStatus(principal, {
+      taskId: input.taskId,
+      status: "deleted",
+      ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
+      summary: input.summary ?? "Task deleted from the active task list.",
+    });
+  }
+
   async seed(tasks: Task[]) {
     for (const task of tasks) {
       await this.deps.repository.save(task);

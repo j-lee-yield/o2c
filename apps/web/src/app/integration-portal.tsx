@@ -157,7 +157,12 @@ export const IntegrationPortalPage = ({ data }: { data: IntegrationPortalData })
 
         <section className="provider-grid">
           {data.providers.map((provider) => (
-            <article key={provider.provider} className="provider-card provider-connect-card">
+            <article
+              key={provider.provider}
+              className={`provider-card provider-connect-card${
+                isConnectionDisabled(provider) ? " provider-disabled" : ""
+              }`}
+            >
               <div className="platform-header">
                 <div className="platform-title-row">
                   <h3>{providerLabel(provider.provider)}</h3>
@@ -167,6 +172,30 @@ export const IntegrationPortalPage = ({ data }: { data: IntegrationPortalData })
                     {provider.connectionStatus === "connected" ? "Connected" : "Not Connected"}
                   </span>
                 </div>
+                {provider.provider === "business-central" && provider.connectionStatus === "connected" ? (
+                  <div className="platform-inline-actions">
+                    <form
+                      className="platform-inline-action"
+                      method="POST"
+                      action="/connect/accounting/business-central/sync"
+                    >
+                      <input type="hidden" name="token" value={data.token} />
+                      <button type="submit" className="platform-secondary-button">
+                        Sync now
+                      </button>
+                    </form>
+                    <form
+                      className="platform-inline-action"
+                      method="POST"
+                      action="/connect/accounting/business-central/disconnect"
+                    >
+                      <input type="hidden" name="token" value={data.token} />
+                      <button type="submit" className="platform-secondary-button">
+                        Disconnect
+                      </button>
+                    </form>
+                  </div>
+                ) : null}
                 <p className="platform-description">{connectionCardDescription(provider)}</p>
               </div>
 
@@ -178,6 +207,10 @@ export const IntegrationPortalPage = ({ data }: { data: IntegrationPortalData })
                       ? data.banner.message
                       : "Connected Successfully"}
                   </span>
+                </div>
+              ) : isConnectionDisabled(provider) ? (
+                <div className="platform-disabled-panel" aria-disabled="true">
+                  <span className="platform-disabled-pill">Unavailable for this pilot</span>
                 </div>
               ) : provider.provider === "quickbooks" ? (
                 <a
@@ -199,20 +232,22 @@ export const IntegrationPortalPage = ({ data }: { data: IntegrationPortalData })
                 >
                   <input type="hidden" name="token" value={data.token} />
                   <input type="hidden" name="state" value={data.businessCentralSelection.state} />
-                  <label>
-                    Select company
-                    <select
-                      className="form-input"
-                      name="companyId"
-                      defaultValue={data.businessCentralSelection.companies[0]?.id}
-                    >
-                      {data.businessCentralSelection.companies.map((company) => (
-                        <option key={company.id} value={company.id}>
-                          {company.name}
-                        </option>
+                  <fieldset className="choice-fieldset">
+                    <legend>Select company</legend>
+                    <div className="choice-list">
+                      {data.businessCentralSelection.companies.map((company, index) => (
+                        <label key={company.id} className="choice-card">
+                          <input
+                            type="radio"
+                            name="companyId"
+                            value={company.id}
+                            defaultChecked={index === 0}
+                          />
+                          <span>{company.name}</span>
+                        </label>
                       ))}
-                    </select>
-                  </label>
+                    </div>
+                  </fieldset>
                 </ProviderConnectModal>
               ) : provider.provider === "business-central" ? (
                 <a
@@ -782,6 +817,13 @@ function providerLabel(provider: IntegrationInspectorProvider["provider"]) {
   }
 }
 
+function isConnectionDisabled(provider: IntegrationInspectorProvider) {
+  return (
+    provider.provider !== "business-central" &&
+    provider.connectionStatus !== "connected"
+  );
+}
+
 function humanize(value: string) {
   return value.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
@@ -1110,6 +1152,11 @@ const standaloneStyles = `
     min-height: 212px;
   }
 
+  .provider-disabled {
+    opacity: 0.62;
+    background: rgba(245, 247, 250, 0.96);
+  }
+
   .inspector-card {
     margin-bottom: 20px;
   }
@@ -1140,6 +1187,10 @@ const standaloneStyles = `
   }
 
   .platform-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px 16px;
+    align-items: start;
     min-height: 92px;
   }
 
@@ -1172,11 +1223,42 @@ const standaloneStyles = `
   }
 
   .platform-description {
+    grid-column: 1 / -1;
     margin-top: 16px;
     color: #5f7491;
     font-size: 14px;
     line-height: 1.75;
     max-width: 420px;
+  }
+
+  .platform-inline-action {
+    margin: 0;
+  }
+
+  .platform-inline-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .platform-secondary-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 32px;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid #d7e0eb;
+    background: #ffffff;
+    color: #13233b;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .platform-secondary-button:hover {
+    background: #f7fafc;
   }
 
   .platform-actions {
@@ -1208,6 +1290,25 @@ const standaloneStyles = `
 
   .connection-success-panel {
     margin-top: 18px;
+  }
+
+  .platform-disabled-panel {
+    margin-top: 18px;
+  }
+
+  .platform-disabled-pill {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 48px;
+    width: 100%;
+    border-radius: 14px;
+    background: #e9edf3;
+    color: #6d7f97;
+    font-size: 15px;
+    font-weight: 700;
+    text-align: center;
+    cursor: not-allowed;
   }
 
   .connection-success-pill {
@@ -1304,6 +1405,51 @@ const standaloneStyles = `
     margin-top: 22px;
   }
 
+  .choice-fieldset {
+    margin: 0;
+    padding: 0;
+    border: none;
+  }
+
+  .choice-fieldset legend {
+    margin-bottom: 10px;
+    color: #13233b;
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  .choice-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .choice-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    justify-content: flex-start;
+    min-height: 52px;
+    padding: 14px 16px;
+    border: 1px solid #d7e0eb;
+    border-radius: 14px;
+    background: #ffffff;
+    color: #13233b;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .choice-card input {
+    flex: 0 0 auto;
+    margin: 0;
+    accent-color: #102036;
+  }
+
+  .choice-card span {
+    flex: 1 1 auto;
+    text-align: left;
+  }
+
   .modal-field-note {
     margin: -2px 0 0;
     color: #6a7d97;
@@ -1393,6 +1539,11 @@ const standaloneStyles = `
     color: #13233b;
     font-size: 14px;
     font-weight: 700;
+  }
+
+  .stack-form .choice-card {
+    display: flex;
+    gap: 12px;
   }
 
   .form-input {

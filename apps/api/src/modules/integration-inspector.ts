@@ -11,6 +11,8 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
   getBusinessCentralIntegrationStatus,
+  loadBusinessCentralCustomers,
+  loadBusinessCentralPayments,
   loadBusinessCentralSalesInvoices,
 } from "../integrations/business-central.js";
 import { getOdooIntegrationStatus, loadOdooInvoices } from "../integrations/odoo.js";
@@ -158,7 +160,7 @@ async function loadBusinessCentralSnapshot(tenantSlug: string) {
     provider: "business-central" as const,
     label: "Business Central",
     tenantSlug,
-    pulledObjects: ["invoices"],
+    pulledObjects: ["invoices", "customers", "contacts", "payments"],
   };
 
   if (status.kind !== "customer_connected") {
@@ -175,16 +177,23 @@ async function loadBusinessCentralSnapshot(tenantSlug: string) {
     return snapshot;
   }
 
-  const invoices = await loadBusinessCentralSalesInvoices(tenantSlug);
+  const [invoices, customers, payments] = await Promise.all([
+    loadBusinessCentralSalesInvoices(tenantSlug),
+    loadBusinessCentralCustomers(tenantSlug),
+    loadBusinessCentralPayments(tenantSlug),
+  ]);
   const summary = buildSummary({
     ...(invoices?.invoices ? { invoices: invoices.invoices } : {}),
+    ...(customers?.customers ? { customers: customers.customers } : {}),
+    ...(customers?.contacts ? { contacts: customers.contacts } : {}),
+    ...(payments?.payments ? { payments: payments.payments } : {}),
   });
 
   const snapshot = {
     ...base,
     connectionStatus: "connected" as const,
     lifecycleState: summary.invoiceCount > 0 ? "validation_succeeded" : "connected_pending_validation",
-    detail: "Business Central invoice data is available for inspection.",
+    detail: "Business Central records are available for inspection.",
     companyName: status.companyName,
     environment: status.environment,
     summary,
@@ -194,6 +203,9 @@ async function loadBusinessCentralSnapshot(tenantSlug: string) {
     raw: {
       ...(invoices?.company ? { company: invoices.company } : {}),
       ...(invoices?.invoices ? { invoices: invoices.invoices } : {}),
+      ...(customers?.customers ? { customers: customers.customers } : {}),
+      ...(customers?.contacts ? { contacts: customers.contacts } : {}),
+      ...(payments?.payments ? { payments: payments.payments } : {}),
     },
   };
   persistProviderSnapshot(tenantSlug, snapshot, startedAt);

@@ -32,6 +32,12 @@ interface ImmutableActivityLogEntry {
 
 interface ImmutableActivityLogStore {
   append(entry: ImmutableActivityLogEntry): void | Promise<void>;
+  list?(filter?: {
+    entityType?: string;
+    entityId?: string;
+    actions?: string[];
+    occurredAtFrom?: string;
+  }): ImmutableActivityLogEntry[] | Promise<ImmutableActivityLogEntry[]>;
 }
 
 interface AuditContext {
@@ -88,6 +94,13 @@ export class PostgresImmutableActivityLogStore implements ImmutableActivityLogSt
   append(entry: ImmutableActivityLogEntry): void {
     const beforeState = readState(entry.before);
     const afterState = readState(entry.after);
+    const activityLogId = toPostgresUuid(entry.id);
+    const entityId = toPostgresUuid(entry.entityId);
+    const metadata = {
+      ...entry.metadata,
+      ...(activityLogId === entry.id ? {} : { sourceActivityLogId: entry.id }),
+      ...(entityId === entry.entityId ? {} : { sourceEntityId: entry.entityId }),
+    };
     executeSqlCommand(
       this.databaseUrl,
       `
@@ -112,10 +125,10 @@ export class PostgresImmutableActivityLogStore implements ImmutableActivityLogSt
           updated_by_actor_role
         )
         VALUES (
-          '${quoteLiteral(entry.id)}'::uuid,
+          '${quoteLiteral(activityLogId)}'::uuid,
           '${quoteLiteral(this.tenantId)}',
           '${quoteLiteral(entry.entityType)}',
-          '${quoteLiteral(entry.entityId)}'::uuid,
+          '${quoteLiteral(entityId)}'::uuid,
           '${quoteLiteral(entry.action)}',
           '${quoteLiteral(entry.actorId)}',
           '${quoteLiteral(entry.actorRole)}',
@@ -125,7 +138,7 @@ export class PostgresImmutableActivityLogStore implements ImmutableActivityLogSt
           '${jsonLiteral({
             before: entry.before ?? null,
             after: entry.after ?? null,
-            metadata: entry.metadata,
+            metadata,
           })}'::jsonb,
           '${quoteLiteral(entry.occurredAt)}'::timestamptz,
           '${quoteLiteral(entry.occurredAt)}'::timestamptz,
@@ -137,6 +150,78 @@ export class PostgresImmutableActivityLogStore implements ImmutableActivityLogSt
         )
       `,
     );
+  }
+
+  list(filter: {
+    entityType?: string;
+    entityId?: string;
+    actions?: string[];
+    occurredAtFrom?: string;
+  } = {}): ImmutableActivityLogEntry[] {
+    const whereClauses = [`tenant_id = '${quoteLiteral(this.tenantId)}'`];
+    if (filter.entityType) {
+      whereClauses.push(`entity_type = '${quoteLiteral(filter.entityType)}'`);
+    }
+    if (filter.entityId) {
+      whereClauses.push(`entity_id = '${quoteLiteral(toPostgresUuid(filter.entityId))}'::uuid`);
+    }
+    if (filter.actions && filter.actions.length > 0) {
+      whereClauses.push(
+        `action IN (${filter.actions.map((action) => `'${quoteLiteral(action)}'`).join(", ")})`
+      );
+    }
+    if (filter.occurredAtFrom) {
+      whereClauses.push(`occurred_at >= '${quoteLiteral(filter.occurredAtFrom)}'::timestamptz`);
+    }
+
+    type ActivityRow = {
+      id: string;
+      occurredAt: string;
+      action: string;
+      actorId: string;
+      actorRole: string;
+      entityType: string;
+      entityId: string;
+      before?: Record<string, unknown> | null;
+      after?: Record<string, unknown> | null;
+      metadata?: Record<string, unknown>;
+    };
+
+    const rows = queryJsonRows<ActivityRow>(
+      this.databaseUrl,
+      `
+        SELECT row_to_json(q)
+        FROM (
+          SELECT
+            COALESCE(payload -> 'metadata' ->> 'sourceActivityLogId', id::text) AS "id",
+            occurred_at AS "occurredAt",
+            action,
+            actor_id AS "actorId",
+            actor_role AS "actorRole",
+            entity_type AS "entityType",
+            COALESCE(payload -> 'metadata' ->> 'sourceEntityId', entity_id::text) AS "entityId",
+            payload -> 'before' AS "before",
+            payload -> 'after' AS "after",
+            COALESCE(payload -> 'metadata', '{}'::jsonb) AS "metadata"
+          FROM activity_log
+          WHERE ${whereClauses.join(" AND ")}
+          ORDER BY occurred_at ASC, created_at ASC
+        ) q
+      `
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      occurredAt: row.occurredAt,
+      action: row.action,
+      actorId: row.actorId,
+      actorRole: row.actorRole,
+      entityType: row.entityType,
+      entityId: row.entityId,
+      ...(row.before !== undefined ? { before: row.before } : {}),
+      ...(row.after !== undefined ? { after: row.after } : {}),
+      metadata: row.metadata ?? {}
+    }));
   }
 }
 
@@ -874,6 +959,14 @@ function toDeterministicUuid(input: string): string {
     `a${hex.slice(17, 20)}`,
     hex.slice(20, 32),
   ].join("-");
+}
+
+function toPostgresUuid(value: string): string {
+  return isPostgresUuid(value) ? value : toDeterministicUuid(`activity_log:${value}`);
+}
+
+function isPostgresUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
 function readState(snapshot: Record<string, unknown> | null | undefined): string | undefined {

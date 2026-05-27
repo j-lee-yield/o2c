@@ -16,6 +16,7 @@ export interface PromiseToPay extends StatefulEntity<PromiseToPayState> {
   parentAccountId: string;
   billingAccountId: string;
   contactId?: string;
+  installmentLineIds?: string[];
   promisedAmountCents: number;
   currency: string;
   promiseDate: string;

@@ -148,7 +148,11 @@ export const registerCashApplicationRoutes = (app: FastifyInstance): void => {
       const params = paymentParamsSchema.parse(request.params);
       const body = residualOverrideBodySchema.parse(request.body ?? {});
       const service = await getCashApplicationService();
-      const result = await service.overrideResidualAction(principal, params.paymentId, body);
+      const result = await service.overrideResidualAction(principal, params.paymentId, {
+        residualType: body.residualType,
+        ...(body.reasonCode ? { reasonCode: body.reasonCode } : {}),
+        ...(body.note ? { note: body.note } : {}),
+      });
       return reply.send(result);
     } catch (error) {
       return replyFromCashApplicationError(reply, error);

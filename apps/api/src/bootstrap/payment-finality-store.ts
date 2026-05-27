@@ -119,6 +119,7 @@ class InMemoryBuyerTaxProfileStore implements BuyerTaxProfileStore {
     notes?: string;
   }): Promise<StoredBuyerTaxProfile> {
     const existing = this.profiles.get(input.profileId);
+    const notes = input.notes ?? existing?.notes;
     const learnedScore = Math.min(
       1,
       Math.max(existing?.historicalWithholdingBehaviorScore ?? 0, 0) + 0.15,
@@ -140,7 +141,7 @@ class InMemoryBuyerTaxProfileStore implements BuyerTaxProfileStore {
         : input.withholdingRateBps !== undefined
           ? { defaultWithholdingRateBps: input.withholdingRateBps }
           : {}),
-      ...(input.notes ?? existing?.notes ? { notes: input.notes ?? existing?.notes } : {}),
+      ...(notes ? { notes } : {}),
     };
     this.profiles.set(input.profileId, structuredClone(next));
     return structuredClone(next);

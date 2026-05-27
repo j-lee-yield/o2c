@@ -1,7 +1,20 @@
 import { z } from "zod";
+const booleanishSchema = z.preprocess((value) => {
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (["true", "1", "yes", "on"].includes(normalized)) {
+            return true;
+        }
+        if (["false", "0", "no", "off", ""].includes(normalized)) {
+            return false;
+        }
+    }
+    return value;
+}, z.boolean());
 export const envSchema = z.object({
     NODE_ENV: z.enum(["development", "test", "staging", "production"]).default("development"),
     LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+    ENABLE_DEMO_DATA: booleanishSchema.default(false),
     DATABASE_URL: z.string().min(1),
     REDIS_URL: z.string().min(1),
     API_HOST: z.string().default("0.0.0.0"),
@@ -51,6 +64,26 @@ export const envSchema = z.object({
     INTEGRATION_BUSINESS_CENTRAL_CONNECT_CLIENT_ID: z.string().optional(),
     INTEGRATION_BUSINESS_CENTRAL_CONNECT_CLIENT_SECRET: z.string().optional(),
     INTEGRATION_BUSINESS_CENTRAL_CONNECT_REDIRECT_URI: z.string().optional(),
-    INTEGRATION_BUSINESS_CENTRAL_CONNECT_DEFAULT_ENVIRONMENT: z.string().optional()
+    INTEGRATION_BUSINESS_CENTRAL_CONNECT_DEFAULT_ENVIRONMENT: z.string().optional(),
+    INTEGRATION_GMAIL_CONNECT_CLIENT_ID: z.string().optional(),
+    INTEGRATION_GMAIL_CONNECT_CLIENT_SECRET: z.string().optional(),
+    INTEGRATION_GMAIL_CONNECT_REDIRECT_URI: z.string().optional(),
+    OPENAI_API_KEY: z.string().optional(),
+    OUTREACH_EMAIL_DRAFT_MODEL: z.string().optional(),
+    RETELL_API_KEY: z.string().optional(),
+    RETELL_BASE_URL: z.string().url().optional(),
+    RETELL_FROM_NUMBER: z.string().optional(),
+    RETELL_OUTBOUND_AGENT_ID: z.string().optional(),
+    RETELL_CUSTOM_FUNCTION_BASE_URL: z.string().url().optional(),
+    RETELL_CUSTOM_FUNCTION_SECRET: z.string().optional(),
+    RETELL_WEBHOOK_SECRET: z.string().optional(),
+    RETELL_CUSTOM_FUNCTION_SKIP_SIGNATURE_VERIFICATION: booleanishSchema.optional(),
+    RETELL_CALL_INBOX_POLLING_ENABLED: booleanishSchema.optional(),
+    RETELL_CALL_INBOX_POLLING_INTERVAL_SECONDS: z.coerce.number().int().positive().optional(),
+    RETELL_CALL_INBOX_POLLING_LIMIT: z.coerce.number().int().positive().optional(),
+    COLLECTIONS_BROKEN_PROMISE_ESCALATION_THRESHOLD: z.coerce.number().int().positive().default(2),
+    COLLECTIONS_BROKEN_PROMISE_ESCALATION_WINDOW_DAYS: z.coerce.number().int().positive().default(90),
+    INTEGRATION_SAP_BUSINESS_ONE_SYNC_ENABLED: booleanishSchema.optional(),
+    INTEGRATION_SAP_BUSINESS_ONE_SYNC_INTERVAL_MINUTES: z.coerce.number().int().positive().optional()
 });
 //# sourceMappingURL=schema.js.map

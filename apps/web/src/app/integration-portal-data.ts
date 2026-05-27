@@ -394,12 +394,15 @@ async function loadBusinessCentralCompanySelection(
       ...(typeof selection.domainHint === "string" ? { domainHint: selection.domainHint } : {}),
       companies: selection.companies
         .filter(
-          (company): company is { id: string; name: string } =>
-            Boolean(company && typeof company.id === "string" && typeof company.name === "string"),
+          (company): company is { id: string; name?: string } =>
+            Boolean(company && typeof company.id === "string"),
         )
         .map((company) => ({
           id: company.id,
-          name: company.name,
+          name:
+            typeof company.name === "string" && company.name.trim().length > 0
+              ? company.name.trim()
+              : company.id,
         })),
     };
   } catch {
@@ -432,7 +435,8 @@ function buildBanner(input: {
 
   if (
     input.businessCentralStatus === "connected" ||
-    input.businessCentralStatus === "error"
+    input.businessCentralStatus === "error" ||
+    input.businessCentralStatus === "info"
   ) {
     return {
       provider: "business-central",
@@ -441,7 +445,9 @@ function buildBanner(input: {
         input.businessCentralMessage?.trim() ||
         (input.businessCentralStatus === "connected"
           ? `${input.companyName?.trim() || "Business Central company"} connected successfully.`
-          : "Business Central connection did not finish."),
+          : input.businessCentralStatus === "info"
+            ? "Business Central disconnected."
+            : "Business Central connection did not finish."),
     };
   }
 

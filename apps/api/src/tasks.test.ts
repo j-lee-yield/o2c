@@ -21,6 +21,71 @@ describe("task APIs", () => {
       task.surfaces.includes("deductions") && task.status === "open")).toBe(true);
   });
 
+  it("filters tasks by type, priority, and search query", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/v1/tasks",
+      headers: {
+        "x-principal-id": "collector-api",
+        "x-principal-roles": "ar_collector",
+      },
+      payload: {
+        id: "task_api_paid_already_filter",
+        title: "Verify remittance evidence",
+        kind: "payment_collection_follow_up",
+        origin: "manual",
+        surfaces: ["home", "collections"],
+        customerProfileId: "customer-api-medical",
+        priority: "high",
+        summary: "Customer said payment was already made.",
+        sourceLinks: [
+          {
+            label: "Invoice MCC-OD-001",
+            objectType: "invoice",
+            objectId: "invoice-mcc-od-001",
+          },
+        ],
+        metadata: {
+          customerName: "Medical Clinic Corp",
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/tasks",
+      headers: {
+        "x-principal-id": "collector-api",
+        "x-principal-roles": "ar_collector",
+      },
+      payload: {
+        id: "task_api_low_priority_filter",
+        title: "Review low priority follow-up",
+        kind: "payment_collection_follow_up",
+        origin: "manual",
+        surfaces: ["home", "collections"],
+        customerProfileId: "customer-api-low",
+        priority: "low",
+        sourceLinks: [
+          {
+            label: "Customer profile",
+            objectType: "customer_profile",
+            objectId: "customer-api-low",
+          },
+        ],
+      },
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/tasks?type=payment_collection_follow_up&priority=high&q=medical%20mcc-od-001",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.items.map((task: { id: string }) => task.id)).toContain("task_api_paid_already_filter");
+    expect(body.items.map((task: { id: string }) => task.id)).not.toContain("task_api_low_priority_filter");
+  });
+
   it("creates a manual task and exposes it on the per-customer endpoint", async () => {
     const createResponse = await app.inject({
       method: "POST",
@@ -126,12 +191,60 @@ describe("task APIs", () => {
 
     expect(updateResponse.statusCode).toBe(200);
     expect(updateResponse.json().status).toBe("completed");
+    expect(updateResponse.json().archivedAt).toBeTruthy();
 
     const getResponse = await app.inject({
       method: "GET",
       url: "/v1/tasks/task_api_status_1",
     });
     expect(getResponse.statusCode).toBe(200);
-    expect(getResponse.json().auditTrail.at(-1).action).toBe("task.completed");
+    expect(getResponse.json().auditTrail.map((entry: { action: string }) => entry.action)).toContain("task.completed");
+    expect(getResponse.json().auditTrail.at(-1).action).toBe("task.archived");
+  });
+
+  it("soft-deletes tasks and records the deletion audit entry", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/v1/tasks",
+      headers: {
+        "x-principal-id": "manager-api",
+        "x-principal-roles": "ar_manager",
+      },
+      payload: {
+        id: "task_api_delete_1",
+        title: "Delete duplicate follow-up",
+        kind: "payment_collection_follow_up",
+        origin: "manual",
+        surfaces: ["home", "collections"],
+        customerProfileId: "customer-api-delete-1",
+        sourceLinks: [
+          {
+            label: "Customer profile",
+            objectType: "customer_profile",
+            objectId: "customer-api-delete-1",
+          },
+        ],
+      },
+    });
+
+    const deleteResponse = await app.inject({
+      method: "DELETE",
+      url: "/v1/tasks/task_api_delete_1",
+      headers: {
+        "x-principal-id": "manager-api",
+        "x-principal-roles": "ar_manager",
+      },
+    });
+
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleteResponse.json().status).toBe("deleted");
+    expect(deleteResponse.json().deletedAt).toBeTruthy();
+    expect(deleteResponse.json().auditTrail.at(-1).action).toBe("task.deleted");
+
+    const openResponse = await app.inject({
+      method: "GET",
+      url: "/v1/tasks?status=open",
+    });
+    expect(openResponse.json().items.map((task: { id: string }) => task.id)).not.toContain("task_api_delete_1");
   });
 });

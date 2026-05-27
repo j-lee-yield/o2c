@@ -28,6 +28,11 @@ import {
   type ThreadDetailReadModel,
 } from "@o2c/domain";
 import type { EmailFailureMetadata } from "@o2c/domain";
+import {
+  normalizeWorkflowOutcomeFromCallOutcome,
+  normalizeWorkflowOutcomeFromDeliveryStatus,
+  normalizeWorkflowOutcomeFromReplyAnalysis,
+} from "./workflow-interaction-outcomes.js";
 
 export interface CollectionsWorkspaceStore {
   saveThread(thread: CommunicationThread): void;
@@ -188,6 +193,7 @@ export class CollectionsWorkspaceService {
       subject: input.subjectLine,
       body: input.body,
     });
+    const messageId = this.idGenerator("message");
     const senderIdentityHook = createSenderIdentityIntegrationHook({
       identity: input.senderIdentity,
     });
@@ -214,7 +220,7 @@ export class CollectionsWorkspaceService {
       createdAt: occurredAt,
     });
     const message = createCommunicationMessage({
-      id: this.idGenerator("message"),
+      id: messageId,
       threadId: thread.id,
       channel: "email",
       direction: "inbound",
@@ -233,6 +239,15 @@ export class CollectionsWorkspaceService {
       ...(input.toAddress ? { toAddress: input.toAddress } : {}),
       occurredAt,
       replyAnalysis: analysis,
+      metadata: {
+        workflowOutcome: normalizeWorkflowOutcomeFromReplyAnalysis({
+          sourceId: messageId,
+          billingAccountId: input.account.id,
+          ...(input.contact ? { contactId: input.contact.id } : {}),
+          analysis,
+          bodyText: input.body,
+        }),
+      },
     });
     const ptpExtraction =
       analysis.classification === "promise_to_pay"
@@ -347,8 +362,15 @@ export class CollectionsWorkspaceService {
       failure: input.failure,
       ...(input.relatedMessageId ? { relatedMessageId: input.relatedMessageId } : {}),
     });
-    this.store.saveDeliveryStatus(next);
-    return next;
+    const withWorkflowOutcome = {
+      ...next,
+      metadata: {
+        ...next.metadata,
+        workflowOutcome: normalizeWorkflowOutcomeFromDeliveryStatus(next),
+      },
+    };
+    this.store.saveDeliveryStatus(withWorkflowOutcome);
+    return withWorkflowOutcome;
   }
 
   recordCallSession(input: {
@@ -366,17 +388,37 @@ export class CollectionsWorkspaceService {
     promiseToPayId?: string;
     promisedAmountCents?: number;
     promisedDate?: string;
+    operatorReviewRequired?: boolean;
+    metadata?: Record<string, unknown>;
   }): {
     callSession: CallSession;
     tasks: CollectionsExtractedTask[];
     promiseToPayExtraction?: PromiseToPayExtractionResult;
   } {
     const occurredAt = this.now();
+    const callSessionId = this.idGenerator("call");
     const senderIdentityHook = createSenderIdentityIntegrationHook({
       identity: input.senderIdentity,
     });
+    const workflowOutcome = normalizeWorkflowOutcomeFromCallOutcome({
+      sourceId: callSessionId,
+      billingAccountId: input.account.id,
+      ...(input.contact ? { contactId: input.contact.id } : {}),
+      outcome: {
+        disposition: input.disposition,
+        operatorReviewRequired: input.operatorReviewRequired ?? true,
+        ...(input.promisedAmountCents !== undefined
+          ? { promisedAmountCents: input.promisedAmountCents }
+          : {}),
+        ...(input.promisedDate ? { promisedDate: input.promisedDate } : {}),
+        ...(input.transcriptSummary ? { transcriptSummary: input.transcriptSummary } : {}),
+        transcriptSegments: input.transcriptSegments ?? [],
+        metadata: input.metadata ?? {},
+        occurredAt,
+      },
+    });
     const callSession = createCallSession({
-      id: this.idGenerator("call"),
+      id: callSessionId,
       account: input.account,
       provider: input.provider,
       direction: "inbound",
@@ -390,8 +432,12 @@ export class CollectionsWorkspaceService {
       ...(input.transcriptSummary ? { transcriptSummary: input.transcriptSummary } : {}),
       ...(input.transcriptSegments ? { transcriptSegments: input.transcriptSegments } : {}),
       ...(input.sentimentLabel ? { sentimentLabel: input.sentimentLabel } : {}),
-      operatorReviewRequired: true,
+      operatorReviewRequired: input.operatorReviewRequired ?? true,
       ...(input.promiseToPayId ? { promiseToPayId: input.promiseToPayId } : {}),
+      metadata: {
+        ...(input.metadata ?? {}),
+        workflowOutcome,
+      },
     });
     const ptpExtraction =
       input.promisedAmountCents !== undefined || input.promisedDate

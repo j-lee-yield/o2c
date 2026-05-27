@@ -131,9 +131,14 @@ export interface OutboundEmailWorkflowDependencies {
   activityStore: ImmutableActivityLogStore;
   sendingIdentityStore?: SendingIdentityStore;
   threadStore?: EmailThreadReferenceStore;
+  communicationAttemptStore?: CommunicationAttemptStore;
   providerRegistry?: InMemoryCommunicationProviderRegistry;
   now?: () => string;
   idGenerator?: (prefix: string) => string;
+}
+
+export interface CommunicationAttemptStore {
+  save(attempt: ReturnType<SafeCommunicationAttemptFactory["create"]>): void;
 }
 
 export interface SendReminderParams {
@@ -155,6 +160,7 @@ export interface SendResendParams {
   subjectLine: string;
   bodyPreview: string;
   documentIds?: string[];
+  attachments?: EmailAttachmentInput[];
 }
 
 export interface SendWorkflowEmailParams {
@@ -170,6 +176,8 @@ export interface SendWorkflowEmailParams {
   subjectLine: string;
   bodyPreview: string;
   contentTemplateKey?: string;
+  attachments?: EmailAttachmentInput[];
+  ccEmails?: string[];
 }
 
 export interface SendInboxReplyParams {
@@ -182,6 +190,13 @@ export interface SendInboxReplyParams {
   replyToProviderMessageId?: string;
   subjectLine: string;
   bodyPreview: string;
+  attachments?: EmailAttachmentInput[];
+}
+
+export interface EmailAttachmentInput {
+  fileName: string;
+  mimeType?: string;
+  contentBase64: string;
 }
 
 export interface OutboundEmailDraftResult {
@@ -215,6 +230,7 @@ export class OutboundEmailWorkflowService {
   private readonly idGenerator: (prefix: string) => string;
   private readonly sendingIdentityStore: SendingIdentityStore;
   private readonly threadStore: EmailThreadReferenceStore;
+  private readonly communicationAttemptStore: CommunicationAttemptStore | undefined;
   private readonly providerRegistry: InMemoryCommunicationProviderRegistry;
   private readonly audit: ReturnType<typeof createActivityLogDomainHelpers>;
   private readonly collectionsEngine: CollectionsWorkflowEngine;
@@ -229,6 +245,7 @@ export class OutboundEmailWorkflowService {
     this.sendingIdentityStore =
       deps.sendingIdentityStore ?? new InMemorySendingIdentityStore();
     this.threadStore = deps.threadStore ?? new InMemoryEmailThreadReferenceStore();
+    this.communicationAttemptStore = deps.communicationAttemptStore;
     this.providerRegistry =
       deps.providerRegistry ?? createDefaultCommunicationProviderRegistry();
     this.audit = createActivityLogDomainHelpers({
@@ -560,6 +577,7 @@ export class OutboundEmailWorkflowService {
       contentTemplateKey: "collections_resend_bundle_v1",
       metadata: {
         documentIds: params.documentIds ?? [],
+        ...(params.attachments?.length ? { attachments: params.attachments } : {})
       },
     });
 
@@ -633,6 +651,10 @@ export class OutboundEmailWorkflowService {
       };
     }
 
+    const attemptMetadata = {
+      ...(params.attachments?.length ? { attachments: params.attachments } : {}),
+      ...(params.ccEmails?.length ? { ccEmails: params.ccEmails } : {}),
+    };
     const attempt = this.createWorkflowAttempt({
       workflowKind: params.workflowKind,
       account: params.account,
@@ -642,6 +664,7 @@ export class OutboundEmailWorkflowService {
       subjectLine: params.subjectLine,
       bodyPreview: params.bodyPreview,
       ...(params.contentTemplateKey ? { contentTemplateKey: params.contentTemplateKey } : {}),
+      ...(Object.keys(attemptMetadata).length > 0 ? { metadata: attemptMetadata } : {}),
     });
 
     return this.executeAttempt({
@@ -728,6 +751,7 @@ export class OutboundEmailWorkflowService {
       metadata: {
         source: "inbox_reply",
         providerThreadId: params.providerThreadId,
+        ...(params.attachments?.length ? { attachments: params.attachments } : {}),
       },
     });
 
@@ -866,8 +890,23 @@ export class OutboundEmailWorkflowService {
         };
       }
 
+      const sentAttempt: typeof attempt = {
+        ...attempt,
+        status: "sent",
+        updatedAt: this.now(),
+        ...(execution.providerMessageId
+          ? { providerMessageId: execution.providerMessageId }
+          : {}),
+        ...(execution.providerThreadId
+          ? { providerThreadId: execution.providerThreadId }
+          : {}),
+        ...(execution.providerConversationId
+          ? { providerConversationId: execution.providerConversationId }
+          : {}),
+      };
+      this.communicationAttemptStore?.save(sentAttempt);
       const threadReference = this.storeThreadReference({
-        attempt,
+        attempt: sentAttempt,
         senderIdentity: identityCheck.identity,
         workflowKind: input.workflowKind,
         providerMessageId: execution.providerMessageId,
@@ -881,16 +920,11 @@ export class OutboundEmailWorkflowService {
         action: "email.outbound.sent",
         entityType: "communication_attempt",
         entityId: attempt.id,
-        after: serializeJson({
-          ...attempt,
-          providerMessageId: execution.providerMessageId,
-          providerThreadId: execution.providerThreadId,
-          providerConversationId: execution.providerConversationId,
-        }),
+        after: serializeJson(sentAttempt),
         metadata: {
           workflowKind: input.workflowKind,
           senderIdentityId: identityCheck.identity.id,
-          provider: attempt.provider,
+          provider: sentAttempt.provider,
           billingAccountId: input.billingAccountId,
           ...(thread?.providerThreadId ? { threadedReply: true } : {}),
         },
@@ -899,35 +933,30 @@ export class OutboundEmailWorkflowService {
       return {
         workflowKind: input.workflowKind,
         senderIdentity: identityCheck.identity,
-        communicationAttempt: {
-          ...attempt,
-          ...(execution.providerMessageId
-            ? { providerMessageId: execution.providerMessageId }
-            : {}),
-          ...(execution.providerThreadId
-            ? { providerThreadId: execution.providerThreadId }
-            : {}),
-          ...(execution.providerConversationId
-            ? { providerConversationId: execution.providerConversationId }
-            : {}),
-        },
+        communicationAttempt: sentAttempt,
         ...(input.reminderPlan ? { reminderPlan: input.reminderPlan } : {}),
         deliveryState: "sent",
         threadReference,
         activityEntries: [...(input.reminderPlan?.activityEntries ?? []), activityEntry],
       };
     } catch (error) {
+      const failedAttempt: typeof attempt = {
+        ...attempt,
+        status: "failed",
+        updatedAt: this.now(),
+      };
+      this.communicationAttemptStore?.save(failedAttempt);
       const activityEntry = this.audit.append({
         actorId: input.principal.id,
         actorRole: input.principal.roles[0] ?? "ar_collector",
         action: "email.outbound.failed",
         entityType: "communication_attempt",
-        entityId: attempt.id,
-        after: serializeJson(attempt),
+        entityId: failedAttempt.id,
+        after: serializeJson(failedAttempt),
         metadata: {
           workflowKind: input.workflowKind,
           senderIdentityId: identityCheck.identity.id,
-          provider: attempt.provider,
+          provider: failedAttempt.provider,
           billingAccountId: input.billingAccountId,
           reasonSummary: error instanceof Error ? error.message : "Unknown send failure.",
         },
@@ -936,7 +965,7 @@ export class OutboundEmailWorkflowService {
       return {
         workflowKind: input.workflowKind,
         senderIdentity: identityCheck.identity,
-        communicationAttempt: attempt,
+        communicationAttempt: failedAttempt,
         ...(input.reminderPlan ? { reminderPlan: input.reminderPlan } : {}),
         deliveryState: "failed",
         failureReason: error instanceof Error ? error.message : "Unknown send failure.",

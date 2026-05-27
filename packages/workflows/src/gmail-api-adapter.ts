@@ -36,6 +36,12 @@ export interface GmailApiAdapterDependencies {
   now?: () => string;
 }
 
+interface GmailAttachment {
+  fileName: string;
+  mimeType?: string;
+  contentBase64: string;
+}
+
 type GmailMessageResponse = {
   id?: string;
   threadId?: string;
@@ -76,8 +82,10 @@ export class GmailApiAdapter
             fromDisplayName: input.attempt.senderDisplayName,
             toEmail: input.attempt.recipient.email,
             toDisplayName: input.attempt.recipient.displayName,
+            ccEmails: readCcEmails(input.attempt),
             subjectLine: input.attempt.subjectLine,
             bodyText: input.attempt.bodyPreview,
+            attachments: readAttachments(input.attempt),
           }),
         ),
       },
@@ -102,8 +110,10 @@ export class GmailApiAdapter
               fromDisplayName: input.attempt.senderDisplayName,
               toEmail: input.attempt.recipient.email,
               toDisplayName: input.attempt.recipient.displayName,
+              ccEmails: readCcEmails(input.attempt),
               subjectLine: input.attempt.subjectLine,
               bodyText: input.attempt.bodyPreview,
+              attachments: readAttachments(input.attempt),
             }),
           ),
         },
@@ -150,6 +160,7 @@ export class GmailApiAdapter
             bodyText: input.attempt.bodyPreview,
             inReplyToMessageId: replyReference?.internetMessageId,
             referencesMessageId: replyReference?.internetMessageId,
+            attachments: readAttachments(input.attempt),
           }),
         ),
       },
@@ -189,6 +200,7 @@ export class GmailApiAdapter
               input.attempt.subjectLine ??
               (original.subjectLine ? prefixForwardSubject(original.subjectLine) : "Fwd"),
             bodyText: forwardBody,
+            attachments: readAttachments(input.attempt),
           }),
         ),
       },
@@ -370,10 +382,12 @@ function buildMimeMessage(input: {
   fromDisplayName?: string;
   toEmail?: string;
   toDisplayName?: string;
+  ccEmails?: string[];
   subjectLine?: string;
   bodyText?: string;
   inReplyToMessageId?: string;
   referencesMessageId?: string;
+  attachments?: GmailAttachment[];
 }) {
   if (!input.fromEmail) {
     throw new Error("Connected Gmail sender email is required.");
@@ -382,21 +396,103 @@ function buildMimeMessage(input: {
     throw new Error("Recipient email is required.");
   }
 
+  const attachments = input.attachments ?? [];
+  const bodyText = input.bodyText?.trim() ? input.bodyText.trim() : "Sent from Yield AROS.";
+
   const lines = [
     `From: ${formatMailbox(input.fromEmail, input.fromDisplayName)}`,
     `To: ${formatMailbox(input.toEmail, input.toDisplayName)}`,
+    ...(input.ccEmails && input.ccEmails.length > 0 ? [`Cc: ${input.ccEmails.join(", ")}`] : []),
     `Subject: ${encodeHeader(input.subjectLine ?? "Yield AROS message")}`,
     "MIME-Version: 1.0",
-    'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: 8bit",
     ...(input.inReplyToMessageId ? [`In-Reply-To: ${input.inReplyToMessageId}`] : []),
     ...(input.referencesMessageId ? [`References: ${input.referencesMessageId}`] : []),
-    "",
-    input.bodyText?.trim() ? input.bodyText.trim() : "Sent from Yield AROS.",
-    "",
   ];
 
+  if (attachments.length === 0) {
+    lines.push('Content-Type: text/plain; charset="UTF-8"');
+    lines.push("Content-Transfer-Encoding: 8bit");
+    lines.push("");
+    lines.push(bodyText);
+    lines.push("");
+    return lines.join("\r\n");
+  }
+
+  const boundary = `yield-aros-${Math.random().toString(16).slice(2)}`;
+  lines.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+  lines.push("");
+  lines.push(`--${boundary}`);
+  lines.push('Content-Type: text/plain; charset="UTF-8"');
+  lines.push("Content-Transfer-Encoding: 8bit");
+  lines.push("");
+  lines.push(bodyText);
+  lines.push("");
+
+  for (const attachment of attachments) {
+    lines.push(`--${boundary}`);
+    lines.push(
+      `Content-Type: ${attachment.mimeType?.trim() || "application/octet-stream"}; name="${escapeAttachmentName(attachment.fileName)}"`,
+    );
+    lines.push("Content-Transfer-Encoding: base64");
+    lines.push(
+      `Content-Disposition: attachment; filename="${escapeAttachmentName(attachment.fileName)}"`,
+    );
+    lines.push("");
+    lines.push(wrapBase64(attachment.contentBase64));
+    lines.push("");
+  }
+
+  lines.push(`--${boundary}--`);
+  lines.push("");
+
   return lines.join("\r\n");
+}
+
+function readCcEmails(attempt: CommunicationAttempt): string[] {
+  const metadata = attempt.metadata as { ccEmails?: unknown } | undefined;
+  if (!Array.isArray(metadata?.ccEmails)) {
+    return [];
+  }
+
+  return metadata.ccEmails.filter((value): value is string =>
+    typeof value === "string" && value.trim().length > 0,
+  );
+}
+
+function readAttachments(attempt: CommunicationAttempt): GmailAttachment[] {
+  const metadata = attempt.metadata as { attachments?: unknown } | undefined;
+  if (!metadata?.attachments || !Array.isArray(metadata.attachments)) {
+    return [];
+  }
+
+  return metadata.attachments.flatMap((attachment) => {
+    if (!attachment || typeof attachment !== "object") {
+      return [];
+    }
+
+    const candidate = attachment as {
+      fileName?: unknown;
+      mimeType?: unknown;
+      contentBase64?: unknown;
+    };
+
+    if (
+      typeof candidate.fileName !== "string" ||
+      candidate.fileName.trim().length === 0 ||
+      typeof candidate.contentBase64 !== "string" ||
+      candidate.contentBase64.trim().length === 0
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        fileName: candidate.fileName.trim(),
+        mimeType: typeof candidate.mimeType === "string" ? candidate.mimeType.trim() : undefined,
+        contentBase64: candidate.contentBase64.replace(/\s+/g, ""),
+      },
+    ];
+  });
 }
 
 function formatMailbox(email: string, displayName?: string) {
@@ -417,6 +513,14 @@ function encodeHeader(value: string) {
   }
 
   return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
+}
+
+function wrapBase64(value: string) {
+  return value.replace(/.{1,76}/g, "$&\r\n").trimEnd();
+}
+
+function escapeAttachmentName(value: string) {
+  return value.replace(/"/g, '\\"');
 }
 
 function readHeader(payload: GmailMessageResponse, name: string) {

@@ -55,8 +55,17 @@ export async function requestCollectionSend(params: {
 
 // TODO(sprint-2): add explicit state machines for approvals, remittance ingestion, and cash application.
 export * from "./collections-engine.js";
+export * from "./collections/call-inbox.js";
+export * from "./collections/dispute-continuation.js";
+export * from "./collections/voice-live-functions.js";
+export * from "./collections/voice-post-call-outcome-normalizer.js";
+export * from "./collections/voice-post-call-tasking.js";
+export * from "./collections/voice-pre-call.js";
 export * from "./collections-workspace.js";
 export * from "./approvals-queue.js";
+export * from "./access-control.js";
+export * from "./adaptive-workflow.js";
+export * from "./adaptive-workflow-manual-controls.js";
 export * from "./bir-invoice-ingestion.js";
 export * from "./bir-invoice-review-service.js";
 export * from "./cash-application.js";
@@ -75,3 +84,4 @@ export * from "./perfios-statement-ingestion.js";
 export * from "./pilot-metrics.js";
 export * from "./remittance-ingestion.js";
 export * from "./tasks.js";
+export * from "./workflow-interaction-outcomes.js";

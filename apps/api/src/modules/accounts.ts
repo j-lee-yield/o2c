@@ -298,7 +298,7 @@ class PostgresAccountImportStore implements AccountImportStore {
           INSERT INTO parent_account (
             id, tenant_id, version, created_at, updated_at, deleted_at,
             created_by_actor_id, created_by_actor_role, updated_by_actor_id, updated_by_actor_role,
-            name, external_reference, status, centrally_serviced, metadata
+            name, external_reference, status, metadata
           ) VALUES (
             '${quoteLiteral(persisted.parentAccount.id)}'::uuid,
             '${quoteLiteral(persisted.parentAccount.tenantId)}',
@@ -313,7 +313,6 @@ class PostgresAccountImportStore implements AccountImportStore {
             '${quoteLiteral(persisted.parentAccount.name)}',
             ${nullableText(persisted.parentAccount.externalReference)},
             '${quoteLiteral(persisted.parentAccount.status)}',
-            ${nullableBoolean(persisted.parentAccount.centrallyServiced)},
             '${jsonLiteral(persisted.parentAccount.metadata)}'::jsonb
           )
           ON CONFLICT (id)
@@ -325,7 +324,6 @@ class PostgresAccountImportStore implements AccountImportStore {
             name = EXCLUDED.name,
             external_reference = COALESCE(EXCLUDED.external_reference, parent_account.external_reference),
             status = EXCLUDED.status,
-            centrally_serviced = COALESCE(EXCLUDED.centrally_serviced, parent_account.centrally_serviced),
             metadata = parent_account.metadata || EXCLUDED.metadata;
         `,
       );
@@ -640,9 +638,9 @@ export const registerAccountRoutes = (app: FastifyInstance): void => {
   });
 };
 
-function createAccountStore(): AccountImportStore {
+export function createAccountStore(input?: { preferPostgres?: boolean }): AccountImportStore {
   const databaseUrl = createDatabaseClientConfig().connectionString;
-  if (databaseUrl.length > 0 && isDatabaseAvailable(databaseUrl)) {
+  if (databaseUrl.length > 0 && (input?.preferPostgres || isDatabaseAvailable(databaseUrl))) {
     return new PostgresAccountImportStore(databaseUrl);
   }
 
@@ -654,7 +652,9 @@ function describePersistenceMode() {
   return databaseUrl.length > 0 && isDatabaseAvailable(databaseUrl) ? "postgres" : "in_memory";
 }
 
-function normalizeImportedAccountRecord(record: z.infer<typeof importedAccountRecordSchema>): ImportedAccountRecord {
+export function normalizeImportedAccountRecord(
+  record: z.infer<typeof importedAccountRecordSchema>,
+): ImportedAccountRecord {
   return {
     parentAccount: {
       name: record.parentAccount.name,

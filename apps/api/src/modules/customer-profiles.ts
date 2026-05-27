@@ -293,7 +293,7 @@ const taskQuerySchema = z.object({
 });
 
 const firstClassTaskQuerySchema = z.object({
-  status: z.enum(["open", "completed", "closed", "dismissed"]).optional(),
+  status: z.enum(["open", "completed", "closed", "dismissed", "deleted"]).optional(),
   origin: z.enum(["ai_generated", "system_generated", "workflow_generated", "manual"]).optional(),
   surface: z.enum(["home", "customers", "collections", "cash_app", "deductions", "org_credit_line"]).optional(),
 });
@@ -307,9 +307,34 @@ const buyerTaxProfileSchema = z.object({
   notes: z.string().min(1).optional(),
 });
 
-const store = new InMemoryCustomerProfileMasteringStore();
-const auditLogger = new InMemoryAuditLogger();
-const service = new CustomerProfileMasteringService({ store, auditLogger });
+let store = new InMemoryCustomerProfileMasteringStore();
+let auditLogger = new InMemoryAuditLogger();
+let service = new CustomerProfileMasteringService({ store, auditLogger });
+
+export async function ingestCustomerProfilePayload(input: {
+  principal?: Principal;
+  auditContext?: z.infer<typeof auditContextSchema>;
+  payload: CustomerProfileIngestionPayload;
+}) {
+  const principal = input.principal ?? {
+    id: "integration_customer_profile_sync",
+    roles: ["ar_manager" satisfies Role],
+  };
+  const auditContext = input.auditContext ?? {
+    actorId: principal.id,
+    actorType: "automation" as const,
+    correlationId: `customer-profile-${input.payload.id}`,
+    occurredAt: input.payload.occurredAt,
+  };
+
+  return service.ingest(principal, auditContext, input.payload);
+}
+
+export function resetCustomerProfileMasteringStateForTests() {
+  store = new InMemoryCustomerProfileMasteringStore();
+  auditLogger = new InMemoryAuditLogger();
+  service = new CustomerProfileMasteringService({ store, auditLogger });
+}
 
 export const registerCustomerProfileRoutes = (app: FastifyInstance): void => {
   app.get("/v1/customer_profiles", async () => ({
@@ -492,8 +517,14 @@ export const registerCustomerProfileRoutes = (app: FastifyInstance): void => {
         ...(query.origin ? { origin: query.origin } : {}),
         ...(query.surface ? { surface: query.surface } : {}),
       });
+      const billingAccountTasks = await taskService.list({
+        billingAccountId: params.profileId,
+        ...(query.status ? { status: query.status } : {}),
+        ...(query.origin ? { origin: query.origin } : {}),
+        ...(query.surface ? { surface: query.surface } : {}),
+      });
       return reply.send({
-        items: [...firstClassTasks, ...workflowTasks],
+        items: dedupeTasksById([...firstClassTasks, ...billingAccountTasks, ...workflowTasks]),
       });
     } catch (error) {
       return replyFromCustomerProfileError(reply, error);
@@ -600,6 +631,14 @@ function normalizeIngestion(body: z.infer<typeof ingestionSchema>): CustomerProf
     ...(body.sourceReferences ? { sourceReferences: body.sourceReferences } : {}),
     ...(body.metadata ? { metadata: body.metadata } : {}),
   };
+}
+
+function dedupeTasksById<T extends { id: string }>(tasks: T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const task of tasks) {
+    byId.set(task.id, task);
+  }
+  return [...byId.values()];
 }
 
 function parsePrincipal(request: FastifyRequest): Principal {

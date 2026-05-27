@@ -9,6 +9,10 @@ export default [
       "**/dist/**",
       "**/coverage/**",
       "**/node_modules/**",
+      "packages/config/src/**/*.d.ts",
+      "packages/config/src/**/*.d.ts.map",
+      "packages/config/src/**/*.js",
+      "packages/config/src/**/*.js.map",
       "packages/database/src/generated/**"
     ]
   },

@@ -1,10 +1,23 @@
 import React from "react";
 import type {
+  CallInboxDirection,
+  CallInboxStatus,
   CustomerProfileTabId,
   InvoiceIndexEntry,
-  InvoiceIndexProviderSummary,
-  InvoiceIndexStatusSummary,
+  InvoiceIndexMoreFilter,
+  InvoiceIndexStatus,
+  InvoiceIndexTypeFilter,
 } from "@o2c/contracts";
+import {
+  addOperatorCalendarDays,
+  diffOperatorCalendarDays,
+  formatOperatorDate,
+  formatOperatorDateKey,
+  formatOperatorToday,
+  normalizeOperatorDateKey,
+  operatorDateKeyToDate,
+  operatorMonthKey,
+} from "./date-utils.js";
 import type {
   ApprovalQueueItem,
   AutomationRuleItem,
@@ -28,6 +41,7 @@ import type {
   ScreenState,
   SourceBadge,
   OdooConnectSelectionState,
+  TaskQueueItem,
 } from "./data.js";
 
 export type DashboardPage =
@@ -56,13 +70,67 @@ export type DashboardPage =
   | "rules"
   | "account-workspace"
   | "invoice-detail"
-  | "screen-inventory";
+  | "screen-inventory"
+  | "admin-users"
+  | "admin-roles";
+
+export type TaskStatusFilter = TaskQueueItem["status"] | "active" | "all";
+export type TaskTypeFilter = TaskQueueItem["type"] | "all";
+export type TaskPriorityFilter = TaskQueueItem["priority"] | "all";
+export type CollectionsEmailFolderFilter = "all" | "unread" | "sent" | "drafts";
+export type CollectionsCallVoicemailFilter = "all" | "yes" | "no";
+export type InvoiceStatusFilter = InvoiceIndexStatus | "all";
+
+export interface TaskFilterInput {
+  status?: TaskStatusFilter;
+  type?: TaskTypeFilter;
+  priority?: TaskPriorityFilter;
+  q?: string;
+}
+
+export interface CollectionsEmailFilterInput {
+  folder?: CollectionsEmailFolderFilter;
+  customer?: string;
+  workflow?: string;
+  q?: string;
+}
+
+export interface CollectionsCallFilterInput {
+  direction?: CallInboxDirection | "all";
+  status?: CallInboxStatus | "all";
+  voicemail?: CollectionsCallVoicemailFilter;
+  customer?: string;
+  classification?: string;
+  workflow?: string;
+  date?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export interface InvoiceFilterInput {
+  q?: string;
+  status?: InvoiceStatusFilter;
+  type?: InvoiceIndexTypeFilter;
+  more?: InvoiceIndexMoreFilter;
+  page?: number;
+}
+
+interface NormalizedTaskFilters {
+  status: TaskStatusFilter;
+  type: TaskTypeFilter;
+  priority: TaskPriorityFilter;
+  q: string;
+}
 
 interface DashboardProps {
   data: OperatorConsoleData;
   page?: DashboardPage;
   pathname?: string;
   cashAppTab?: string | undefined;
+  analyticsTrend?: "weekly" | "monthly" | undefined;
+  homeCalendarDate?: string | undefined;
+  taskFilters?: TaskFilterInput | undefined;
+  invoiceFilters?: InvoiceFilterInput | undefined;
   customerId?: string | undefined;
   customerTab?: string | undefined;
   odooConnect?: OdooConnectViewState;
@@ -75,9 +143,20 @@ interface DashboardProps {
   controlCenterTab?: "workflows" | "email-templates" | "call-agent" | "config";
   controlCenterExpandedWorkflowId?: string;
   controlCenterSelectedTemplateId?: string;
+  controlCenterTemplateSearch?: string;
+  controlCenterActionStatus?: "success" | "error";
+  controlCenterActionMessage?: string;
+  controlCenterEnrollModalWorkflowId?: string;
   controlCenterStageModalWorkflowId?: string;
   controlCenterStageModalChannel?: "email" | "call" | "sms";
   controlCenterStageModalTemplateMode?: "pre_saved_template" | "ai_generated";
+  collectionsTab?: "email" | "call-inbox";
+  collectionsEmailFilters?: CollectionsEmailFilterInput | undefined;
+  collectionsCallFilters?: CollectionsCallFilterInput | undefined;
+  customerCallStatus?: "started" | "failed";
+  customerCallMessage?: string;
+  customerEmailStatus?: "sent" | "approval_needed" | "failed";
+  customerEmailMessage?: string;
 }
 
 export interface OnboardingImportStatus {
@@ -93,32 +172,59 @@ export interface OnboardingImportStatus {
 export type OdooConnectViewState = OdooConnectSelectionState | undefined;
 export type OdooConnectErrorViewState = OdooConnectErrorState | undefined;
 
-const primaryNavigation = [
-  ["home", "Home", "dashboard", "/"],
-  ["onboarding", "Onboarding", "upload", "/onboarding"],
-  ["inbox", "Tasks", "check", "/tasks"],
-  ["analytics", "Analytics", "trend", "/analytics"],
-  ["collections", "Collections", "collections", "/collections"],
-  ["control-center", "Control Center", "rules", "/control-center"],
-  ["cash-application", "Cash App", "cash", "/cash-app"],
-  ["exceptions", "Deductions", "invoice", "/deductions"],
-  ["customers", "Customers", "customers", "/customers"],
-  ["invoices", "Invoices", "invoice", "/invoices"],
+const sidebarNavigation = [
+  {
+    items: [
+      ["home", "Home", "dashboard", "/"],
+      ["inbox", "Tasks", "check", "/tasks"],
+      ["analytics", "Analytics", "trend", "/analytics"],
+    ],
+  },
+  {
+    heading: "Workspace",
+    items: [
+      ["collections", "Collections", "collections", "/collections"],
+      ["control-center", "Control Center", "rules", "/control-center"],
+    ],
+  },
+  {
+    heading: "Manage",
+    items: [
+      ["customers", "Customers", "customers", "/customers"],
+      ["invoices", "Invoices", "invoice", "/invoices"],
+      ["payments", "Payments", "cash", "/cash-app?tab=payments"],
+      ["admin-users", "Users", "customers", "/admin/users"],
+    ],
+  },
 ] as const;
 
-const secondaryNavigation = [
-  ["approvals", "Approvals", "approvals", "/approvals"],
-  ["borrowing", "Credit Line", "currency", "/credit-line"],
-  ["data-sources", "Data Sources", "data-sources", "/data-sources"],
-  ["ai-activity", "AI Activity", "activity", "/ai-activity"],
-  ["rules", "Rules", "rules", "/rules"],
-] as const;
+const hiddenMvpPaths = ["/onboarding", "/cash-app", "/deductions", "/credit-line", "/data-sources", "/approvals", "/rules"];
+
+function isHiddenMvpPath(path: string) {
+  return hiddenMvpPaths.some((hiddenPath) => path === hiddenPath || path.startsWith(`${hiddenPath}/`));
+}
+
+function isSidebarItemActive(
+  key: (typeof sidebarNavigation)[number]["items"][number][0],
+  page: DashboardPage,
+  cashAppTab?: string | undefined,
+) {
+  if (key === "payments") {
+    return page === "cash-application" && cashAppTab === "payments";
+  }
+
+  return page === key;
+}
 
 export const Dashboard = ({
   data,
   page = "home",
   pathname = "/",
   cashAppTab,
+  analyticsTrend,
+  homeCalendarDate,
+  taskFilters,
+  invoiceFilters,
   customerId,
   customerTab,
   odooConnect,
@@ -131,9 +237,20 @@ export const Dashboard = ({
   controlCenterTab,
   controlCenterExpandedWorkflowId,
   controlCenterSelectedTemplateId,
+  controlCenterTemplateSearch,
+  controlCenterActionStatus,
+  controlCenterActionMessage,
+  controlCenterEnrollModalWorkflowId,
   controlCenterStageModalWorkflowId,
   controlCenterStageModalChannel,
   controlCenterStageModalTemplateMode,
+  collectionsTab,
+  collectionsEmailFilters,
+  collectionsCallFilters,
+  customerCallStatus,
+  customerCallMessage,
+  customerEmailStatus,
+  customerEmailMessage,
 }: DashboardProps) => (
   <>
     <style>{styles}</style>
@@ -147,34 +264,36 @@ export const Dashboard = ({
           </div>
         </a>
 
-        <nav className="sidebar-nav" aria-label="Primary navigation">
-          {primaryNavigation.map(([key, label, icon, href]) => (
-            <a key={key} className={`sidebar-link${page === key ? " is-active" : ""}`} href={href}>
-              <AppIcon name={icon} />
-              <span>{label}</span>
-            </a>
-          ))}
-        </nav>
-
-        <div className="sidebar-divider" />
-        <nav className="sidebar-nav" aria-label="Secondary navigation">
-          {secondaryNavigation.map(([key, label, icon, href]) => (
-            <a key={key} className={`sidebar-link${page === key ? " is-active" : ""}`} href={href}>
-              <AppIcon name={icon} />
-              <span>{label}</span>
-            </a>
-          ))}
-        </nav>
+        {sidebarNavigation.map((section, index) => (
+          <React.Fragment key={("heading" in section ? section.heading : undefined) ?? `sidebar-section-${index}`}>
+            {index > 0 ? <div className="sidebar-divider" /> : null}
+            {"heading" in section ? <p className="sidebar-section-heading">{section.heading}</p> : null}
+            <nav className="sidebar-nav" aria-label={"heading" in section ? section.heading : "Primary navigation"}>
+              {section.items.map(([key, label, icon, href]) => (
+                <a
+                  key={key}
+                  className={`sidebar-link${isSidebarItemActive(key, page, cashAppTab) ? " is-active" : ""}`}
+                  href={href}
+                >
+                  <AppIcon name={icon} />
+                  <span>{label}</span>
+                </a>
+              ))}
+            </nav>
+          </React.Fragment>
+        ))}
       </aside>
 
       <div className="dashboard-main">
-        <header className="topbar">
-          <p className="topbar-date">Today: {formatTopbarDate(data.generatedAt)}</p>
-          <div className="topbar-user">
-            <span>Juan Cruz</span>
-            <span className="user-badge">JC</span>
-          </div>
-        </header>
+        {page !== "control-center" ? (
+          <header className="topbar">
+            <p className="topbar-date">Today: {formatTopbarDate()}</p>
+            <div className="topbar-user">
+              <span>Juan Cruz</span>
+              <span className="user-badge">JC</span>
+            </div>
+          </header>
+        ) : null}
 
         <div className="page-scroll">
           {renderPage(
@@ -182,6 +301,10 @@ export const Dashboard = ({
             data,
             pathname,
             cashAppTab,
+            analyticsTrend,
+            homeCalendarDate,
+            taskFilters,
+            invoiceFilters,
             customerId,
             customerTab,
             odooConnect,
@@ -194,9 +317,20 @@ export const Dashboard = ({
             controlCenterTab,
             controlCenterExpandedWorkflowId,
             controlCenterSelectedTemplateId,
+            controlCenterTemplateSearch,
+            controlCenterActionStatus,
+            controlCenterActionMessage,
+            controlCenterEnrollModalWorkflowId,
             controlCenterStageModalWorkflowId,
             controlCenterStageModalChannel,
             controlCenterStageModalTemplateMode,
+            collectionsTab,
+            collectionsEmailFilters,
+            collectionsCallFilters,
+            customerCallStatus,
+            customerCallMessage,
+            customerEmailStatus,
+            customerEmailMessage,
           )}
         </div>
       </div>
@@ -209,6 +343,10 @@ function renderPage(
   data: OperatorConsoleData,
   pathname = "/",
   cashAppTab?: string | undefined,
+  analyticsTrend?: "weekly" | "monthly" | undefined,
+  homeCalendarDate?: string | undefined,
+  taskFilters?: TaskFilterInput | undefined,
+  invoiceFilters?: InvoiceFilterInput | undefined,
   customerId?: string | undefined,
   customerTab?: string | undefined,
   odooConnect?: OdooConnectViewState,
@@ -221,9 +359,20 @@ function renderPage(
   controlCenterTab?: "workflows" | "email-templates" | "call-agent" | "config",
   controlCenterExpandedWorkflowId?: string,
   controlCenterSelectedTemplateId?: string,
+  controlCenterTemplateSearch?: string,
+  controlCenterActionStatus?: "success" | "error",
+  controlCenterActionMessage?: string,
+  controlCenterEnrollModalWorkflowId?: string,
   controlCenterStageModalWorkflowId?: string,
   controlCenterStageModalChannel?: "email" | "call" | "sms",
   controlCenterStageModalTemplateMode?: "pre_saved_template" | "ai_generated",
+  collectionsTab?: "email" | "call-inbox",
+  collectionsEmailFilters?: CollectionsEmailFilterInput | undefined,
+  collectionsCallFilters?: CollectionsCallFilterInput | undefined,
+  customerCallStatus?: "started" | "failed",
+  customerCallMessage?: string,
+  customerEmailStatus?: "sent" | "approval_needed" | "failed",
+  customerEmailMessage?: string,
 ) {
   switch (page) {
     case "onboarding":
@@ -236,7 +385,7 @@ function renderPage(
     case "borrowing":
       return <BorrowingDashboardPage data={data} />;
     case "analytics":
-      return <AnalyticsPage data={data} />;
+      return <AnalyticsPage data={data} {...(analyticsTrend ? { trend: analyticsTrend } : {})} />;
     case "credit-facilities":
       return <CreditFacilitiesPage data={data} />;
     case "loan-statement":
@@ -248,7 +397,14 @@ function renderPage(
     case "loan-tasks":
       return <LoanTasksPage data={data} />;
     case "collections":
-      return <CollectionsPage data={data} />;
+      return (
+        <CollectionsPage
+          data={data}
+          activeTab={collectionsTab ?? "email"}
+          emailFilters={collectionsEmailFilters}
+          callFilters={collectionsCallFilters}
+        />
+      );
     case "control-center":
       return (
         <ControlCenterPage
@@ -256,21 +412,30 @@ function renderPage(
           {...(controlCenterTab ? { activeTab: controlCenterTab } : {})}
           {...(controlCenterExpandedWorkflowId ? { expandedWorkflowId: controlCenterExpandedWorkflowId } : {})}
           {...(controlCenterSelectedTemplateId ? { selectedTemplateId: controlCenterSelectedTemplateId } : {})}
+          {...(controlCenterTemplateSearch ? { templateSearch: controlCenterTemplateSearch } : {})}
+          {...(controlCenterActionStatus && controlCenterActionMessage
+            ? { actionStatus: controlCenterActionStatus, actionMessage: controlCenterActionMessage }
+            : {})}
+          {...(controlCenterEnrollModalWorkflowId ? { enrollModalWorkflowId: controlCenterEnrollModalWorkflowId } : {})}
           {...(controlCenterStageModalWorkflowId ? { stageModalWorkflowId: controlCenterStageModalWorkflowId } : {})}
           {...(controlCenterStageModalChannel ? { stageModalChannel: controlCenterStageModalChannel } : {})}
           {...(controlCenterStageModalTemplateMode ? { stageModalTemplateMode: controlCenterStageModalTemplateMode } : {})}
         />
       );
     case "inbox":
-      return <InboxPage data={data} />;
+      return <InboxPage data={data} filters={taskFilters} />;
     case "invoices":
-      return <InvoicesPage data={data} />;
+      return <InvoicesPage data={data} filters={invoiceFilters} />;
     case "customers":
       return (
         <CustomersPage
           data={data}
           {...(customerId ? { selectedCustomerId: customerId } : {})}
           {...(customerTab ? { activeTab: customerTab } : {})}
+          {...(customerCallStatus ? { callStatus: customerCallStatus } : {})}
+          {...(customerCallMessage ? { callMessage: customerCallMessage } : {})}
+          {...(customerEmailStatus ? { emailStatus: customerEmailStatus } : {})}
+          {...(customerEmailMessage ? { emailMessage: customerEmailMessage } : {})}
         />
       );
     case "cash-application":
@@ -315,9 +480,13 @@ function renderPage(
       return <InvoiceDetailPage data={data} />;
     case "screen-inventory":
       return <ScreenInventoryPage data={data} />;
+    case "admin-users":
+      return <AccessControlUsersPage data={data} pathname={pathname} />;
+    case "admin-roles":
+      return <AccessControlUsersPage data={data} pathname={pathname} />;
     case "home":
     default:
-      return <CommandCenterPage data={data} />;
+      return <CommandCenterPage data={data} calendarDate={homeCalendarDate} />;
   }
 }
 
@@ -374,7 +543,7 @@ const OnboardingPage = ({
         actionRow={
           <div className="header-actions">
             <a href="/customers" className="ghost-button">Open Customers</a>
-            <a href="/cash-app" className="primary-button">Open Cash App</a>
+            <a href="/invoices" className="primary-button">Open Invoices</a>
           </div>
         }
       />
@@ -491,25 +660,48 @@ const OnboardingPage = ({
   );
 };
 
-const CommandCenterPage = ({ data }: { data: OperatorConsoleData }) => {
+const CommandCenterPage = ({
+  data,
+  calendarDate,
+}: {
+  data: OperatorConsoleData;
+  calendarDate?: string | undefined;
+}) => {
   const setupItem = data.homeSetupChecklist.items[0];
   const byCustomerView = data.homeTaskSummary.views.find((view) => view.id === "by_customer") ?? data.homeTaskSummary.views[0];
-  const byTaskTypeView = data.homeTaskSummary.views.find((view) => view.id === "by_task_type") ?? data.homeTaskSummary.views[1];
-  const totalTaskCount = data.homeTaskSummary.views.find((view) => view.id === "all_tasks")?.totalCount ?? byCustomerView?.totalCount ?? 0;
-  const calendarDays = buildHomeCalendarDays(data.generatedAt);
-  const taskAgeBuckets = buildHomeTaskAgeBuckets(totalTaskCount);
-  const taskTypeBuckets = buildHomeTaskTypeBuckets(byTaskTypeView?.items ?? []);
-  const customerBuckets = buildHomeCustomerBuckets(byCustomerView?.items ?? []);
+  const openTasks = getCanonicalOpenTasks(data.taskQueue);
+  const totalTaskCount = openTasks.length;
+  const todayDateKey = formatOperatorDateKey();
+  const selectedCalendarDateKey = normalizeOperatorDateKey(calendarDate) ?? todayDateKey;
+  const calendar = buildHomeCalendar({
+    data,
+    selectedDateKey: selectedCalendarDateKey,
+    todayDateKey,
+  });
+  const taskAgeBuckets = buildHomeTaskAgeBuckets({
+    tasks: data.taskQueue,
+    invoices: data.invoiceIndex.invoices,
+    calls: data.callInbox.calls,
+    todayDateKey,
+  });
+  const taskTypeBuckets = buildHomeTaskTypeBuckets(openTasks);
+  const customerBuckets = buildHomeCustomerBuckets(openTasks, byCustomerView?.items ?? []);
+  const dueTodaySummary = buildHomeDueTodaySummary({
+    todayDateKey,
+    invoices: data.invoiceIndex.invoices,
+  });
   const respondToItems = buildHomeRespondToItems({
-    customerItems: byCustomerView?.items ?? [],
-    taskTypeItems: byTaskTypeView?.items ?? [],
+    todayDateKey,
+    invoices: data.invoiceIndex.invoices,
+    collectionsQueue: data.collectionsQueue,
+    taskQueue: data.taskQueue,
+    calls: data.callInbox.calls,
   });
   const collectSummary = {
     customers: data.homeSnapshotMetrics.openInvoiceCount,
     amountLabel: formatPhp(data.homeSnapshotMetrics.outstandingBalanceCents),
     actionPath: data.homeCollectionsMetrics.actionPath,
   };
-  const dueTodayLabel = `${formatPhp(data.homeSnapshotMetrics.overdueBalanceCents)} currently due today from ${Math.max(customerBuckets.totalCustomers, 1)} customers`;
   const weekCompletionPercent = 0;
 
   return (
@@ -533,7 +725,7 @@ const CommandCenterPage = ({ data }: { data: OperatorConsoleData }) => {
             <h2>Tasks</h2>
             <p>{weekCompletionPercent}% tasks completed this week</p>
           </div>
-          <a href={byCustomerView?.actionPath ?? "/tasks"} className="home-reference-link">
+          <a href="/tasks" className="home-reference-link">
             {totalTaskCount} open tasks
           </a>
         </div>
@@ -543,33 +735,39 @@ const CommandCenterPage = ({ data }: { data: OperatorConsoleData }) => {
             <div className="home-reference-calendar-title">
               <AppIcon name="clock" />
               <span>Calendar</span>
-              <strong>{formatHomeCalendarMonth(data.generatedAt)}</strong>
-              <span className="home-reference-pill">Today</span>
+              <strong>{calendar.monthLabel}</strong>
+              <a className="home-reference-pill" href="/">Today</a>
             </div>
             <div className="home-reference-calendar-actions">
-              <button type="button" className="home-reference-inline-button">Prev day</button>
-              <button type="button" className="home-reference-inline-button">Next day</button>
+              <a href={calendar.previousHref} className="home-reference-inline-button">Prev week</a>
+              <a href={calendar.nextHref} className="home-reference-inline-button">Next week</a>
             </div>
           </div>
           <div className="home-reference-calendar-grid">
-            <button type="button" className="home-reference-calendar-nav" aria-label="Previous day">
+            <a href={calendar.previousHref} className="home-reference-calendar-nav" aria-label="Previous week">
               <AppIcon name="chevron-left" />
-            </button>
-            {calendarDays.map((day) => (
-              <div key={day.label} className={`home-reference-calendar-day${day.isActive ? " is-active" : ""}`}>
-                <span>{day.weekday}</span>
+            </a>
+            {calendar.days.map((day) => (
+              <div key={day.dateKey} className={`home-reference-calendar-day${day.isActive ? " is-active" : ""}`}>
+                <span>{day.isToday ? "Today" : day.weekday}</span>
                 <strong>{day.label}</strong>
+                {day.activity.totalCount > 0 ? (
+                  <small title={day.activity.tooltip}>{day.activity.label}</small>
+                ) : null}
               </div>
             ))}
-            <button type="button" className="home-reference-calendar-nav" aria-label="Next day">
+            <a href={calendar.nextHref} className="home-reference-calendar-nav" aria-label="Next week">
               <AppIcon name="chevron-right" />
-            </button>
+            </a>
           </div>
+          {calendar.activityCount === 0 ? (
+            <p className="home-reference-empty">No scheduled tasks, payments, outreach, or customer activity for this week.</p>
+          ) : null}
         </article>
 
         <article className="home-reference-banner">
-          <span>{dueTodayLabel}</span>
-          <a href={data.homeCollectionsMetrics.actionPath} className="home-reference-link">
+          <span>{dueTodaySummary.label}</span>
+          <a href={dueTodaySummary.actionPath} className="home-reference-link">
             View
           </a>
         </article>
@@ -579,12 +777,18 @@ const CommandCenterPage = ({ data }: { data: OperatorConsoleData }) => {
             <h3>Respond to</h3>
           </div>
           <ul className="home-reference-bullets">
-            {respondToItems.map((item, index) => (
-              <li key={`${item.label}-${index}`}>
-                <span>{item.label}</span>
-                <a href={item.actionPath} className="home-reference-link">View</a>
+            {respondToItems.items.length > 0 ? (
+              respondToItems.items.map((item, index) => (
+                <li key={`${item.label}-${index}`}>
+                  <span title={item.detail}>{item.label}</span>
+                  <a href={item.actionPath} className="home-reference-link">{item.actionLabel}</a>
+                </li>
+              ))
+            ) : (
+              <li className="home-reference-empty-list-item">
+                <span>No disputes, broken promises, or open customer tasks need response.</span>
               </li>
-            ))}
+            )}
           </ul>
         </div>
 
@@ -594,23 +798,37 @@ const CommandCenterPage = ({ data }: { data: OperatorConsoleData }) => {
               <h3>Open Tasks by Age</h3>
               <button type="button" className="home-reference-kebab" aria-label="More options">⋮</button>
             </div>
-            <div className="home-reference-bar-chart">
-              <div className="home-reference-bar-axis">
-                {taskAgeBuckets.axis.map((tick) => (
-                  <span key={tick}>{tick}</span>
-                ))}
-              </div>
-              <div className="home-reference-bar-columns">
-                {taskAgeBuckets.buckets.map((bucket) => (
-                  <div key={bucket.label} className="home-reference-bar-column">
-                    <div className="home-reference-bar-rail">
-                      <div className="home-reference-bar-fill" style={{ height: `${bucket.height}%` }} />
+            {taskAgeBuckets.totalCount > 0 ? (
+              <div className="home-reference-bar-chart">
+                <div className="home-reference-bar-axis">
+                  {taskAgeBuckets.axis.map((tick) => (
+                    <span key={tick}>{tick}</span>
+                  ))}
+                </div>
+                <div className="home-reference-bar-columns">
+                  {taskAgeBuckets.buckets.map((bucket) => (
+                    <div
+                      key={bucket.label}
+                      className="home-reference-bar-column"
+                      title={`${bucket.count} open task${pluralizeCount(bucket.count)} linked to ${bucket.label} invoices`}
+                      aria-label={`${bucket.label}: ${bucket.count} open task${pluralizeCount(bucket.count)}`}
+                      tabIndex={0}
+                    >
+                      <span className="chart-tooltip home-reference-chart-tooltip" role="tooltip">
+                        <strong>{formatCount(bucket.count)}</strong>
+                        <span>open task{pluralizeCount(bucket.count)} linked to {bucket.label} invoices</span>
+                      </span>
+                      <div className="home-reference-bar-rail">
+                        <div className="home-reference-bar-fill" style={{ height: `${bucket.height}%` }} />
+                      </div>
+                      <span>{bucket.label}</span>
                     </div>
-                    <span>{bucket.label}</span>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
+            ) : (
+              <p className="home-reference-chart-empty">No open tasks are linked to invoice aging buckets.</p>
+            )}
           </article>
 
           <article className="home-reference-chart-card">
@@ -619,15 +837,21 @@ const CommandCenterPage = ({ data }: { data: OperatorConsoleData }) => {
               <button type="button" className="home-reference-kebab" aria-label="More options">⋮</button>
             </div>
             <div className="home-reference-donut-layout">
-              <HomeDonutChart segments={taskTypeBuckets.segments} />
-              <div className="home-reference-legend">
-                {taskTypeBuckets.segments.map((segment) => (
-                  <div key={segment.label} className="home-reference-legend-row">
-                    <i style={{ background: segment.color }} />
-                    <span>{segment.label}</span>
+              {taskTypeBuckets.segments.length > 0 ? (
+                <>
+                  <HomeDonutChart segments={taskTypeBuckets.segments} />
+                  <div className="home-reference-legend">
+                    {taskTypeBuckets.segments.map((segment) => (
+                      <div key={segment.label} className="home-reference-legend-row">
+                        <i style={{ background: segment.color }} />
+                        <span>{segment.label}</span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </>
+              ) : (
+                <p className="home-reference-chart-empty">No task type data available.</p>
+              )}
             </div>
           </article>
 
@@ -637,15 +861,21 @@ const CommandCenterPage = ({ data }: { data: OperatorConsoleData }) => {
               <button type="button" className="home-reference-kebab" aria-label="More options">⋮</button>
             </div>
             <div className="home-reference-donut-layout">
-              <HomeDonutChart segments={customerBuckets.segments} />
-              <div className="home-reference-legend">
-                {customerBuckets.segments.map((segment) => (
-                  <div key={segment.label} className="home-reference-legend-row">
-                    <i style={{ background: segment.color }} />
-                    <span>{segment.label}</span>
+              {customerBuckets.segments.length > 0 ? (
+                <>
+                  <HomeDonutChart segments={customerBuckets.segments} />
+                  <div className="home-reference-legend">
+                    {customerBuckets.segments.map((segment) => (
+                      <div key={segment.label} className="home-reference-legend-row">
+                        <i style={{ background: segment.color }} />
+                        <span>{segment.label}</span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </>
+              ) : (
+                <p className="home-reference-chart-empty">No customer task data available.</p>
+              )}
             </div>
           </article>
         </div>
@@ -668,203 +898,232 @@ const CommandCenterPage = ({ data }: { data: OperatorConsoleData }) => {
   );
 };
 
-const AnalyticsPage = ({ data }: { data: OperatorConsoleData }) => {
-  const analytics = buildAnalyticsViewModel(data);
+const AnalyticsPage = ({
+  data,
+  trend = "monthly",
+}: {
+  data: OperatorConsoleData;
+  trend?: "weekly" | "monthly";
+}) => {
+  const analytics = buildAnalyticsViewModel(data, trend);
 
   return (
-    <section className="page-section analytics-page">
+    <section className="page-section analytics-page" data-analytics-page data-analytics-trend={trend}>
       <PageHeader
         title="Analytics"
-        description="Collections performance, DSO trends, and financial metrics"
-        actionRow={
-          <div className="header-actions analytics-header-actions">
-            <button type="button" className="ghost-select analytics-select">
-              <span>Year to Date</span>
-              <span className="analytics-select-caret" aria-hidden="true">▾</span>
-            </button>
-            <button type="button" className="ghost-button analytics-export-button">
-              <AppIcon name="download" />
-              Export Report
-            </button>
-          </div>
-        }
+        description="Your accounts at a glance"
       />
 
       <div className="analytics-kpi-grid">
         <AnalyticsMetricCard
           title="Total Outstanding"
           value={formatPhpCompactLong(analytics.totalOutstandingCents)}
-          icon="currency"
-          accent="info"
-          footer="↓ 8.2% vs last month"
+          tone="default"
         />
         <AnalyticsMetricCard
-          title="Overdue Balance"
+          title="Total Overdue"
           value={formatPhpCompactLong(analytics.overdueBalanceCents)}
-          icon="alert-outline"
-          accent="danger"
-          footer="↓ 12.5% vs last month"
+          tone="danger"
         />
         <AnalyticsMetricCard
-          title="DSO (Days)"
-          value={String(analytics.estimatedDsoDays)}
-          icon="trend"
-          accent="success"
-          footer="↓ 10 days since Jan"
+          title="Cash Collected (this month)"
+          value={formatPhpCompactLong(analytics.cashCollectedThisMonthCents)}
+          tone="success"
         />
         <AnalyticsMetricCard
-          title="Collections Rate"
-          value={`${analytics.collectionsRate.toFixed(1)}%`}
-          icon="sparkle-mini"
-          accent="violet"
-          footer="↑ 2.1% vs last month"
+          title="Invoices Followed Up On (this month)"
+          value={formatCount(analytics.invoicesFollowedUpThisMonth)}
+          tone="default"
+        />
+        <AnalyticsMetricCard
+          title="Invoices Collected (this month)"
+          value={formatCount(analytics.invoicesCollectedThisMonth)}
+          tone="default"
         />
       </div>
 
-      <div className="analytics-grid analytics-grid-primary">
-        <article className="panel analytics-panel">
-          <div className="panel-header">
-            <div>
-              <h2>Collections vs Target</h2>
-              <p className="label-copy">Monthly performance</p>
-            </div>
-            <span className="pill pill-success">Above Target</span>
+      <article className="panel analytics-impact-panel">
+        <div className="panel-header">
+          <div>
+            <h2>What has Yield done for you?</h2>
+            <p className="label-copy">Impact of AI agents and one-click workflows</p>
           </div>
-          <div className="analytics-bar-chart">
-            {analytics.monthlyPerformance.map((month) => (
-              <div key={month.label} className="analytics-bar-column">
-                <div className="analytics-bar-label-top">{formatPhpCompactLong(month.collectedCents)}</div>
-                <div className="analytics-bar-track">
-                  <div className="analytics-bar-grid" aria-hidden="true">
-                    <span />
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                  <div className="analytics-bar-group">
-                    <div className="analytics-bar analytics-bar-collected-wrap">
-                      <div className="analytics-bar-collected" style={{ height: `${month.collectedRatio * 100}%` }} />
-                    </div>
-                    <div className="analytics-bar analytics-bar-target-wrap">
-                      <div className="analytics-bar-target" style={{ height: `${month.targetRatio * 100}%` }} />
-                    </div>
-                  </div>
-                </div>
-                <span className="analytics-axis-label">{month.label}</span>
-              </div>
-            ))}
-          </div>
-          <div className="analytics-legend">
-            <span><i className="analytics-legend-dot analytics-legend-dot-collected" />Collected</span>
-            <span><i className="analytics-legend-dot analytics-legend-dot-target" />Target</span>
-          </div>
-        </article>
+        </div>
+        <div className="analytics-impact-grid">
+          <AnalyticsImpactCard
+            title="PHP collected with Yield"
+            value={formatPhpCompactLong(analytics.yieldCollectedCents)}
+            icon="currency"
+            accent="info"
+          />
+          <AnalyticsImpactCard
+            title="Yield collection rate"
+            value={`${analytics.collectionsRate.toFixed(1)}%`}
+            icon="trend"
+            accent="violet"
+          />
+          <AnalyticsImpactCard
+            title="Calls/emails automated"
+            value={formatCount(analytics.automatedCommunicationsCount)}
+            icon="mail"
+            accent="success"
+          />
+        </div>
+      </article>
 
-        <article className="panel analytics-panel">
-          <div className="panel-header">
-            <div>
-              <h2>Aging Balance</h2>
-              <p className="label-copy">Current AR distribution</p>
-            </div>
-            <span className="pill pill-info">{formatPhpCompactLong(analytics.totalOutstandingCents)} Total</span>
-          </div>
-          <div className="analytics-aging-layout">
-            <div className="analytics-donut-wrap">
-              <div className="analytics-donut-area">
-                <div className="analytics-donut" style={{ background: analytics.agingChart }} />
-                {analytics.agingLegend.map((bucket) => (
-                  <span
-                    key={`${bucket.label}-share`}
-                    className={`analytics-aging-percent analytics-aging-percent-${bucket.position}`}
-                    style={{ color: bucket.color }}
-                  >
-                    {bucket.percent}%
-                  </span>
-                ))}
-              </div>
-            </div>
-            <div className="analytics-aging-legend">
-              {analytics.agingLegend.map((bucket) => (
-                <div key={bucket.label} className="analytics-aging-row">
-                  <div className="analytics-aging-name">
-                    <i className="analytics-legend-dot" style={{ background: bucket.color }} />
-                    <span>{bucket.label}</span>
-                  </div>
-                  <div className="analytics-aging-values">
-                    <strong>{bucket.percent}%</strong>
-                    <span>{formatPhpCompactLong(bucket.amountCents)}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </article>
+      <div className="analytics-trends-header">
+        <h2>Trends</h2>
+        <div className="analytics-trend-toggle" role="tablist" aria-label="Analytics trend interval">
+          <a
+            href="/analytics?trend=weekly"
+            className={`analytics-trend-pill${trend === "weekly" ? " is-active" : ""}`}
+            aria-current={trend === "weekly" ? "page" : undefined}
+            aria-selected={trend === "weekly"}
+            data-analytics-trend-link
+            data-analytics-trend-value="weekly"
+            role="tab"
+          >
+            Weekly
+          </a>
+          <a
+            href="/analytics?trend=monthly"
+            className={`analytics-trend-pill${trend === "monthly" ? " is-active" : ""}`}
+            aria-current={trend === "monthly" ? "page" : undefined}
+            aria-selected={trend === "monthly"}
+            data-analytics-trend-link
+            data-analytics-trend-value="monthly"
+            role="tab"
+          >
+            Monthly
+          </a>
+        </div>
       </div>
 
-      <div className="analytics-grid analytics-grid-secondary">
-        <article className="panel analytics-panel">
+      <div className="analytics-grid analytics-grid-trends">
+        <article className="panel analytics-panel analytics-chart-panel">
           <div className="panel-header">
             <div>
-              <h2>DSO Trend</h2>
-              <p className="label-copy">Days Sales Outstanding over time</p>
+              <h2>Overdue Balance %</h2>
+              <p className="label-copy">Represents the percentage of your total open balance that is overdue</p>
             </div>
-            <span className="pill pill-success">Improving</span>
           </div>
-          <AnalyticsLineChart points={analytics.dsoTrend} />
-          <div className="analytics-inline-stats">
-            <AnalyticsSectionStat
-              label="Avg Collection Time"
-              value={`${analytics.avgCollectionTimeDays} days`}
-              tone="success"
-            />
-            <AnalyticsSectionStat
-              label="Open Invoices"
-              value={String(analytics.openInvoiceCount)}
-              tone="info"
-            />
-          </div>
+          <AnalyticsTrendChart
+            ariaLabel="Overdue balance percentage trend"
+            labels={analytics.periodLabels}
+            series={[
+              {
+                label: "Overdue %",
+                color: "#3b82f6",
+                values: analytics.overdueBalanceTrend,
+              },
+            ]}
+            yMin={0}
+            yMax={100}
+            tickFormatter={(value) => `${Math.round(value)}`}
+            valueFormatter={(value) => `${Number(value.toFixed(1))}%`}
+            hasData={analytics.overdueBalanceTrendHasData}
+            emptyMessage="No open invoice due-date data is available for this period."
+          />
         </article>
 
-        <article className="panel analytics-panel">
+        <article className="panel analytics-panel analytics-chart-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Cash Collected</h2>
+              <p className="label-copy">
+                Represents the amount of money you have collected over time. The orange line represents collection that Yield assisted with.
+              </p>
+            </div>
+          </div>
+          <AnalyticsTrendChart
+            ariaLabel="Cash collected trend"
+            labels={analytics.periodLabels}
+            series={[
+              {
+                label: "Total",
+                color: "#6b7280",
+                values: analytics.cashCollectedTrend,
+              },
+              {
+                label: "Yield Assisted",
+                color: "#f59e0b",
+                values: analytics.yieldCollectedTrend,
+              },
+            ]}
+            tickFormatter={(value) => formatChartMoneyMillions(value)}
+            valueFormatter={(value) => formatPhp(value)}
+            hasData={analytics.cashCollectedTrendHasData}
+            emptyMessage="No payment or cash-application activity is available for this period."
+          />
+        </article>
+
+        <article className="panel analytics-panel analytics-chart-panel">
+          <div className="panel-header">
+            <div>
+              <h2>{trend === "weekly" ? "Weekly trend of DSO vs weighted average agreed terms" : "Monthly trend of DSO vs weighted average agreed terms"}</h2>
+              <p className="label-copy">Days Sales Outstanding compared to agreed payment terms</p>
+            </div>
+          </div>
+          <AnalyticsTrendChart
+            ariaLabel="DSO versus weighted average agreed terms trend"
+            labels={analytics.periodLabels}
+            series={[
+              {
+                label: "DSO",
+                color: "#3b82f6",
+                values: analytics.dsoTrend,
+              },
+              {
+                label: "Agreed Terms",
+                color: "#10b981",
+                values: analytics.agreedTermsTrend,
+              },
+            ]}
+            tickFormatter={(value) => `${Math.round(value)}`}
+            valueFormatter={(value) => `${Math.round(value)} days`}
+            hasData={analytics.dsoTrendHasData}
+            emptyMessage="No invoice issue-date data is available for this period."
+          />
+        </article>
+
+        <article className="panel analytics-panel analytics-chart-panel">
           <div className="panel-header">
             <div>
               <h2>Top Customers by Balance</h2>
               <p className="label-copy">Largest outstanding balances</p>
             </div>
-            <div className="analytics-inline-stats analytics-inline-stats-compact">
-              <AnalyticsSectionStat
-                label="Active Customers"
-                value={String(analytics.activeCustomerCount)}
-                tone="success"
-              />
-              <AnalyticsSectionStat
-                label="Need Attention"
-                value={String(analytics.customersNeedingAttention)}
-                tone="danger"
-              />
+          </div>
+          {analytics.topCustomers.length > 0 ? (
+            <div className="analytics-customer-list">
+              {analytics.topCustomers.map((customer, index) => (
+                <div key={customer.key} className="analytics-customer-row">
+                  <span className="analytics-customer-rank">{index + 1}</span>
+                  <div className="analytics-customer-copy">
+                    <div className="analytics-customer-title">
+                      <strong>{customer.accountName}</strong>
+                      <span>{formatPhpCompactLong(customer.openAmountCents)}</span>
+                    </div>
+                    <div
+                      className="analytics-customer-bar"
+                      tabIndex={0}
+                      aria-label={`${customer.accountName}: ${formatPhp(customer.openAmountCents)} open balance`}
+                    >
+                      <span
+                        style={{ width: `${customer.ratio * 100}%` }}
+                        title={`${customer.accountName}: ${formatPhp(customer.openAmountCents)} open balance`}
+                      />
+                      <span className="chart-tooltip analytics-bar-tooltip" role="tooltip">
+                        <strong>{formatPhp(customer.openAmountCents)}</strong>
+                        <span>{customer.accountName}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
-          </div>
-          <div className="analytics-customer-list">
-            {analytics.topCustomers.map((customer, index) => (
-              <div key={customer.key} className="analytics-customer-row">
-                <div className="analytics-customer-copy">
-                  <div className="analytics-customer-title">
-                    <span className="analytics-customer-rank">{index + 1}.</span>
-                    <strong>{customer.accountName}</strong>
-                  </div>
-                  <div className="analytics-customer-bar">
-                    <span style={{ width: `${customer.ratio * 100}%` }} />
-                  </div>
-                </div>
-                <div className="analytics-customer-metrics">
-                  <strong>{formatPhpCompactLong(customer.openAmountCents)}</strong>
-                  {customer.overdueAmountCents > 0 ? (
-                    <span className="pill pill-danger">{formatPhpCompactLong(customer.overdueAmountCents)} overdue</span>
-                  ) : null}
-                </div>
-              </div>
-            ))}
-          </div>
+          ) : (
+            <p className="analytics-empty-state">No customer balance data is available.</p>
+          )}
         </article>
       </div>
     </section>
@@ -899,18 +1158,62 @@ const HomeDonutChart = ({
   );
 };
 
-const CollectionsPage = ({ data }: { data: OperatorConsoleData }) => {
+const CollectionsPage = ({
+  data,
+  activeTab,
+  emailFilters,
+  callFilters,
+}: {
+  data: OperatorConsoleData;
+  activeTab: "email" | "call-inbox";
+  emailFilters?: CollectionsEmailFilterInput | undefined;
+  callFilters?: CollectionsCallFilterInput | undefined;
+}) => {
+  const isCallInboxActive = activeTab === "call-inbox";
+  const callInbox = data.callInbox;
+  const normalizedEmailFilters = normalizeCollectionsEmailFilters(emailFilters);
+  const normalizedCallFilters = normalizeCollectionsCallFilters(callFilters ?? callInbox.filters);
+  const emailInboxItems = buildCollectionsInboxItems(data);
+  const visibleEmailInboxItems = filterCollectionsEmailItems(data, emailInboxItems, normalizedEmailFilters);
+  const emailInboxCounts = buildCollectionsInboxCounts(emailInboxItems);
+  const emailCustomerOptions = buildEmailCustomerFilterOptions(data);
+  const filteredCallInboxItems = filterCallInboxItems(callInbox.items, normalizedCallFilters);
+  const callCustomerOptions = buildCallFilterOptions(
+    callInbox.items.map((item) => ({
+      value: item.customerName,
+      label: item.customerName,
+    })),
+  );
+  const callClassificationOptions = buildCallFilterOptions(
+    callInbox.items.flatMap((item) =>
+      item.classifications.map((classification) => ({
+        value: classification,
+        label: classification,
+      })),
+    ),
+  );
+  const callWorkflowOptions = buildCallFilterOptions(
+    callInbox.items
+      .filter((item) => item.workflowName)
+      .map((item) => ({
+        value: item.workflowName ?? "",
+        label: item.workflowName ?? "",
+      })),
+  );
+  const hasEmailFilters = hasActiveCollectionsEmailFilters(normalizedEmailFilters);
+  const hasCallFilters = hasActiveCollectionsCallFilters(normalizedCallFilters);
+  const callDateRangeLabel = formatCallDateRangeLabel(normalizedCallFilters.dateFrom, normalizedCallFilters.dateTo);
   const senderIdentityOptions = data.emailSendingIdentities.filter(
     (identity) => identity.connectionStatus === "connected",
   );
   const defaultSenderIdentityId =
     data.emailInbox.selectedSenderIdentityId ??
-    senderIdentityOptions.find((identity) => identity.isDefault)?.id ??
+    data.emailSendingIdentities.find((identity) => identity.isDefault)?.id ??
     senderIdentityOptions[0]?.id;
-  const inboxItems = buildCollectionsInboxItems(data);
-  const unreadCount = inboxItems.filter((item) => item.bucket === "unread").length;
-  const sentCount = inboxItems.filter((item) => item.bucket === "sent").length;
-  const draftCount = inboxItems.filter((item) => item.bucket === "draft").length;
+  const callsById = new Map(callInbox.calls.map((call) => [call.id, call]));
+  const detailCalls = filteredCallInboxItems
+    .map((item) => callsById.get(item.id) ?? callInbox.calls[0])
+    .filter((call): call is NonNullable<typeof call> => Boolean(call));
 
   return (
     <section className="page-section cash-page">
@@ -919,361 +1222,1237 @@ const CollectionsPage = ({ data }: { data: OperatorConsoleData }) => {
           <div className="collections-hero-copy">
             <h1>Collections</h1>
             <div className="collections-channel-tabs" role="tablist" aria-label="Collections channels">
-              <button type="button" className="collections-channel-tab is-active" aria-selected="true">
+              <a
+                href="/collections?tab=email"
+                className={`collections-channel-tab${isCallInboxActive ? "" : " is-active"}`}
+                aria-selected={isCallInboxActive ? "false" : "true"}
+              >
                 <AppIcon name="mail" />
                 <span>Email Inbox</span>
-              </button>
-              <button type="button" className="collections-channel-tab" aria-selected="false">
-                <AppIcon name="phone" />
-                <span>SMS Inbox</span>
-              </button>
-              <button type="button" className="collections-channel-tab" aria-selected="false">
+              </a>
+              <a
+                href="/collections?tab=call-inbox"
+                className={`collections-channel-tab${isCallInboxActive ? " is-active" : ""}`}
+                aria-selected={isCallInboxActive ? "true" : "false"}
+              >
                 <AppIcon name="phone" />
                 <span>Call Inbox</span>
-              </button>
+              </a>
             </div>
-          </div>
-          <div className="collections-configure">
-            <button type="button" className="collections-configure-button">
-              <AppIcon name="settings" />
-              <span>Configure</span>
-            </button>
           </div>
         </div>
       </article>
 
-      <div className="collections-filter-bar">
-        <button type="button" className="collections-filter-pill is-active">
-          <span>All</span>
-          <span className="collections-filter-count">{inboxItems.length}</span>
-        </button>
-        <button type="button" className="collections-filter-pill">
-          <span>Unread</span>
-          <span className="collections-filter-count dark">{unreadCount}</span>
-        </button>
-        <button type="button" className="collections-filter-pill">
-          <span>Sent</span>
-          <span className="collections-filter-count dark">{sentCount}</span>
-        </button>
-        <button type="button" className="collections-filter-pill">
-          <span>Drafts</span>
-          <span className="collections-filter-count dark">{draftCount}</span>
-        </button>
-      </div>
-
-      <div className="collections-toolbar">
-        <div className="collections-searchbox">
-          <AppIcon name="search" />
-          <span>Search</span>
-        </div>
-        <button type="button" className="collections-toolbar-chip">
-          <AppIcon name="customers" />
-          <span>Customer</span>
-        </button>
-        <button type="button" className="collections-toolbar-chip">
-          <AppIcon name="tag" />
-          <span>Workflow</span>
-        </button>
-      </div>
-
-      {data.collectionsComposeStatus ? (
-        <article className="integration-success-banner">
+      {!isCallInboxActive && (data.collectionsComposeStatus || data.collectionsComposeError) ? (
+        <div className={`collections-compose-alert${data.collectionsComposeError ? " is-error" : " is-success"}`} role="status">
           <strong>
-            {data.collectionsComposeStatus.kind === "approval_needed"
-              ? "Collections email queued for approval."
-              : "Collections email sent."}
+            {data.collectionsComposeError
+              ? "Email not sent"
+              : data.collectionsComposeStatus?.kind === "attachment_ready"
+                ? "Draft updated"
+                : "Email sent"}
           </strong>
-          <p>{data.collectionsComposeStatus.message}</p>
-        </article>
+          <span>{data.collectionsComposeError?.message ?? data.collectionsComposeStatus?.message}</span>
+        </div>
       ) : null}
 
-      {data.collectionsComposeError ? (
-        <article className="integration-error-banner">
-          <strong>Collections email could not be sent.</strong>
-          <p>{data.collectionsComposeError.message}</p>
-        </article>
-      ) : null}
+      {isCallInboxActive ? null : (
+      <article id="collections-email-inbox" className="collections-email-inbox-card" aria-label="Collections email inbox">
+        <div className="collections-email-head">
+          <div>
+            <h2>Email Inbox</h2>
+            <p>Review customer threads, linked tasks, and safe reply drafts from connected mailboxes.</p>
+          </div>
+          <div className="collections-filter-bar collections-email-tabs" role="tablist" aria-label="Email inbox folders">
+            <a
+              href={buildCollectionsEmailHref({ ...normalizedEmailFilters, folder: "all" })}
+              className={`collections-filter-pill${normalizedEmailFilters.folder === "all" ? " is-active" : ""}`}
+              aria-selected={normalizedEmailFilters.folder === "all" ? "true" : "false"}
+            >
+              All
+              <span className="collections-filter-count">{emailInboxCounts.all}</span>
+            </a>
+            <a
+              href={buildCollectionsEmailHref({ ...normalizedEmailFilters, folder: "unread" })}
+              className={`collections-filter-pill${normalizedEmailFilters.folder === "unread" ? " is-active" : ""}`}
+              aria-selected={normalizedEmailFilters.folder === "unread" ? "true" : "false"}
+            >
+              Unread
+              <span className="collections-filter-count dark">{emailInboxCounts.unread}</span>
+            </a>
+            <a
+              href={buildCollectionsEmailHref({ ...normalizedEmailFilters, folder: "sent" })}
+              className={`collections-filter-pill${normalizedEmailFilters.folder === "sent" ? " is-active" : ""}`}
+              aria-selected={normalizedEmailFilters.folder === "sent" ? "true" : "false"}
+            >
+              Sent
+              <span className="collections-filter-count dark">{emailInboxCounts.sent}</span>
+            </a>
+            <a
+              href={buildCollectionsEmailHref({ ...normalizedEmailFilters, folder: "drafts" })}
+              className={`collections-filter-pill${normalizedEmailFilters.folder === "drafts" ? " is-active" : ""}`}
+              aria-selected={normalizedEmailFilters.folder === "drafts" ? "true" : "false"}
+            >
+              Drafts
+              <span className="collections-filter-count dark">{emailInboxCounts.drafts}</span>
+            </a>
+          </div>
+        </div>
 
-      <article className="collections-inbox-card">
-        <div className="collections-inbox-list">
-          {inboxItems.map((item) => (
-            <article key={item.id} className="collections-inbox-row">
-              <div className="collections-inbox-main">
-                <span className="collections-row-checkbox" aria-hidden="true" />
-                <a className="collections-message-trigger" href={`#collections-compose-${item.id}`}>
+        <form method="get" action="/collections" className="collections-email-toolbar" role="search">
+          <input type="hidden" name="tab" value="email" />
+          <input type="hidden" name="folder" value={normalizedEmailFilters.folder} />
+          <label className="collections-searchbox">
+            <AppIcon name="search" />
+            <input
+              type="search"
+              name="q"
+              placeholder="Search customer, email, invoice, or thread..."
+              aria-label="Search email inbox"
+              defaultValue={normalizedEmailFilters.q}
+            />
+          </label>
+          <label className="collections-email-select">
+            <span>Customer</span>
+            <select name="customer" defaultValue={normalizedEmailFilters.customer}>
+              <option value="all">All customers</option>
+              {emailCustomerOptions.map((customer) => (
+                <option key={customer.value} value={customer.value}>{customer.label}</option>
+              ))}
+            </select>
+          </label>
+          <div className="collections-filter-actions">
+            <button type="submit" className="primary-button">Apply</button>
+            {hasEmailFilters ? <a className="ghost-button" href="/collections?tab=email">Clear</a> : null}
+          </div>
+        </form>
+
+        <div className="collections-inbox-list collections-email-list">
+          {visibleEmailInboxItems.length > 0 ? (
+            visibleEmailInboxItems.map((item) => {
+              const modalId = collectionsEmailModalId(item);
+              const threadHref = item.providerThreadId
+                ? `${buildCollectionsEmailHref(normalizedEmailFilters, { threadId: item.providerThreadId })}#${modalId}`
+                : `#${modalId}`;
+              return (
+                <a
+                  key={item.id}
+                  className={`collections-inbox-row collections-email-row is-${item.bucket === "unread" ? "unread" : "read"}${item.isLinked ? "" : " is-unlinked"}`}
+                  href={threadHref}
+                >
+                  <span className="collections-row-checkbox" aria-hidden="true" />
                   <div className="collections-message-copy">
                     <div className="collections-message-heading">
                       <strong>{item.customerName}</strong>
                       {item.isLinked ? (
-                        <span className="collections-linked-badge">
+                        <span className="collections-linked-badge" title="Linked to customer context">
                           <AppIcon name="external-link" />
                         </span>
-                      ) : null}
+                      ) : (
+                        <span className="collections-unlinked-badge">Unlinked</span>
+                      )}
+                      {item.bucket === "unread" ? <span className="collections-email-unread-dot">Unread</span> : null}
                     </div>
                     <p className="collections-message-address">{item.email}</p>
+                    <p className="collections-message-subject">{item.subjectLine ?? "No subject"}</p>
                     <p className="collections-message-preview">{item.preview}</p>
                   </div>
+                  <div className="collections-message-meta collections-email-row-meta">
+                    <span>{item.receivedLabel}</span>
+                    <span>{item.owner}</span>
+                  </div>
                 </a>
-              </div>
-              <div className="collections-message-meta">
-                <span>{item.owner}</span>
-                <span>{item.receivedLabel}</span>
-              </div>
-            </article>
-          ))}
+              );
+            })
+          ) : (
+            <div className="collections-inbox-empty collections-email-empty">
+              <strong>{emailInboxItems.length > 0 ? "No email threads match these filters." : "No email threads loaded."}</strong>
+              <span>
+                {emailInboxItems.length > 0
+                  ? "Clear or adjust the filters to review other synced customer threads."
+                  : "Connect a Gmail mailbox or sync inbox messages to populate this operational view."}
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="collections-inbox-footer">
           <span>
-            1 - {inboxItems.length} of {inboxItems.length}
+            {visibleEmailInboxItems.length > 0
+              ? `1 - ${visibleEmailInboxItems.length} of ${emailInboxItems.length}`
+              : "0 - 0 of 0"}
           </span>
-          <div className="collections-pager">
-            <button type="button" className="collections-pager-button" aria-label="First page">
-              «
-            </button>
-            <button type="button" className="collections-pager-button" aria-label="Previous page">
-              ‹
-            </button>
-            <button type="button" className="collections-pager-button" aria-label="Next page">
-              ›
-            </button>
-          </div>
         </div>
       </article>
+      )}
 
-      {inboxItems.map((item) => {
-        const canSend = Boolean(defaultSenderIdentityId && item.providerThreadId);
-        const subjectLine =
-          item.subjectLine ?? (item.preview.startsWith("Re:") ? item.preview : `Re: ${item.preview}`);
+      {isCallInboxActive ? null : visibleEmailInboxItems.map((item, index) => (
+        <CollectionsEmailThreadModal
+          key={`collections-email-modal-${item.id}`}
+          data={data}
+          item={item}
+          previousItem={visibleEmailInboxItems[index - 1]}
+          nextItem={visibleEmailInboxItems[index + 1]}
+          senderIdentityOptions={senderIdentityOptions}
+          defaultSenderIdentityId={defaultSenderIdentityId}
+        />
+      ))}
 
+      {isCallInboxActive ? (
+      <>
+      <form method="get" action="/collections" className="call-inbox-toolbar">
+        <input type="hidden" name="tab" value="call-inbox" />
+        <div className="call-inbox-filter-row">
+          <label className="collections-email-select call-inbox-filter">
+            <span>Direction</span>
+            <select name="direction" defaultValue={normalizedCallFilters.direction}>
+              <option value="all">All directions</option>
+              <option value="inbound">Inbound</option>
+              <option value="outbound">Outbound</option>
+              <option value="unknown">Unknown</option>
+            </select>
+          </label>
+          <label className="collections-email-select call-inbox-filter">
+            <span>Customer</span>
+            <select name="customer" defaultValue={normalizedCallFilters.customer}>
+              <option value="all">All customers</option>
+              {callCustomerOptions.map((customer) => (
+                <option key={customer.value} value={customer.value}>{customer.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="collections-email-select call-inbox-filter">
+            <span>Classification</span>
+            <select name="classification" defaultValue={normalizedCallFilters.classification}>
+              <option value="all">All categories</option>
+              {callClassificationOptions.map((classification) => (
+                <option key={classification.value} value={classification.value}>{classification.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="collections-email-select call-inbox-filter">
+            <span>Workflow</span>
+            <select name="workflow" defaultValue={normalizedCallFilters.workflow}>
+              <option value="all">All workflows</option>
+              {callWorkflowOptions.map((workflow) => (
+                <option key={workflow.value} value={workflow.value}>{workflow.label}</option>
+              ))}
+            </select>
+          </label>
+          <fieldset className="call-inbox-date-range" aria-label="Call date range">
+            <legend>Date range</legend>
+            <label>
+              <span>Start</span>
+              <input type="date" name="dateFrom" defaultValue={normalizedCallFilters.dateFrom} />
+            </label>
+            <label>
+              <span>End</span>
+              <input type="date" name="dateTo" defaultValue={normalizedCallFilters.dateTo} />
+            </label>
+            {callDateRangeLabel ? (
+              <div className="call-inbox-date-range-label">
+                <span>{callDateRangeLabel}</span>
+                <a href={buildCallInboxHref({ ...normalizedCallFilters, date: "", dateFrom: "", dateTo: "" })}>Clear dates</a>
+              </div>
+            ) : null}
+          </fieldset>
+          <label className="collections-email-select call-inbox-filter compact">
+            <span>Status</span>
+            <select name="status" defaultValue={normalizedCallFilters.status}>
+              <option value="all">All statuses</option>
+              <option value="processing">Processing</option>
+              <option value="completed">Completed</option>
+              <option value="needs_review">Needs review</option>
+              <option value="failed">Failed</option>
+              <option value="archived">Archived</option>
+            </select>
+          </label>
+          <label className="collections-email-select call-inbox-filter compact">
+            <span>Voicemail</span>
+            <select name="voicemail" defaultValue={normalizedCallFilters.voicemail}>
+              <option value="all">All</option>
+              <option value="yes">Voicemail</option>
+              <option value="no">No voicemail</option>
+            </select>
+          </label>
+        </div>
+        <div className="call-inbox-toolbar-actions">
+          <button type="submit" className="primary-button">Apply</button>
+          {hasCallFilters ? <a className="ghost-button" href="/collections?tab=call-inbox">Clear</a> : null}
+          <a className="primary-button call-inbox-export" href={buildCallInboxExportHref(normalizedCallFilters, callInbox.exportPath)}>
+            <AppIcon name="download" />
+            <span>Export</span>
+          </a>
+        </div>
+      </form>
+
+      <article id="collections-call-inbox" className="call-inbox-table-card" aria-label="Collections call inbox">
+        <div className="call-inbox-table">
+          <div className="call-inbox-row call-inbox-head">
+            <span className="call-inbox-sort">↕</span>
+            <span>Date</span>
+            <span>Customer</span>
+            <span>Phone</span>
+            <span>Duration</span>
+            <span>Voicemail</span>
+            <span>Sentiment</span>
+            <span>Categories</span>
+            <span>Open Tasks</span>
+            <span>Approver</span>
+            <span>Status</span>
+          </div>
+
+          {filteredCallInboxItems.length > 0 ? (
+            filteredCallInboxItems.map((item) => (
+              <a
+                key={item.id}
+                className="call-inbox-row call-inbox-data-row"
+                href={`#call-detail-${item.id}`}
+              >
+                <span className="call-inbox-sort">↕</span>
+                <span>{formatRelativeCallTime(item.startedAt)}</span>
+                <strong>{item.customerName}</strong>
+                <span>{item.customerPhone ?? "Unknown"}</span>
+                <span>{formatCallDuration(item.durationSeconds)}</span>
+                <span className="call-inbox-boolean">{item.voicemail ? "✓" : "×"}</span>
+                <span className={`call-sentiment-dot is-${item.sentiment}`}>
+                  {sentimentSymbol(item.sentiment)}
+                </span>
+                <span className="call-inbox-tags">
+                  {item.classifications.length > 0
+                    ? item.classifications.map((classification) => (
+                        <span key={classification} className="call-inbox-tag">
+                          {classification}
+                        </span>
+                      ))
+                    : "None"}
+                </span>
+                <span>
+                  <span className="call-inbox-count">{item.openTasksCount}</span>
+                </span>
+                <span className="call-inbox-approver">{item.approverName ? item.approverName : "○"}</span>
+                <span className={`call-status-chip is-${item.status}`}>{callStatusLabel(item.status)}</span>
+              </a>
+            ))
+          ) : (
+            <div className="call-inbox-empty">
+              <strong>{callInbox.items.length > 0 ? "No calls match these filters." : "No completed calls yet."}</strong>
+              <span>
+                {callInbox.items.length > 0
+                  ? "Clear or adjust the filters to review other normalized call records."
+                  : "Retell webhook and sync ingestion will populate this inbox after calls finish."}
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div className="collections-inbox-footer">
+          <span>
+            {filteredCallInboxItems.length > 0 ? `1 - ${filteredCallInboxItems.length} of ${callInbox.total}` : "0 - 0 of 0"}
+          </span>
+        </div>
+      </article>
+      </>
+      ) : null}
+
+      {isCallInboxActive ? detailCalls.map((call) => {
+        const tasks = bucketCallTasks(call.taskRefs);
+        const openTasks = tasks.open.length > 0 ? tasks.open : call.taskRefs;
         return (
-          <section key={`compose-${item.id}`} id={`collections-compose-${item.id}`} className="collections-compose-modal">
-            <a className="collections-compose-backdrop" href="#" aria-label="Close compose window" />
-            <article className="collections-compose-panel" role="dialog" aria-modal="true" aria-labelledby={`collections-compose-title-${item.id}`}>
-              <div className="collections-compose-header">
-                <div>
-                  <h2 id={`collections-compose-title-${item.id}`}>{item.customerName}</h2>
-                  <p>Compose a collections-safe reply from the inbox thread.</p>
-                </div>
-                <a className="collections-compose-close" href="#" aria-label="Close compose window">
+          <React.Fragment key={`call-modal-${call.id}`}>
+            <section id={`call-detail-${call.id}`} className="collections-compose-modal call-detail-modal">
+              <a className="collections-compose-backdrop" href="#" aria-label="Close call details" />
+              <article className="call-detail-panel" role="dialog" aria-modal="true" aria-labelledby={`call-detail-title-${call.id}`}>
+                <a className="collections-compose-close call-detail-close" href="#" aria-label="Close call details">
                   <AppIcon name="close" />
                 </a>
+                <div className="call-detail-tabs" role="tablist" aria-label="Call detail tabs">
+                  <a className="call-detail-tab is-active" href={`#call-detail-${call.id}`}>Call Details</a>
+                  <a className="call-detail-tab" href={`#call-transcript-${call.id}`}>Transcript</a>
+                </div>
+                <div className="call-detail-title-row">
+                  <h2 id={`call-detail-title-${call.id}`}>Call Details</h2>
+                  <span className={`call-status-chip is-${call.status}`}>{callStatusLabel(call.status)}</span>
+                </div>
+
+                <div className="call-detail-grid">
+                  <CallDetailField label="Customer" value={call.customerName} />
+                  <CallDetailField label="Invoices" value={formatInvoiceRefs(call.invoiceRefs)} />
+                  <CallDetailField label="Date" value={formatCallDateTime(call.startedAt)} />
+                  <CallDetailField label="Direction" value={titleCase(call.direction)} />
+                  <CallDetailField label="From" value={call.fromNumber ?? "Unknown"} />
+                  <CallDetailField label="To" value={call.toNumber ?? call.customerPhone ?? "Unknown"} />
+                  <CallDetailField label="Duration" value={formatCallDuration(call.durationSeconds)} />
+                  <CallDetailField label="Classifications" value={formatList(call.classifications)} />
+                  <CallDetailField label="User Sentiment" value={sentimentSymbol(call.sentiment)} />
+                  <CallDetailField label="Voicemail" value={call.voicemail ? "✓" : "×"} />
+                  <CallDetailField label="Billing Account" value={call.billingAccountId ?? "Unknown"} />
+                  <CallDetailField label="Requested By" value={call.requestedBy ?? "Unknown"} />
+                </div>
+
+                <div className="call-detail-divider" />
+                <section className="call-detail-section">
+                  <h3>Summary</h3>
+                  <p>{call.summary ?? "No summary was provided by Retell yet."}</p>
+                </section>
+
+                <div className="call-detail-divider" />
+                <section className="call-detail-section">
+                  <h3>Tasks</h3>
+                  <div className="call-task-tabs" role="tablist" aria-label="Call task status">
+                    <span className="call-task-tab is-active">Open <strong>{tasks.open.length}</strong></span>
+                    <span className="call-task-tab">Completed <strong>{tasks.completed.length}</strong></span>
+                    <span className="call-task-tab">Closed <strong>{tasks.closed.length}</strong></span>
+                  </div>
+                  <div className="call-task-list">
+                    {openTasks.length > 0 ? (
+                      openTasks.map((task) => (
+                        <div key={task.id} className="call-task-row">
+                          <AppIcon name="check" />
+                          <strong>{task.title}</strong>
+                          <span>{task.taskType ? titleCase(task.taskType.replace(/_/g, " ")) : "Task"}</span>
+                          <span>{task.ownerTeam ?? "collections"}</span>
+                          <AppIcon name="chevron-right" />
+                        </div>
+                      ))
+                    ) : (
+                      <p className="call-detail-muted">No open tasks are linked to this call.</p>
+                    )}
+                  </div>
+                </section>
+              </article>
+            </section>
+
+            <section id={`call-transcript-${call.id}`} className="collections-compose-modal call-detail-modal">
+              <a className="collections-compose-backdrop" href="#" aria-label="Close transcript" />
+              <article className="call-detail-panel call-transcript-panel" role="dialog" aria-modal="true" aria-labelledby={`call-transcript-title-${call.id}`}>
+                <a className="collections-compose-close call-detail-close" href="#" aria-label="Close transcript">
+                  <AppIcon name="close" />
+                </a>
+                <div className="call-detail-tabs" role="tablist" aria-label="Call transcript tabs">
+                  <a className="call-detail-tab" href={`#call-detail-${call.id}`}>Call Details</a>
+                  <a className="call-detail-tab is-active" href={`#call-transcript-${call.id}`}>Transcript</a>
+                </div>
+                <div className="call-audio-bar">
+                  {call.recordingUrl ? (
+                    <audio controls src={call.recordingUrl}>
+                      <a href={call.recordingUrl}>Recording</a>
+                    </audio>
+                  ) : (
+                    <>
+                      <span className="call-play-icon">▷</span>
+                      <span className="call-waveform" aria-hidden="true">
+                        {Array.from({ length: 44 }).map((_, index) => (
+                          <i key={index} style={{ height: `${14 + (index % 7) * 4}px` }} />
+                        ))}
+                      </span>
+                      <span>{formatCallDuration(call.durationSeconds)}</span>
+                    </>
+                  )}
+                  {call.recordingUrl ? (
+                    <a className="call-recording-download" href={call.recordingUrl}>
+                      <AppIcon name="download" />
+                    </a>
+                  ) : null}
+                </div>
+                <h2 id={`call-transcript-title-${call.id}`} className="sr-only">Transcript</h2>
+                <div className="call-transcript-list">
+                  {call.transcriptSegments.length > 0 ? (
+                    call.transcriptSegments.map((segment, index) => (
+                      <div key={`${segment.speaker}-${index}`} className="call-transcript-segment">
+                        <strong>{titleCase(segment.speaker === "unknown" ? "speaker" : segment.speaker)}</strong>
+                        <p>{segment.text}</p>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="call-detail-muted">Retell has not provided a transcript for this call yet.</p>
+                  )}
+                </div>
+              </article>
+            </section>
+          </React.Fragment>
+        );
+      }) : null}
+    </section>
+  );
+};
+
+const CallDetailField = ({ label, value }: { label: string; value: React.ReactNode }) => (
+  <div className="call-detail-field">
+    <span>{label}</span>
+    <strong>{value}</strong>
+  </div>
+);
+
+const CollectionsEmailThreadModal = ({
+  data,
+  item,
+  previousItem,
+  nextItem,
+  senderIdentityOptions,
+  defaultSenderIdentityId,
+}: {
+  data: OperatorConsoleData;
+  item: CollectionsInboxListItem;
+  previousItem: CollectionsInboxListItem | undefined;
+  nextItem: CollectionsInboxListItem | undefined;
+  senderIdentityOptions: EmailSendingIdentityItem[];
+  defaultSenderIdentityId: string | undefined;
+}) => {
+  const modalId = collectionsEmailModalId(item);
+  const threadTabId = `${modalId}-thread-tab`;
+  const tasksTabId = `${modalId}-tasks-tab`;
+  const threadMessages = buildCollectionsEmailThreadMessages(data, item);
+  const tasks = findEmailInboxTasks(data, item);
+  const openInvoiceCount = item.relatedInvoices.length;
+  const openBalanceCents = item.relatedInvoices.reduce((sum, invoice) => sum + invoice.openAmountCents, 0);
+  const overdueBalanceCents = item.relatedInvoices.reduce(
+    (sum, invoice) => sum + (invoice.overdueAmountCents ?? 0),
+    0,
+  );
+  const subjectLine = item.subjectLine?.startsWith("Re:")
+    ? item.subjectLine
+    : `Re: ${item.subjectLine ?? item.customerName}`;
+  const draftBody = buildCollectionsEmailDraft(item);
+  const appliedDraft =
+    data.collectionsComposeDraft?.composeId === modalId ? data.collectionsComposeDraft : undefined;
+  const activeSubjectLine = appliedDraft?.subjectLine ?? subjectLine;
+  const activeBody = appliedDraft?.body ?? draftBody;
+  const activeGenerator = appliedDraft?.generator ?? "ai";
+  const activeAttachments = appliedDraft?.attachments ?? [];
+  const composeContext = buildCollectionsEmailComposeContext(data, item);
+  const emailTemplates = getAvailableCollectionsEmailTemplates(data);
+  const canSend =
+    Boolean(defaultSenderIdentityId) &&
+    Boolean(item.providerThreadId) &&
+    item.email !== "No email address";
+
+  return (
+    <section id={modalId} className="collections-compose-modal collections-email-modal">
+      <a className="collections-compose-backdrop" href="#" aria-label="Close email thread" />
+      <article className="collections-compose-panel collections-email-panel" role="dialog" aria-modal="true" aria-labelledby={`${modalId}-title`}>
+        <div className="collections-compose-header collections-email-modal-header">
+          <div>
+            <div className="collections-email-customer-header">
+              <span className="collections-email-avatar">{initialsForName(item.customerName)}</span>
+              <div>
+                <h2 id={`${modalId}-title`}>{item.customerName}</h2>
+                <p>{item.email}</p>
+              </div>
+            </div>
+            <div className="collections-email-summary-strip">
+              <span>{openInvoiceCount} open invoices</span>
+              <span>{formatPhp(openBalanceCents)} balance</span>
+              <span>{formatPhp(overdueBalanceCents)} overdue</span>
+            </div>
+          </div>
+          <div className="collections-email-modal-actions">
+            <a className={`task-detail-nav-button${previousItem ? "" : " is-disabled"}`} href={previousItem ? `#${collectionsEmailModalId(previousItem)}` : "#"} aria-label="Previous email thread">
+              <AppIcon name="chevron-left" />
+            </a>
+            <a className={`task-detail-nav-button${nextItem ? "" : " is-disabled"}`} href={nextItem ? `#${collectionsEmailModalId(nextItem)}` : "#"} aria-label="Next email thread">
+              <AppIcon name="chevron-right" />
+            </a>
+            <a className="collections-compose-close" href="#" aria-label="Close email thread">
+              <AppIcon name="close" />
+            </a>
+          </div>
+        </div>
+
+        <div className="collections-email-body">
+          <div className="collections-email-invoice-row">
+            <span>Invoice references</span>
+            <div>
+              {item.relatedInvoices.length > 0 ? (
+                item.relatedInvoices.slice(0, 6).map((invoice) => (
+                  <a key={invoice.invoiceNumber} href={`/invoices?invoice=${encodeURIComponent(invoice.invoiceNumber)}`}>
+                    {invoice.invoiceNumber}
+                  </a>
+                ))
+              ) : (
+                <strong>No invoices linked</strong>
+              )}
+            </div>
+          </div>
+
+          <input className="collections-email-tab-control" type="radio" name={`${modalId}-tab`} id={threadTabId} value="thread" defaultChecked />
+          <input className="collections-email-tab-control" type="radio" name={`${modalId}-tab`} id={tasksTabId} value="tasks" />
+          <div className="collections-email-modal-tabs" role="tablist" aria-label="Email thread detail">
+            <label htmlFor={threadTabId} className="collections-email-modal-tab">Email Thread</label>
+            <label htmlFor={tasksTabId} className="collections-email-modal-tab">
+              Tasks <span>{tasks.length}</span>
+            </label>
+          </div>
+
+          <div className="collections-email-tab-panels">
+            <div className="collections-email-tab-panel is-thread">
+              <div className="collections-email-thread-list">
+                {threadMessages.map((message) => (
+                  <details key={message.providerMessageId} className="collections-email-thread-message">
+                    <summary>
+                      <span className="collections-email-thread-summary-main">
+                        <strong>{formatEmailMessageActor(message)}</strong>
+                        <span>{formatCollectionsMessageTime(message.receivedAt)}</span>
+                      </span>
+                      <span className="collections-email-thread-snippet">
+                        {message.snippet ?? message.subjectLine ?? "No message preview available."}
+                      </span>
+                    </summary>
+                    <div className="collections-email-thread-full-body">
+                      {message.bodyText ?? message.snippet ?? "No message body was returned by the mailbox provider."}
+                    </div>
+                  </details>
+                ))}
               </div>
 
-              <form method="POST" action="/collections/compose" className="collections-compose-form">
-                <input type="hidden" name="composeId" value={item.id} />
+              <form method="post" action="/collections/compose" encType="multipart/form-data" className="collections-compose-form collections-email-compose-form">
+                <input type="hidden" name="composeId" value={modalId} />
+                <input type="hidden" name="providerThreadId" value={item.providerThreadId ?? ""} />
+                <input type="hidden" name="providerMessageId" value={item.providerMessageId ?? ""} />
+                <input type="hidden" name="contactEmail" value={item.email === "No email address" ? "" : item.email} />
+                <input type="hidden" name="contactName" value={item.contactName ?? item.customerName} />
                 <input type="hidden" name="accountName" value={item.customerName} />
-                <input type="hidden" name="contactEmail" value={item.email} />
-                <input type="hidden" name="contactName" value={item.customerName} />
-                <input type="hidden" name="billingAccountId" value={`collections:${item.id}`} />
-                <input type="hidden" name="parentAccountId" value={`collections:${item.id}`} />
-                <input type="hidden" name="accountNumber" value={`collections:${item.id}`} />
-                <input type="hidden" name="currency" value="PHP" />
-                <input type="hidden" name="accountTier" value="standard" />
-                <input type="hidden" name="providerMessageId" value={item.providerMessageId ?? item.id} />
-                {item.providerThreadId ? (
-                  <input type="hidden" name="providerThreadId" value={item.providerThreadId} />
-                ) : null}
+                <input type="hidden" name="billingAccountId" value={item.billingAccountId ?? item.relatedInvoices[0]?.billingAccountId ?? item.id} />
+                <input type="hidden" name="parentAccountId" value={item.parentAccountId ?? item.relatedInvoices[0]?.parentAccountId ?? item.billingAccountId ?? item.id} />
+                <input type="hidden" name="accountNumber" value={item.accountNumber ?? item.billingAccountId ?? item.id} />
+                <input type="hidden" name="currency" value={item.relatedInvoices[0]?.currency ?? "PHP"} />
+                <input type="hidden" name="accountJson" value={JSON.stringify(composeContext.account)} />
+                <input type="hidden" name="contactJson" value={JSON.stringify(composeContext.contact)} />
+                <input type="hidden" name="invoicesJson" value={JSON.stringify(composeContext.invoices)} />
+                {activeAttachments.map((attachment) => (
+                  <input
+                    key={`${attachment.kind}-${attachment.spec}-${attachment.label}`}
+                    type="hidden"
+                    name="collectionsComposeDraftAttachment"
+                    value={`${attachment.kind}|${attachment.spec}|${attachment.label}`}
+                  />
+                ))}
 
-                {!canSend ? (
-                  <div className="integration-error-banner">
-                    <strong>Send is unavailable for this preview thread.</strong>
-                    <p>
-                      Connect a live mailbox and open a synced inbox thread to send from this modal.
-                      Compose remains available so the operator can review the message safely.
-                    </p>
+                <div className="collections-email-compose-head">
+                  <div className="collections-email-generation-toggle" role="group" aria-label="Draft generation mode">
+                    <label>
+                      <input type="radio" name="composeGenerator" value="ai" defaultChecked={activeGenerator === "ai"} />
+                      <span>AI</span>
+                    </label>
+                    <label>
+                      <input type="radio" name="composeGenerator" value="template" defaultChecked={activeGenerator === "template"} />
+                      <span>Template</span>
+                    </label>
                   </div>
-                ) : null}
+                </div>
+
+                <div className="collections-email-template-panel">
+                  {emailTemplates.length > 0 ? (
+                    <>
+                      <label className="collections-email-field">
+                        <span>Email template</span>
+                        <select data-collections-email-template-select data-email-template-select defaultValue="">
+                          <option value="">Choose a Control Center template</option>
+                          {emailTemplates.map((template) => (
+                            <option
+                              key={template.id}
+                              value={template.id}
+                              data-template-subject={renderCollectionsTemplateText(template.subject, item)}
+                              data-template-body={renderCollectionsTemplateText(template.body, item)}
+                            >
+                              {template.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button type="button" className="ghost-button" data-collections-email-template-apply data-email-template-apply>
+                        Apply template
+                      </button>
+                    </>
+                  ) : (
+                    <div className="collections-email-empty compact">
+                      <strong>No email templates available.</strong>
+                      <span>Create an email-compatible template in Control Center to use it here.</span>
+                    </div>
+                  )}
+                </div>
 
                 <div className="collections-compose-grid">
-                  <div className="collections-message-heading">
-                    <label className="label-copy" htmlFor={`collections-from-${item.id}`}>From</label>
-                    <select
-                      id={`collections-from-${item.id}`}
-                      name="senderIdentityId"
-                      className="form-input"
-                      defaultValue={defaultSenderIdentityId}
-                      required
-                      disabled={senderIdentityOptions.length === 0}
-                    >
-                      {senderIdentityOptions.length === 0 ? (
-                        <option value="">Connect a mailbox first</option>
-                      ) : (
+                  <label className="collections-email-field">
+                    <span>From</span>
+                    <select name="senderIdentityId" defaultValue={defaultSenderIdentityId ?? ""} required>
+                      {senderIdentityOptions.length > 0 ? (
                         senderIdentityOptions.map((identity) => (
                           <option key={identity.id} value={identity.id}>
-                            {identity.displayName ? `${identity.displayName} · ` : ""}
-                            {identity.senderEmail}
+                            {identity.displayName ? `${identity.displayName} <${identity.senderEmail}>` : identity.senderEmail}
                           </option>
                         ))
+                      ) : (
+                        <option value="">No connected mailbox</option>
                       )}
                     </select>
-                  </div>
-                  <div className="collections-message-heading">
-                    <label className="label-copy" htmlFor={`collections-to-${item.id}`}>To</label>
+                  </label>
+                  <label className="collections-email-field">
+                    <span>To</span>
+                    <input name="toEmail" type="email" defaultValue={item.email === "No email address" ? "" : item.email} readOnly />
+                  </label>
+                  <label className="collections-email-field collections-email-subject-field">
+                    <span>Thread subject</span>
                     <input
-                      id={`collections-to-${item.id}`}
-                      name="contactEmailDisplay"
-                      className="form-input"
-                      defaultValue={item.email}
-                      readOnly
-                    />
-                  </div>
-                </div>
-
-                <div className="collections-compose-grid collections-compose-grid-single">
-                  <div className="collections-message-heading">
-                    <label className="label-copy" htmlFor={`collections-subject-${item.id}`}>Subject</label>
-                    <input
-                      id={`collections-subject-${item.id}`}
                       name="subjectLine"
-                      className="form-input"
-                      defaultValue={subjectLine}
+                      defaultValue={activeSubjectLine}
                       required
+                      readOnly
+                      aria-readonly="true"
+                      data-thread-reply-subject
                     />
-                  </div>
+                    <small>Locked for this thread reply.</small>
+                  </label>
                 </div>
 
-                <div className="collections-compose-grid collections-compose-grid-single">
-                  <div className="collections-message-heading">
-                    <label className="label-copy" htmlFor={`collections-body-${item.id}`}>Message</label>
-                    <textarea
-                      id={`collections-body-${item.id}`}
-                      name="bodyPreview"
-                      className="collections-compose-textarea"
-                      defaultValue={`Hi ${item.customerName},\n\nFollowing up on this thread regarding your account.\n\n${item.preview}\n\nPlease let us know if payment has been released or if you need anything from us.\n\nBest,\nYield Collections`}
-                      required
-                    />
+                <div className="collections-email-format-actions" aria-label="Email formatting tools">
+                  <button type="button" title="Bold" data-email-format-command="bold">B</button>
+                  <button type="button" title="Italic" data-email-format-command="italic">I</button>
+                  <button type="button" title="Underline" data-email-format-command="underline">U</button>
+                  <button type="button" title="Hyperlink" data-email-format-command="link">
+                    <AppIcon name="external-link" />
+                  </button>
+                  <label className="collections-email-attachment-upload" htmlFor={`${modalId}-attachments`}>
+                    <AppIcon name="paperclip" />
+                    <span>Upload file</span>
+                  </label>
+                </div>
+
+                <label className="collections-email-field collections-email-body-field">
+                  <span>Body</span>
+                  <textarea name="bodyPreview" className="collections-compose-textarea" defaultValue={activeBody} data-email-body />
+                </label>
+
+                <div className="collections-email-attachment-panel">
+                  <div className="collections-email-attachment-controls">
+                    <label className="collections-email-field">
+                      <span>Invoice documents</span>
+                      <select
+                        name="selectedInvoiceNumbers"
+                        defaultValue={item.relatedInvoices.map((invoice) => invoice.invoiceNumber)}
+                        multiple
+                        size={Math.min(Math.max(item.relatedInvoices.length, 2), 4)}
+                      >
+                        {item.relatedInvoices.length > 0 ? (
+                          item.relatedInvoices.map((invoice) => (
+                            <option key={`${modalId}-${invoice.invoiceNumber}`} value={invoice.invoiceNumber}>
+                              {invoice.invoiceNumber}
+                            </option>
+                          ))
+                        ) : (
+                          <option value="" disabled>No linked invoices</option>
+                        )}
+                      </select>
+                    </label>
+                    <div className="collections-email-document-buttons">
+                      <button
+                        type="submit"
+                        className="ghost-button"
+                        name="attachmentKind"
+                        value="invoice"
+                        formAction="/collections/compose/prepare-attachment"
+                        formNoValidate
+                      >
+                        Attach invoice(s)
+                      </button>
+                      <button
+                        type="submit"
+                        className="ghost-button"
+                        name="attachmentKind"
+                        value="soa"
+                        formAction="/collections/compose/prepare-attachment"
+                        formNoValidate
+                      >
+                        Attach SOA
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    id={`${modalId}-attachments`}
+                    type="file"
+                    name="attachments"
+                    className="collections-email-file-input"
+                    multiple
+                  />
+                  <div className="collections-email-attachment-chips" aria-label="Attached documents">
+                    {activeAttachments.length > 0 ? (
+                      activeAttachments.map((attachment) => (
+                        <span key={`${attachment.kind}-${attachment.spec}`} className="collections-email-attachment-chip">
+                          <AppIcon name="paperclip" />
+                          {attachment.label}
+                        </span>
+                      ))
+                    ) : (
+                      <span>No generated invoice or SOA attachments yet.</span>
+                    )}
                   </div>
                 </div>
 
                 <div className="collections-compose-footer">
-                  <a className="ghost-button" href="#">
-                    Discard
-                  </a>
+                  <a className="ghost-button" href="#">Discard</a>
                   <button type="submit" className="primary-button" disabled={!canSend}>
-                    Send Email
+                    Send
                   </button>
                 </div>
               </form>
-            </article>
-          </section>
-        );
-      })}
+            </div>
+
+            <div className="collections-email-tab-panel is-tasks">
+              <div className="collections-email-task-list">
+                {tasks.length > 0 ? (
+                  tasks.map((task) => (
+                    <a key={task.id} className="collections-email-task-row" href={`#task-detail-${task.id}`}>
+                      <div>
+                        <strong>{task.title}</strong>
+                        <span>{task.brief ?? task.relatedRecord ?? task.amountLabel}</span>
+                      </div>
+                      <span className={`pill ${taskStatusClassName(task.status)}`}>{humanize(task.status)}</span>
+                    </a>
+                  ))
+                ) : (
+                  <div className="collections-email-empty compact">
+                    <strong>No linked tasks.</strong>
+                    <span>Tasks created from post-call or email workflows will appear here.</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
     </section>
   );
 };
 
-const InvoicesPage = ({ data }: { data: OperatorConsoleData }) => {
+function bucketCallTasks(tasks: OperatorConsoleData["callInbox"]["calls"][number]["taskRefs"]) {
+  return {
+    open: tasks.filter((task) => task.status === "open"),
+    completed: tasks.filter((task) => task.status === "completed"),
+    closed: tasks.filter((task) => task.status === "closed" || task.status === "dismissed"),
+  };
+}
+
+function formatInvoiceRefs(invoiceRefs: OperatorConsoleData["callInbox"]["calls"][number]["invoiceRefs"]) {
+  return invoiceRefs.length > 0 ? invoiceRefs.map((invoice) => invoice.invoiceNumber).join(" ") : "None linked";
+}
+
+function formatList(values: string[]) {
+  return values.length > 0 ? values.join(", ") : "None";
+}
+
+function formatRelativeCallTime(value: string) {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return value;
+  }
+  const diffMinutes = Math.round((Date.now() - timestamp) / 60_000);
+  if (diffMinutes < 1) {
+    return "Just now";
+  }
+  if (diffMinutes < 60) {
+    return `${diffMinutes} minutes ago`;
+  }
+  return new Intl.DateTimeFormat("en-PH", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "Asia/Manila",
+  }).format(new Date(value));
+}
+
+function formatCallDateTime(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "Asia/Manila",
+  }).format(new Date(value));
+}
+
+function formatCallDuration(value: number | undefined) {
+  if (value === undefined) {
+    return "--:--";
+  }
+  const minutes = Math.floor(value / 60).toString().padStart(2, "0");
+  const seconds = Math.floor(value % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function sentimentSymbol(value: string) {
+  if (value === "positive") {
+    return "☺";
+  }
+  if (value === "negative") {
+    return "!";
+  }
+  if (value === "neutral") {
+    return "•";
+  }
+  return "?";
+}
+
+function callStatusLabel(value: string) {
+  return titleCase(value.replace(/_/g, " "));
+}
+
+function titleCase(value: string) {
+  return value.replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+const DEFAULT_INVOICE_PAGE_SIZE = 20;
+
+const invoiceStatusFilterOptions: Array<{ value: InvoiceStatusFilter; label: string }> = [
+  { value: "all", label: "All Status" },
+  { value: "open", label: "Open" },
+  { value: "partial", label: "Partial" },
+  { value: "disputed", label: "Disputed" },
+  { value: "paid", label: "Paid" },
+  { value: "voided", label: "Voided" },
+];
+
+const invoiceTypeFilterOptions: Array<{ value: InvoiceIndexTypeFilter; label: string }> = [
+  { value: "all", label: "All Types" },
+  { value: "live_connection", label: "Live ERP" },
+  { value: "manual_upload", label: "Manual upload" },
+  { value: "seed_fallback", label: "Demo seed" },
+  { value: "installment_plan", label: "Installment plan" },
+  { value: "standard_invoice", label: "Standard invoice" },
+];
+
+const invoiceMoreFilterOptions: Array<{ value: InvoiceIndexMoreFilter; label: string }> = [
+  { value: "all", label: "More Filters" },
+  { value: "overdue", label: "Overdue" },
+  { value: "due_today", label: "Due today" },
+  { value: "due_soon", label: "Due in 7 days" },
+  { value: "with_promise", label: "With promise" },
+  { value: "with_balance", label: "With balance" },
+  { value: "with_branch", label: "With branch" },
+  { value: "missing_branch", label: "Missing branch" },
+];
+
+const InvoicesPage = ({
+  data,
+  filters,
+}: {
+  data: OperatorConsoleData;
+  filters?: InvoiceFilterInput | undefined;
+}) => {
   const { invoiceIndex } = data;
+  const normalizedFilters = normalizeInvoiceFilters(filters);
+  const filteredInvoices = filterInvoices(invoiceIndex.invoices, normalizedFilters);
+  const totalPages = Math.max(Math.ceil(filteredInvoices.length / DEFAULT_INVOICE_PAGE_SIZE), 1);
+  const currentPage = Math.min(normalizedFilters.page, totalPages);
+  const pageInvoices = filteredInvoices.slice(
+    (currentPage - 1) * DEFAULT_INVOICE_PAGE_SIZE,
+    currentPage * DEFAULT_INVOICE_PAGE_SIZE,
+  );
+  const openInvoices = filteredInvoices.filter((invoice) => invoice.openAmountCents > 0);
+  const overdueInvoices = openInvoices.filter((invoice) => (invoice.daysPastDue ?? 0) > 0);
+  const overdueOpenBalanceCents = overdueInvoices.reduce((sum, invoice) => sum + invoice.openAmountCents, 0);
+  const filteredSummary = {
+    openInvoiceCount: openInvoices.length,
+    openAmountCents: filteredInvoices.reduce((sum, invoice) => sum + invoice.openAmountCents, 0),
+  };
+  const exportHref = buildInvoiceExportHref(normalizedFilters);
 
   return (
-    <section className="page-section">
-      <PageHeader
-        title="Imported invoices"
-        description="Unified invoice index across ERP and accounting imports with normalized balances, due dates, and source tracking."
-        actionRow={
-          <div className="header-actions">
-            <span className={`pill ${invoiceIndex.source.kind === "live" ? "pill-success" : "pill-warning"}`}>
-              {invoiceIndex.source.label}
-            </span>
-          </div>
-        }
-      />
-
-      <div className="kpi-grid kpi-grid-5">
-        <SimpleKpi
-          title="Indexed invoices"
-          value={String(invoiceIndex.summary.totalInvoices)}
-          subtitle={invoiceIndex.source.detail}
-        />
-        <SimpleKpi
-          title="Open balance"
-          value={formatPhp(invoiceIndex.summary.openAmountCents)}
-          tone="danger"
-          subtitle={`${invoiceIndex.summary.openInvoiceCount} invoices still open`}
-        />
-        <SimpleKpi
-          title="Overdue"
-          value={String(invoiceIndex.summary.overdueInvoiceCount)}
-          tone="warning"
-          subtitle="Normalized by due date across providers"
-        />
-        <SimpleKpi
-          title="Disputed"
-          value={String(invoiceIndex.summary.disputedInvoiceCount)}
-          tone="violet"
-          subtitle="Collections-safe hold remains visible"
-        />
-        <SimpleKpi
-          title="Connected platforms"
-          value={String(invoiceIndex.summary.connectedProviderCount)}
-          tone="success"
-          subtitle={`${invoiceIndex.providers.length} total source groups in the index`}
-        />
+    <section className="page-section invoice-ledger-page">
+      <div className="invoice-ledger-header">
+        <div className="invoice-ledger-title">
+          <h1>Invoices</h1>
+          <p>Complete invoice ledger across all customers</p>
+        </div>
+        <a href={exportHref} className="invoice-ledger-button" download>
+          <AppIcon name="download" />
+          <span>Export</span>
+        </a>
       </div>
 
-      <div className="card-grid card-grid-2">
-        <article className="panel">
-          <div className="panel-header">
-            <h2>By platform</h2>
-            <span className="pill pill-neutral">{invoiceIndex.providers.length} groups</span>
-          </div>
-          <div className="activity-list">
-            {invoiceIndex.providers.map((provider: InvoiceIndexProviderSummary) => (
-              <article key={provider.provider} className="activity-summary-row">
-                <div className="activity-dot" />
-                <div className="activity-summary-body">
-                  <strong>{provider.label}</strong>
-                  <p>
-                    {provider.kind} · {provider.importMode === "live_connection" ? "Live import" : "Seed fallback"}
-                  </p>
-                </div>
-                <span className="activity-summary-time">
-                  {provider.invoiceCount} / {formatPhp(provider.openAmountCents)}
-                </span>
-              </article>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>By status</h2>
-            <span className="pill pill-neutral">Normalized</span>
-          </div>
-          <div className="activity-list">
-            {invoiceIndex.statuses.map((status: InvoiceIndexStatusSummary) => (
-              <article key={status.status} className="activity-summary-row">
-                <div className="activity-dot" />
-                <div className="activity-summary-body">
-                  <strong>{humanize(status.status)}</strong>
-                  <p>{status.invoiceCount} invoices</p>
-                </div>
-                <span className="activity-summary-time">{formatPhp(status.openAmountCents)}</span>
-              </article>
-            ))}
-          </div>
-        </article>
-      </div>
-
-      <div className="data-card">
-        <div className="table table-invoices">
-          <div className="table-head">Platform</div>
-          <div className="table-head">Invoice</div>
-          <div className="table-head">Customer</div>
-          <div className="table-head">Hierarchy</div>
-          <div className="table-head">Status</div>
-          <div className="table-head">Dates</div>
-          <div className="table-head">Open</div>
-          <div className="table-head">Total</div>
-          {invoiceIndex.invoices.map((invoice: InvoiceIndexEntry) => (
-            <InvoiceIndexRow key={invoice.id} invoice={invoice} />
+      <form className="invoice-ledger-toolbar" method="get" action="/invoices">
+        <label className="invoice-ledger-search">
+          <AppIcon name="search" />
+          <input
+            type="search"
+            name="q"
+            defaultValue={normalizedFilters.q}
+            aria-label="Search invoices"
+            placeholder="Search by invoice number, customer, account, amount..."
+          />
+        </label>
+        <select className="invoice-ledger-select" name="status" defaultValue={normalizedFilters.status} aria-label="Filter by invoice status">
+          {invoiceStatusFilterOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
           ))}
+        </select>
+        <select className="invoice-ledger-select" name="type" defaultValue={normalizedFilters.type} aria-label="Filter by invoice type">
+          {invoiceTypeFilterOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <select className="invoice-ledger-select" name="more" defaultValue={normalizedFilters.more} aria-label="More invoice filters">
+          {invoiceMoreFilterOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <button type="submit" className="invoice-ledger-button invoice-ledger-button-filter">
+          <AppIcon name="filter" />
+          <span>Apply</span>
+        </button>
+        {hasActiveInvoiceFilters(normalizedFilters) ? (
+          <a className="invoice-ledger-button invoice-ledger-button-filter" href="/invoices">Reset</a>
+        ) : null}
+      </form>
+
+      <div className="invoice-ledger-card">
+        <div className="invoice-ledger-table invoice-ledger-table-header">
+          <div className="invoice-ledger-head invoice-ledger-head-checkbox">
+            <input type="checkbox" aria-label="Select all invoices" />
+          </div>
+          <div className="invoice-ledger-head">Number</div>
+          <div className="invoice-ledger-head">Customer</div>
+          <div className="invoice-ledger-head">Due Date</div>
+          <div className="invoice-ledger-head">Issue Date</div>
+          <div className="invoice-ledger-head">Paid Date</div>
+          <div className="invoice-ledger-head">Promise To Pay</div>
+          <div className="invoice-ledger-head">Status</div>
+        </div>
+
+        {pageInvoices.map((invoice: InvoiceIndexEntry) => (
+          <InvoiceIndexRow key={invoice.id} invoice={invoice} customers={data.customerIndex} />
+        ))}
+
+        {pageInvoices.length === 0 ? (
+          <div className="invoice-ledger-empty">
+            <strong>No invoices match these filters.</strong>
+            <span>Adjust search or filters to widen the invoice ledger.</span>
+          </div>
+        ) : null}
+
+        <div className="invoice-ledger-summary">
+          <div className="invoice-ledger-summary-block">
+            <span>Open Invoices</span>
+            <strong>{filteredSummary.openInvoiceCount}</strong>
+          </div>
+          <div className="invoice-ledger-summary-block">
+            <span>Overdue Open Invoices</span>
+            <strong className="is-danger">{overdueInvoices.length}</strong>
+          </div>
+          <div className="invoice-ledger-summary-block">
+            <span>Open Balance</span>
+            <strong>{formatPhp(filteredSummary.openAmountCents)}</strong>
+          </div>
+          <div className="invoice-ledger-summary-block">
+            <span>Overdue Open Balance</span>
+            <strong className="is-danger">{formatPhp(overdueOpenBalanceCents)}</strong>
+          </div>
+        </div>
+
+        <div className="invoice-ledger-pagination">
+          <span>
+            Showing {filteredInvoices.length === 0 ? 0 : (currentPage - 1) * DEFAULT_INVOICE_PAGE_SIZE + 1}
+            {"-"}
+            {Math.min(currentPage * DEFAULT_INVOICE_PAGE_SIZE, filteredInvoices.length)}
+            {" of "}
+            {filteredInvoices.length}
+          </span>
+          <div>
+            <a
+              className={`invoice-ledger-page-link${currentPage <= 1 ? " is-disabled" : ""}`}
+              href={buildInvoiceIndexHref(normalizedFilters, Math.max(currentPage - 1, 1))}
+              aria-disabled={currentPage <= 1}
+            >
+              Previous
+            </a>
+            <span>Page {currentPage} of {totalPages}</span>
+            <a
+              className={`invoice-ledger-page-link${currentPage >= totalPages ? " is-disabled" : ""}`}
+              href={buildInvoiceIndexHref(normalizedFilters, Math.min(currentPage + 1, totalPages))}
+              aria-disabled={currentPage >= totalPages}
+            >
+              Next
+            </a>
+          </div>
         </div>
       </div>
     </section>
   );
 };
+
+function normalizeInvoiceFilters(filters?: InvoiceFilterInput | undefined) {
+  return {
+    q: filters?.q?.trim() ?? "",
+    status: filters?.status ?? "all",
+    type: filters?.type ?? "all",
+    more: filters?.more ?? "all",
+    page: filters?.page && filters.page > 0 ? Math.floor(filters.page) : 1,
+  } satisfies Required<InvoiceFilterInput>;
+}
+
+function hasActiveInvoiceFilters(filters: Required<InvoiceFilterInput>) {
+  return filters.q.length > 0 || filters.status !== "all" || filters.type !== "all" || filters.more !== "all";
+}
+
+function filterInvoices(
+  invoices: OperatorConsoleData["invoiceIndex"]["invoices"],
+  filters: Required<InvoiceFilterInput>,
+) {
+  const todayDateKey = formatOperatorDateKey(new Date());
+  return invoices.filter((invoice) => {
+    if (filters.status !== "all" && invoice.status !== filters.status) {
+      return false;
+    }
+    if (filters.type !== "all" && !invoiceMatchesTypeFilter(invoice, filters.type)) {
+      return false;
+    }
+    if (filters.more !== "all" && !invoiceMatchesMoreFilter(invoice, filters.more, todayDateKey)) {
+      return false;
+    }
+    if (filters.q && !invoiceMatchesSearchFilter(invoice, filters.q)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function invoiceMatchesTypeFilter(
+  invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number],
+  filter: Exclude<InvoiceIndexTypeFilter, "all">,
+) {
+  switch (filter) {
+    case "live_connection":
+    case "manual_upload":
+    case "seed_fallback":
+      return invoice.importMode === filter;
+    case "installment_plan":
+      return Boolean(invoice.installmentPlanId) || invoice.tags.includes("installment-plan");
+    case "standard_invoice":
+      return !invoice.installmentPlanId && !invoice.tags.includes("installment-plan");
+  }
+}
+
+function invoiceMatchesMoreFilter(
+  invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number],
+  filter: Exclude<InvoiceIndexMoreFilter, "all">,
+  todayDateKey: string,
+) {
+  switch (filter) {
+    case "overdue":
+      return invoice.openAmountCents > 0 && ((invoice.daysPastDue ?? 0) > 0 || Boolean(invoice.dueDate && invoice.dueDate < todayDateKey));
+    case "due_today":
+      return invoice.openAmountCents > 0 && invoice.dueDate === todayDateKey;
+    case "due_soon": {
+      if (!invoice.dueDate || invoice.openAmountCents <= 0) {
+        return false;
+      }
+      const sevenDaysFromToday = addOperatorCalendarDays(todayDateKey, 7);
+      return invoice.dueDate >= todayDateKey && invoice.dueDate <= sevenDaysFromToday;
+    }
+    case "with_promise":
+      return Boolean(
+        invoice.metadata.promiseToPayId ??
+        invoice.metadata.promiseToPayDate ??
+        invoice.tags.find((tag) => tag.toLowerCase() === "promise-to-pay"),
+      );
+    case "with_balance":
+      return invoice.openAmountCents > 0;
+    case "with_branch":
+      return Boolean(invoice.branchId || invoice.branchName);
+    case "missing_branch":
+      return !invoice.branchId && !invoice.branchName;
+  }
+}
+
+function invoiceMatchesSearchFilter(
+  invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number],
+  query: string,
+) {
+  const haystack = buildInvoiceSearchText(invoice);
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((term) => haystack.includes(term));
+}
+
+function buildInvoiceSearchText(invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number]) {
+  const metadataValues = Object.entries(invoice.metadata ?? {})
+    .filter(([key, value]) =>
+      ["string", "number", "boolean"].includes(typeof value) &&
+      /invoice|account|customer|reference|po|so|email|contact|external|branch|promise/i.test(key),
+    )
+    .map(([, value]) => String(value));
+  return [
+    invoice.invoiceNumber,
+    invoice.customerName,
+    invoice.customerReference,
+    invoice.billingAccountId,
+    invoice.billingAccountName,
+    invoice.parentAccountId,
+    invoice.parentAccountName,
+    invoice.branchId,
+    invoice.branchName,
+    invoice.status,
+    invoice.sourceStatus,
+    invoice.sourceLabel,
+    invoice.sourceProvider,
+    invoice.importMode,
+    invoice.dueDate,
+    invoice.issuedAt,
+    invoice.externalId,
+    invoice.canonicalInvoiceId,
+    ...invoice.tags,
+    ...metadataValues,
+    formatInvoiceAmountSearchText(invoice.totalAmountCents),
+    formatInvoiceAmountSearchText(invoice.openAmountCents),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+}
+
+function formatInvoiceAmountSearchText(cents: number) {
+  const amount = cents / 100;
+  return [
+    amount.toFixed(2),
+    amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+    formatPhp(cents),
+  ].join(" ");
+}
+
+function buildInvoiceIndexHref(filters: Required<InvoiceFilterInput>, page: number) {
+  const params = buildInvoiceFilterSearchParams(filters);
+  if (page > 1) {
+    params.set("page", String(page));
+  }
+  const query = params.toString();
+  return query ? `/invoices?${query}` : "/invoices";
+}
+
+function buildInvoiceExportHref(filters: Required<InvoiceFilterInput>) {
+  const params = buildInvoiceFilterSearchParams(filters);
+  const query = params.toString();
+  return query ? `/invoices/export?${query}` : "/invoices/export";
+}
+
+function buildInvoiceFilterSearchParams(filters: Required<InvoiceFilterInput>) {
+  const params = new URLSearchParams();
+  if (filters.q) {
+    params.set("q", filters.q);
+  }
+  if (filters.status !== "all") {
+    params.set("status", filters.status);
+  }
+  if (filters.type !== "all") {
+    params.set("type", filters.type);
+  }
+  if (filters.more !== "all") {
+    params.set("more", filters.more);
+  }
+  return params;
+}
 
 type CashAppTab = "overview" | "payments" | "bank-transactions" | "remittances";
 
@@ -2753,35 +3932,102 @@ const DataSourcesPage = ({ data }: { data: OperatorConsoleData }) => {
   );
 };
 
-const InboxPage = ({ data }: { data: OperatorConsoleData }) => {
-  const totalTasks = data.taskQueue.length;
-  const openTasks = data.taskQueue.filter((item) => item.status === "open").length;
-  const inProgressTasks = data.taskQueue.filter((item) => item.status === "in_progress").length;
-  const pendingApprovalTasks = data.taskQueue.filter((item) => item.status === "pending_approval").length;
-  const highPriorityTasks = data.taskQueue.filter((item) => item.priority === "high").length;
+const taskStatusFilterOptions: Array<{ value: TaskStatusFilter; label: string }> = [
+  { value: "active", label: "Open Tasks" },
+  { value: "all", label: "All Status" },
+  { value: "open", label: "Open" },
+  { value: "in_progress", label: "In Progress" },
+  { value: "pending_approval", label: "Pending Approval" },
+  { value: "completed", label: "Completed" },
+  { value: "closed", label: "Closed" },
+];
+
+const taskTypeFilterOptions: Array<{ value: TaskTypeFilter; label: string }> = [
+  { value: "all", label: "All Types" },
+  { value: "collection", label: "Collections" },
+  { value: "cash_app", label: "Cash App" },
+  { value: "deduction", label: "Deductions" },
+  { value: "integration", label: "Integrations" },
+  { value: "credit_line", label: "Credit Line" },
+];
+
+const taskPriorityFilterOptions: Array<{ value: TaskPriorityFilter; label: string }> = [
+  { value: "all", label: "All Priorities" },
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
+];
+
+const InboxPage = ({ data, filters }: { data: OperatorConsoleData; filters?: TaskFilterInput | undefined }) => {
+  const normalizedFilters = normalizeTaskFilters(filters);
+  const filteredTasks = filterTaskQueue(data.taskQueue, normalizedFilters);
+  const hasActiveFilters =
+    normalizedFilters.status !== "active" ||
+    normalizedFilters.type !== "all" ||
+    normalizedFilters.priority !== "all" ||
+    normalizedFilters.q.length > 0;
+  const activeTasks = data.taskQueue.filter((item) => isOpenTaskStatus(item.status));
+  const totalTasks = activeTasks.length;
+  const openTasks = activeTasks.filter((item) => item.status === "open").length;
+  const inProgressTasks = activeTasks.filter((item) => item.status === "in_progress").length;
+  const pendingApprovalTasks = activeTasks.filter((item) => item.status === "pending_approval").length;
+  const highPriorityTasks = activeTasks.filter((item) => item.priority === "high").length;
+  const senderIdentityOptions = data.emailSendingIdentities.filter(
+    (identity) => identity.connectionStatus === "connected",
+  );
+  const defaultSenderIdentityId =
+    data.emailInbox.selectedSenderIdentityId ??
+    data.emailSendingIdentities.find((identity) => identity.isDefault)?.id ??
+    senderIdentityOptions[0]?.id;
 
   return (
     <section className="page-section task-page">
       <PageHeader
         title="Tasks"
         description="Global task queue across collections, cash app, deductions, and operations"
-        actionRow={
-          <div className="header-actions task-page-actions">
-            <button type="button" className="ghost-button task-toolbar-button">
-              <AppIcon name="filter" />
-              <span>Advanced Filters</span>
-            </button>
-            <button type="button" className="ghost-button task-toolbar-button">
-              <AppIcon name="download" />
-              <span>Export</span>
-            </button>
-          </div>
-        }
       />
+
+      {data.taskComposeStatus ? (
+        <article className="integration-success-banner">
+          <strong>
+            {data.taskComposeStatus.kind === "approval_needed"
+              ? "Task email queued for approval."
+              : data.taskComposeStatus.kind === "sent"
+                ? "Task email sent."
+                : data.taskComposeStatus.kind === "completed"
+                  ? "Task completed and archived."
+                  : data.taskComposeStatus.kind === "deleted"
+                    ? "Task deleted."
+                    : "Task closed."}
+          </strong>
+          <p>{data.taskComposeStatus.message}</p>
+        </article>
+      ) : null}
+
+      {data.taskComposeError ? (
+        <article className="integration-error-banner">
+          <strong>Task email could not be sent.</strong>
+          <p>{data.taskComposeError.message}</p>
+        </article>
+      ) : null}
+
+      {data.taskInvoiceAttachmentStatus ? (
+        <article className="integration-success-banner">
+          <strong>Invoice attachment saved.</strong>
+          <p>{data.taskInvoiceAttachmentStatus.message}</p>
+        </article>
+      ) : null}
+
+      {data.taskInvoiceAttachmentError ? (
+        <article className="integration-error-banner">
+          <strong>Invoice attachment could not be saved.</strong>
+          <p>{data.taskInvoiceAttachmentError.message}</p>
+        </article>
+      ) : null}
 
       <div className="kpi-grid kpi-grid-5 task-summary-grid">
         <article className="task-summary-card">
-          <p>Total Tasks</p>
+          <p>Active Tasks</p>
           <strong>{totalTasks}</strong>
         </article>
         <article className="task-summary-card">
@@ -2803,47 +4049,97 @@ const InboxPage = ({ data }: { data: OperatorConsoleData }) => {
       </div>
 
       <article className="panel task-table-shell">
-        <div className="task-filter-bar">
-          <div className="task-search">
+        <form method="GET" action="/tasks" className="task-filter-bar">
+          <label className="task-search" htmlFor="task-search">
             <AppIcon name="search" />
-            <span>Search tasks, customers, or IDs...</span>
-          </div>
-          <button type="button" className="ghost-select task-select">All Status</button>
-          <button type="button" className="ghost-select task-select">All Types</button>
-          <button type="button" className="ghost-select task-select">All Priorities</button>
-        </div>
+            <input
+              id="task-search"
+              type="search"
+              name="q"
+              defaultValue={normalizedFilters.q}
+              placeholder="Search tasks, customers, invoices..."
+              autoComplete="off"
+              list="task-search-history"
+              data-task-search-input
+            />
+            <datalist id="task-search-history" data-task-search-history-list />
+          </label>
+          <select
+            className="ghost-select task-select"
+            name="status"
+            defaultValue={normalizedFilters.status}
+            aria-label="Filter by status"
+          >
+            {taskStatusFilterOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <select
+            className="ghost-select task-select"
+            name="type"
+            defaultValue={normalizedFilters.type}
+            aria-label="Filter by type"
+          >
+            {taskTypeFilterOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <select
+            className="ghost-select task-select"
+            name="priority"
+            defaultValue={normalizedFilters.priority}
+            aria-label="Filter by priority"
+          >
+            {taskPriorityFilterOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <button type="submit" className="primary-button task-filter-submit">
+            <AppIcon name="check" />
+            <span>Apply</span>
+          </button>
+          {hasActiveFilters ? <a className="ghost-button task-filter-clear" href="/tasks">Clear</a> : null}
+          <button type="button" className="ghost-button task-search-clear-history" data-task-search-clear-history>
+            Clear recent
+          </button>
+        </form>
 
         <div className="task-table">
           <div className="task-table-header">
             <div className="task-table-head">Task</div>
-            <div className="task-table-head">Type</div>
             <div className="task-table-head">Customer</div>
+            <div className="task-table-head">Type</div>
             <div className="task-table-head">Status</div>
             <div className="task-table-head">Priority</div>
-            <div className="task-table-head">Assignee</div>
-            <div className="task-table-head">Created</div>
-            <div className="task-table-head">Due Date</div>
+            <div className="task-table-head">Owner</div>
+            <div className="task-table-head">Source</div>
             <div className="task-table-head task-table-head-actions">Actions</div>
           </div>
           <div className="task-table-body">
-            {data.taskQueue.map((task) => (
+            {filteredTasks.length === 0 ? (
+              <div className="task-table-empty">
+                <strong>{activeTasks.length === 0 && normalizedFilters.status === "active" ? "No open tasks yet." : "No tasks match these filters."}</strong>
+                <p>{activeTasks.length === 0 && normalizedFilters.status === "active" ? "New operational work will appear here when tasks are created." : "Adjust the search, status, type, or priority filters."}</p>
+              </div>
+            ) : filteredTasks.map((task) => (
               <div key={task.id} className="task-table-row">
                 <div className="task-table-cell">
-                  <strong>{task.title}</strong>
+                  <a className="task-row-title-link" href={`#task-detail-${task.id}`}>
+                    <strong>{task.title}</strong>
+                  </a>
                   <p className="task-row-meta">
-                    <span>{task.taskCode}</span>
                     {task.relatedRecord ? <span>{task.relatedRecord}</span> : null}
-                    <span>{task.amountLabel}</span>
+                    {task.amountLabel !== "—" ? <span>{task.amountLabel}</span> : null}
                   </p>
+                </div>
+                <div className="task-table-cell">
+                  <strong className="task-table-plain">{task.customerName}</strong>
                 </div>
                 <div className="task-table-cell">
                   <span className={`task-type-pill task-type-${task.type}`}>
                     <span className="task-type-icon" />
                     {taskTypeLabel(task.type)}
                   </span>
-                </div>
-                <div className="task-table-cell">
-                  <strong className="task-table-plain">{task.customerName}</strong>
                 </div>
                 <div className="task-table-cell">
                   <span className={`pill ${taskStatusClassName(task.status)}`}>{humanize(task.status)}</span>
@@ -2858,14 +4154,11 @@ const InboxPage = ({ data }: { data: OperatorConsoleData }) => {
                   </div>
                 </div>
                 <div className="task-table-cell">
-                  <strong className="task-table-plain">{task.createdLabel}</strong>
-                </div>
-                <div className="task-table-cell">
-                  <strong className="task-table-plain">{task.dueDateLabel}</strong>
+                  <span className="task-source-label">{taskSourceLabel(task)}</span>
                 </div>
                 <div className="task-table-cell task-table-cell-actions">
-                  <a className="task-view-link" href={task.actionPath}>
-                    View
+                  <a className="task-view-link" href={`#task-detail-${task.id}`}>
+                    {task.composeEmail ? "Email" : "View"}
                   </a>
                 </div>
               </div>
@@ -2873,9 +4166,486 @@ const InboxPage = ({ data }: { data: OperatorConsoleData }) => {
           </div>
         </div>
       </article>
+
+      {filteredTasks.map((task, index) => (
+        <TaskDetailModal
+          key={`task-detail-${task.id}`}
+          data={data}
+          task={task}
+          previousTask={filteredTasks[index - 1]}
+          nextTask={filteredTasks[index + 1]}
+          senderIdentityOptions={senderIdentityOptions}
+          {...(defaultSenderIdentityId ? { defaultSenderIdentityId } : {})}
+        />
+      ))}
     </section>
   );
 };
+
+const TaskDetailModal = ({
+  data,
+  task,
+  previousTask,
+  nextTask,
+  senderIdentityOptions,
+  defaultSenderIdentityId,
+}: {
+  data: OperatorConsoleData;
+  task: TaskQueueItem;
+  previousTask: TaskQueueItem | undefined;
+  nextTask: TaskQueueItem | undefined;
+  senderIdentityOptions: OperatorConsoleData["emailSendingIdentities"];
+  defaultSenderIdentityId?: string;
+}) => {
+  const composeEmail = task.composeEmail;
+  const canSend = Boolean(defaultSenderIdentityId);
+  const templateDraft = composeEmail ? buildTaskTemplateDraft(composeEmail) : undefined;
+  const appliedDraft =
+    data.taskComposeDraft?.composeId === task.id
+      ? data.taskComposeDraft
+      : undefined;
+  const activeDraft = composeEmail
+    ? {
+        composeId: task.id,
+        generator: appliedDraft?.generator ?? ("ai" as const),
+        subjectLine: appliedDraft?.subjectLine ?? composeEmail.draft.subjectLine,
+        body: appliedDraft?.body ?? composeEmail.draft.body,
+        note: appliedDraft?.note ?? composeEmail.draft.note,
+      }
+    : undefined;
+  const activeGenerator = activeDraft?.generator ?? "ai";
+  const taskEmailTemplates = getAvailableCollectionsEmailTemplates(data);
+  const invoiceLabels = composeEmail?.invoices.map((invoice) => invoice.invoiceNumber) ?? [];
+  const invoiceContextLabel =
+    task.invoiceContextLabel ??
+    (invoiceLabels.length > 0 ? invoiceLabels.join(", ") : undefined) ??
+    task.relatedRecord;
+  const invoiceContextItems = buildTaskInvoiceContextItems(task);
+  const threadMessages = composeEmail
+    ? composeEmail.threadMessages && composeEmail.threadMessages.length > 0
+      ? composeEmail.threadMessages
+      : buildTaskThreadMessages(task, composeEmail)
+    : [];
+  const tasksBadgeCount = composeEmail?.openTaskCount ?? 1;
+  const openInvoiceCount = task.openInvoiceCount ?? composeEmail?.invoices.length ?? 0;
+  const balanceLabel = task.balanceLabel ?? task.amountLabel;
+  const overdueLabel = task.overdueLabel ?? calculateTaskOverdueLabel(composeEmail);
+  const taskBrief = buildTaskDetailBrief(task);
+
+  return (
+    <section
+      id={`task-detail-${task.id}`}
+      className="collections-compose-modal task-detail-modal"
+    >
+      <a className="collections-compose-backdrop" href="#" aria-label="Close task detail" />
+      <article
+        className="collections-compose-panel task-detail-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`task-detail-title-${task.id}`}
+      >
+        <div className="collections-compose-header task-detail-header">
+          <div className="task-compose-title-block">
+            <div className="task-detail-kicker">
+              <span>{task.taskCode}</span>
+              <span className={`pill ${taskStatusClassName(task.status)}`}>{humanize(task.status)}</span>
+              {task.replyAgingLabel ? (
+                <span className="task-detail-aging">
+                  <AppIcon name="clock" />
+                  {task.replyAgingLabel}
+                </span>
+              ) : null}
+            </div>
+            <div className="task-compose-title-row">
+              <h2 id={`task-detail-title-${task.id}`}>{task.customerName}</h2>
+              <span className="task-compose-badge">Customer</span>
+              {task.ownerTeam ? <span className="task-compose-badge">{task.ownerTeam}</span> : null}
+            </div>
+            <div className="task-compose-invoice-line">
+              <span>{openInvoiceCount} open invoice{openInvoiceCount === 1 ? "" : "s"}</span>
+              <span className="task-compose-bullet">•</span>
+              <strong>{balanceLabel}</strong>
+              {overdueLabel ? (
+                <>
+                  <span className="task-compose-bullet">•</span>
+                  <span>{overdueLabel} overdue</span>
+                </>
+              ) : null}
+            </div>
+          </div>
+          <div className="task-detail-nav">
+            <a
+              className={`task-detail-nav-button${previousTask ? "" : " is-disabled"}`}
+              href={previousTask ? `#task-detail-${previousTask.id}` : `#task-detail-${task.id}`}
+              aria-label="Previous task"
+            >
+              <AppIcon name="chevron-left" />
+            </a>
+            <a
+              className={`task-detail-nav-button${nextTask ? "" : " is-disabled"}`}
+              href={nextTask ? `#task-detail-${nextTask.id}` : `#task-detail-${task.id}`}
+              aria-label="Next task"
+            >
+              <AppIcon name="chevron-right" />
+            </a>
+            <a className="collections-compose-close" href="#" aria-label="Close task detail">
+              <AppIcon name="close" />
+            </a>
+          </div>
+        </div>
+
+        <div className="task-detail-body">
+          <div className="task-detail-summary-grid">
+            <div className="task-detail-summary-card">
+              <span>Task</span>
+              <strong>{task.title}</strong>
+            </div>
+            <div className="task-detail-summary-card">
+              <span>Owner</span>
+              <strong>{task.assigneeName}</strong>
+            </div>
+            <div className="task-detail-summary-card">
+              <span>Created</span>
+              <strong>{task.createdLabel}</strong>
+            </div>
+          </div>
+
+          <div className="task-detail-context-grid">
+            <div className="task-detail-context-card">
+              <span>Invoice / balance context</span>
+              <strong>{invoiceContextLabel ?? "Account balance"}</strong>
+              {invoiceContextItems.length > 0 ? (
+                <ul className="task-detail-invoice-list">
+                  {invoiceContextItems.map((item, index) => (
+                    <li key={`${task.id}-invoice-context-${index}`}>
+                      <strong>{item.invoiceNumber}</strong>
+                      {item.detail ? <span>{item.detail}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>{`${openInvoiceCount} open invoice${openInvoiceCount === 1 ? "" : "s"} · ${balanceLabel}`}</p>
+              )}
+            </div>
+          </div>
+
+          <div className="task-detail-brief">
+            <strong>Task brief</strong>
+            <p>{taskBrief}</p>
+          </div>
+
+          {task.recommendedNextAction ? (
+            <div className="task-detail-next-action">
+              <strong>Recommended next action</strong>
+              <p>{task.recommendedNextAction}</p>
+            </div>
+          ) : null}
+
+          {composeEmail && templateDraft && activeDraft ? (
+            <>
+            <form
+              method="POST"
+              action="/tasks/compose"
+              className="collections-compose-form task-detail-email-form"
+              encType="multipart/form-data"
+              data-task-email-form
+            >
+              <input type="hidden" name="composeId" value={task.id} />
+              <input type="hidden" name="aiSubjectLine" value={composeEmail.draft.subjectLine} />
+              <input type="hidden" name="aiBody" value={composeEmail.draft.body} />
+              <input type="hidden" name="aiNote" value={composeEmail.draft.note} />
+              <input type="hidden" name="templateSubjectLine" value={templateDraft.subjectLine} />
+              <input type="hidden" name="templateBody" value={templateDraft.body} />
+              <input type="hidden" name="templateNote" value={templateDraft.note} />
+              <input type="hidden" name="accountJson" value={JSON.stringify(composeEmail.account)} />
+              <input type="hidden" name="contactJson" value={JSON.stringify(composeEmail.contact)} />
+              <input type="hidden" name="invoicesJson" value={JSON.stringify(composeEmail.invoices)} />
+              <input type="hidden" name="appliedDraftComposeId" value={activeDraft.composeId} />
+              <input type="hidden" name="appliedDraftGenerator" value={activeDraft.generator} />
+              <input type="hidden" name="appliedDraftSubject" value={activeDraft.subjectLine} />
+              <input type="hidden" name="appliedDraftBody" value={activeDraft.body} />
+              <input type="hidden" name="appliedDraftNote" value={activeDraft.note} />
+
+              {!canSend ? (
+                <div className="integration-error-banner">
+                  <strong>Send is unavailable until a mailbox is connected.</strong>
+                  <p>Connect a Gmail sender identity first, then reopen this task to send the follow-up.</p>
+                </div>
+              ) : null}
+
+              <div className="task-compose-tabs">
+                <span className="task-compose-tab is-active">Email Draft</span>
+                <span className="task-compose-tab">
+                  Related Tasks
+                  <span className="task-compose-tab-count">{tasksBadgeCount}</span>
+                </span>
+              </div>
+
+              <div className="task-compose-thread-list">
+                {threadMessages.map((message) => (
+                  <article key={message.id} className="task-compose-thread-card">
+                    <div className="task-compose-thread-avatar">
+                      {(message.fromName ?? message.fromEmail).charAt(0).toUpperCase()}
+                    </div>
+                    <div className="task-compose-thread-copy">
+                      <div className="task-compose-thread-meta">
+                        <strong>{message.fromEmail}</strong>
+                        <span>{message.receivedAt}</span>
+                      </div>
+                      <p>{message.snippet}</p>
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              <div className="task-compose-generator-row">
+                <span>Draft source</span>
+                <label className="task-compose-generator-option">
+                  <input
+                    type="radio"
+                    name="draftGenerator"
+                    value="ai"
+                    defaultChecked={activeGenerator === "ai"}
+                  />
+                  <span>AI-generated</span>
+                </label>
+                <label className="task-compose-generator-option">
+                  <input
+                    type="radio"
+                    name="draftGenerator"
+                    value="template"
+                    defaultChecked={activeGenerator === "template"}
+                  />
+                  <span>Template</span>
+                </label>
+                <button type="submit" className="ghost-button" formAction="/tasks/compose/apply" formNoValidate>
+                  Apply
+                </button>
+              </div>
+
+              <div className="task-compose-note">
+                <strong>{activeDraft.generator === "ai" ? "AI-generated draft" : "Template draft"}</strong>
+                <p>{activeDraft.note}</p>
+              </div>
+
+              <div className="collections-email-template-panel task-email-template-panel">
+                {taskEmailTemplates.length > 0 ? (
+                  <>
+                    <label className="collections-message-heading">
+                      <span>Email template</span>
+                      <select data-email-template-select defaultValue="">
+                        <option value="">Choose a Control Center template</option>
+                        {taskEmailTemplates.map((template) => (
+                          <option
+                            key={template.id}
+                            value={template.id}
+                            data-template-subject={renderTaskTemplateText(template.subject, task, composeEmail)}
+                            data-template-body={renderTaskTemplateText(template.body, task, composeEmail)}
+                          >
+                            {template.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button type="button" className="ghost-button" data-email-template-apply>
+                      Apply template
+                    </button>
+                  </>
+                ) : (
+                  <div className="collections-email-template-empty">
+                    <strong>No email templates available.</strong>
+                    <span>Create an email-compatible template in Control Center to use it here.</span>
+                  </div>
+                )}
+              </div>
+
+              <details className="task-detail-edit-mode" open>
+                <summary>
+                  <AppIcon name="edit" />
+                  <span>Edit email</span>
+                </summary>
+
+                <div className="task-compose-address-grid">
+                  <div className="collections-message-heading">
+                    <label className="label-copy" htmlFor={`task-from-${task.id}`}>From</label>
+                    <select
+                      id={`task-from-${task.id}`}
+                      name="senderIdentityId"
+                      className="form-input"
+                      defaultValue={defaultSenderIdentityId}
+                      required
+                      disabled={senderIdentityOptions.length === 0}
+                    >
+                      {senderIdentityOptions.length === 0 ? (
+                        <option value="">Connect a mailbox first</option>
+                      ) : (
+                        senderIdentityOptions.map((identity) => (
+                          <option key={identity.id} value={identity.id}>
+                            {identity.displayName ? `${identity.displayName} · ` : ""}
+                            {identity.senderEmail}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+                  <div className="collections-message-heading">
+                    <label className="label-copy" htmlFor={`task-to-${task.id}`}>To</label>
+                    <input
+                      id={`task-to-${task.id}`}
+                      className="form-input"
+                      defaultValue={composeEmail.contact.email ?? ""}
+                      readOnly
+                    />
+                  </div>
+                  <div className="collections-message-heading">
+                    <label className="label-copy" htmlFor={`task-cc-${task.id}`}>Cc</label>
+                    <input id={`task-cc-${task.id}`} name="cc" className="form-input" placeholder="Optional copy recipients" />
+                  </div>
+                </div>
+
+                <div className="collections-message-heading task-detail-subject-field">
+                  <label className="label-copy" htmlFor={`task-subject-${task.id}`}>Subject</label>
+                  <input
+                    id={`task-subject-${task.id}`}
+                    name="subjectLine"
+                    className="form-input"
+                    defaultValue={activeDraft.subjectLine}
+                    required
+                  />
+                </div>
+
+                <div className="task-compose-toolbar" aria-label="Email formatting tools">
+                  <button type="button" className="task-compose-format-button" title="Bold" data-task-format-command="bold">B</button>
+                  <button type="button" className="task-compose-format-button" title="Italic" data-task-format-command="italic">I</button>
+                  <button type="button" className="task-compose-format-button" title="Underline" data-task-format-command="underline">U</button>
+                  <button type="button" className="task-compose-format-button" title="Hyperlink" data-task-format-command="link">
+                    <AppIcon name="external-link" />
+                  </button>
+                  <label className="task-compose-attachment-trigger" htmlFor={`task-attachments-${task.id}`}>
+                    <AppIcon name="paperclip" />
+                    <span>Upload attachment</span>
+                  </label>
+                </div>
+
+                <div className="collections-compose-grid collections-compose-grid-single">
+                  <div className="collections-message-heading">
+                    <textarea
+                      id={`task-body-${task.id}`}
+                      name="bodyPreview"
+                      className="collections-compose-textarea task-compose-editor"
+                      defaultValue={activeDraft.body}
+                      data-task-email-body
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="task-compose-invoice-attachment-panel">
+                  <div className="task-compose-invoice-attachment-fields">
+                    <label className="label-copy" htmlFor={`task-attach-invoice-select-${task.id}`}>Upload Invoice</label>
+                    <select
+                      id={`task-attach-invoice-select-${task.id}`}
+                      name="selectedInvoiceIds"
+                      className="form-input"
+                      defaultValue={composeEmail.invoices.map((invoice) => invoice.id)}
+                      multiple
+                      size={Math.min(Math.max(composeEmail.invoices.length, 2), 4)}
+                    >
+                      {composeEmail.invoices.map((invoice) => (
+                        <option key={`${task.id}-${invoice.id}`} value={invoice.id}>
+                          {invoice.invoiceNumber}
+                          {typeof invoice.metadata.physicalInvoiceFileName === "string"
+                            ? ` · ${invoice.metadata.physicalInvoiceFileName}`
+                            : invoice.uploadedDocumentId
+                              ? " · file attached"
+                              : " · no file yet"}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="task-compose-attachment-hint">
+                      Hold `Cmd` or `Ctrl` to select multiple invoices for the same uploaded file.
+                    </p>
+                  </div>
+                  <div className="task-compose-invoice-attachment-fields">
+                    <label className="label-copy" htmlFor={`task-invoice-file-${task.id}`}>PDF or Photo</label>
+                    <input
+                      id={`task-invoice-file-${task.id}`}
+                      type="file"
+                      name="invoiceAttachment"
+                      className="task-compose-attachment-input"
+                      accept="application/pdf,image/*"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="ghost-button task-compose-attach-invoice-button"
+                    formAction="/tasks/compose/attach-invoice"
+                    formNoValidate
+                  >
+                    Upload Invoice
+                  </button>
+                </div>
+
+                <div className="task-compose-attachment-row">
+                  <label className="label-copy" htmlFor={`task-attachments-${task.id}`}>Upload attachment</label>
+                  <input
+                    id={`task-attachments-${task.id}`}
+                    type="file"
+                    name="attachments"
+                    className="task-compose-attachment-input"
+                    multiple
+                  />
+                  <label className="label-copy" htmlFor={`task-soa-${task.id}`}>Upload SOA</label>
+                  <input
+                    id={`task-soa-${task.id}`}
+                    type="file"
+                    name="soaAttachment"
+                    className="task-compose-attachment-input"
+                    accept="application/pdf,image/*"
+                  />
+                  <p className="task-compose-attachment-hint">
+                    Add invoice copies, SOAs, or supporting documents before sending.
+                  </p>
+                </div>
+              </details>
+
+              <div className="collections-compose-footer">
+                <a className="ghost-button" href="#">Cancel</a>
+                <button type="submit" className="primary-button" disabled={!canSend}>
+                  Send Email
+                </button>
+              </div>
+            </form>
+            <TaskDetailLifecycleActions taskId={task.id} />
+            </>
+          ) : (
+            <TaskDetailLifecycleActions taskId={task.id} />
+          )}
+        </div>
+      </article>
+    </section>
+  );
+};
+
+const TaskDetailLifecycleActions = ({ taskId }: { taskId: string }) => (
+  <div className="task-detail-status-actions">
+    <form method="POST" action="/tasks/status">
+      <input type="hidden" name="taskId" value={taskId} />
+      <input type="hidden" name="status" value="completed" />
+      <button type="submit" className="primary-button">Complete task</button>
+    </form>
+    <form method="POST" action="/tasks/delete" data-task-delete-form>
+      <input type="hidden" name="taskId" value={taskId} />
+      <button
+        type="submit"
+        className="ghost-button"
+        data-confirm-message="Delete this task? This will remove it from the active task list."
+      >
+        Delete task
+      </button>
+    </form>
+  </div>
+);
 
 const QuickBooksConnectPage = ({
   data,
@@ -3046,13 +4816,345 @@ const QuickBooksConnectPage = ({
             <form method="POST" action="/integrations/quickbooks/invoices/sync">
               <button type="submit" className="ghost-button">Import invoices now</button>
             </form>
-            <a className="ghost-button" href="/cash-app">Open Cash App</a>
+            <a className="ghost-button" href="/invoices">Open invoices</a>
           </div>
         </article>
       </div>
     </section>
   );
 };
+
+function buildTaskTemplateDraft(composeEmail: NonNullable<TaskQueueItem["composeEmail"]>) {
+  const totalAmountCents = composeEmail.invoices.reduce((sum, invoice) => sum + invoice.amountCents, 0);
+  const invoiceLines = composeEmail.invoices
+    .map(
+      (invoice) =>
+        `- ${invoice.invoiceNumber}: ${formatPhp(invoice.amountCents)} due ${invoice.dueDate ?? "soon"}`,
+    )
+    .join("\n");
+
+  return {
+    subjectLine: `Follow-up on overdue invoices for ${composeEmail.account.displayName}`,
+    body: [
+      `Hi ${composeEmail.contact.fullName},`,
+      "",
+      `I wanted to follow up on the overdue invoices currently outstanding on your account with us. As of today, we have ${formatPhp(totalAmountCents)} across the items below:`,
+      "",
+      invoiceLines,
+      "",
+      "Could you please let us know the expected payment timing for these invoices? If payment has already been arranged, feel free to share the remittance reference so we can review it on our side.",
+      "",
+      "Thank you,",
+      "Yield AROS Collections",
+    ].join("\n"),
+    note: "Applied the saved follow-up template for overdue invoice outreach.",
+  };
+}
+
+function renderTaskTemplateText(
+  templateText: string,
+  task: TaskQueueItem,
+  composeEmail: NonNullable<TaskQueueItem["composeEmail"]>,
+) {
+  return applyTemplatePreviewVariables(templateText, buildTaskTemplateVariables(task, composeEmail));
+}
+
+function buildTaskTemplateVariables(
+  task: TaskQueueItem,
+  composeEmail: NonNullable<TaskQueueItem["composeEmail"]>,
+) {
+  const invoiceNumbers = composeEmail.invoices.map((invoice) => invoice.invoiceNumber).join(", ");
+  const totalAmountCents = composeEmail.invoices.reduce((sum, invoice) => sum + invoice.amountCents, 0);
+  const overdueSummary = composeEmail.invoices
+    .map((invoice) => `- Invoice ${invoice.invoiceNumber}: ${formatPhp(invoice.amountCents)} due ${invoice.dueDate ?? "soon"}`)
+    .join("\n");
+
+  return {
+    customer_name: composeEmail.contact.fullName || task.customerName,
+    name: composeEmail.contact.fullName || task.customerName,
+    customer_email: composeEmail.contact.email ?? "",
+    customer_company_name: composeEmail.account.displayName,
+    billing_account_name: composeEmail.account.displayName,
+    customer_external_id: composeEmail.account.accountNumber,
+    branch_name: composeEmail.account.branchId ?? "",
+    sender_company_name: "Yield AROS",
+    invoice_numbers: invoiceNumbers,
+    overdue_invoice_summary: overdueSummary || "No linked invoices.",
+    overdue_balance: formatPhp(totalAmountCents),
+    upcoming_balance: formatPhp(0),
+    total_account_balance: formatPhp(totalAmountCents),
+    payment_url: `https://pay.yieldaros.example/account/${composeEmail.account.accountNumber}`,
+    num_upcoming_invoices: "0",
+  };
+}
+
+function calculateTaskOverdueLabel(composeEmail: TaskQueueItem["composeEmail"]) {
+  if (!composeEmail) {
+    return undefined;
+  }
+
+  const today = new Date();
+  const overdueAmountCents = composeEmail.invoices
+    .filter((invoice) => {
+      if (!invoice.dueDate) {
+        return false;
+      }
+      const dueDate = new Date(`${invoice.dueDate}T00:00:00.000Z`);
+      return !Number.isNaN(dueDate.getTime()) && dueDate.getTime() < today.getTime();
+    })
+    .reduce((sum, invoice) => sum + invoice.amountCents, 0);
+
+  return overdueAmountCents > 0 ? formatPhp(overdueAmountCents) : undefined;
+}
+
+function buildTaskInvoiceContextItems(task: TaskQueueItem) {
+  if (task.invoiceContextItems && task.invoiceContextItems.length > 0) {
+    return task.invoiceContextItems.map((item) => ({
+      invoiceNumber: item.invoiceNumber,
+      detail: [
+        item.amountLabel,
+        item.dueDateLabel ? `due ${item.dueDateLabel}` : undefined,
+        item.statusLabel,
+      ].filter(Boolean).join(" · "),
+    }));
+  }
+
+  if (task.composeEmail?.invoices.length) {
+    return task.composeEmail.invoices.map((invoice) => ({
+      invoiceNumber: invoice.invoiceNumber,
+      detail: [
+        formatPhp(invoice.amountCents),
+        invoice.dueDate ? `due ${formatTaskInvoiceDueDate(invoice.dueDate)}` : undefined,
+        humanize(invoice.state),
+      ].filter(Boolean).join(" · "),
+    }));
+  }
+
+  if (task.invoiceContextDetail) {
+    return task.invoiceContextDetail
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const [invoiceNumber, ...detailParts] = part.split(":");
+        return {
+          invoiceNumber: invoiceNumber?.trim() || "Invoice",
+          detail: detailParts.join(":").trim(),
+        };
+      });
+  }
+
+  return [];
+}
+
+function formatTaskInvoiceDueDate(value: string) {
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(parsed);
+}
+
+function normalizeTaskFilters(input?: TaskFilterInput | undefined): NormalizedTaskFilters {
+  return {
+    status: isTaskStatusFilter(input?.status) ? input.status : "active",
+    type: isTaskTypeFilter(input?.type) ? input.type : "all",
+    priority: isTaskPriorityFilter(input?.priority) ? input.priority : "all",
+    q: input?.q?.trim() ?? "",
+  };
+}
+
+function filterTaskQueue(tasks: TaskQueueItem[], filters: NormalizedTaskFilters) {
+  const tokens = filters.q.toLowerCase().split(/\s+/).filter(Boolean);
+  return tasks.filter((task) => {
+    if (filters.status === "active" && !isOpenTaskStatus(task.status)) {
+      return false;
+    }
+    if (filters.status === "all" && task.status === "deleted") {
+      return false;
+    }
+    if (filters.status !== "active" && filters.status !== "all" && task.status !== filters.status) {
+      return false;
+    }
+    if (filters.type !== "all" && task.type !== filters.type) {
+      return false;
+    }
+    if (filters.priority !== "all" && task.priority !== filters.priority) {
+      return false;
+    }
+    if (tokens.length === 0) {
+      return true;
+    }
+
+    const haystack = buildTaskSearchHaystack(task);
+    return tokens.every((token) => haystack.includes(token));
+  });
+}
+
+function buildTaskSearchHaystack(task: TaskQueueItem) {
+  return [
+    task.id,
+    task.taskCode,
+    task.title,
+    task.customerName,
+    task.brief,
+    task.recommendedNextAction,
+    task.type,
+    taskTypeLabel(task.type),
+    task.status,
+    task.priority,
+    task.relatedRecord,
+    task.amountLabel,
+    task.assigneeName,
+    task.ownerTeam,
+    task.invoiceContextLabel,
+    task.invoiceContextDetail,
+    task.callContextLabel,
+    task.sourceLabel,
+    task.transcriptSnippet,
+    task.composeEmail?.account.accountNumber,
+    task.composeEmail?.account.displayName,
+    task.composeEmail?.contact.fullName,
+    task.composeEmail?.contact.email,
+    ...(task.composeEmail?.invoices.map((invoice) => invoice.invoiceNumber) ?? []),
+  ]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join(" ")
+    .toLowerCase();
+}
+
+function isTaskStatusFilter(value: unknown): value is TaskStatusFilter {
+  return value === "active" || value === "all" || value === "open" || value === "in_progress" || value === "pending_approval" || value === "completed" || value === "closed" || value === "deleted";
+}
+
+function isTaskTypeFilter(value: unknown): value is TaskTypeFilter {
+  return value === "all" || value === "collection" || value === "cash_app" || value === "deduction" || value === "integration" || value === "credit_line";
+}
+
+function isTaskPriorityFilter(value: unknown): value is TaskPriorityFilter {
+  return value === "all" || value === "high" || value === "medium" || value === "low";
+}
+
+function taskSourceLabel(task: TaskQueueItem) {
+  if (task.sourceLabel) {
+    return task.sourceLabel;
+  }
+  if (task.callContextLabel) {
+    return "Call";
+  }
+  if (task.composeEmail) {
+    return "Email";
+  }
+  switch (task.type) {
+    case "cash_app":
+      return "Cash app";
+    case "deduction":
+      return "Deduction";
+    case "integration":
+      return "Integration";
+    case "credit_line":
+      return "Credit";
+    case "collection":
+      return "Collections";
+  }
+}
+
+function buildTaskDetailBrief(task: TaskQueueItem) {
+  return (
+    normalizeTaskBriefText(task.brief) ??
+    (task.relatedRecord
+      ? `Review ${task.relatedRecord} and complete the next safe operator action.`
+      : "Review the task context and complete the next safe operator action.")
+  );
+}
+
+function normalizeTaskBriefText(value: string | undefined): string | undefined {
+  const normalized = value
+    ?.replace(/\s+/g, " ")
+    .replace(/before changing receivable state/gi, "before changing invoice status")
+    .trim();
+  if (!normalized || startsWithTaskSourceContext(normalized)) {
+    return undefined;
+  }
+
+  const lower = normalized.toLowerCase();
+  if (
+    lower.includes("payment was already made") ||
+    lower.includes("already paid") ||
+    lower.includes("paid already")
+  ) {
+    return "Customer said payment was already made; verify remittance or payment evidence before changing invoice status.";
+  }
+
+  const concise = stripTaskSourceContextSections(normalized);
+  if (!concise || startsWithTaskSourceContext(concise)) {
+    return undefined;
+  }
+
+  const sentence = /[.!?]$/.test(concise) ? concise : `${concise}.`;
+  return sentence;
+}
+
+function stripTaskSourceContextSections(value: string) {
+  const markers = [
+    " Scope:",
+    " Recommended next action:",
+    " Created from ",
+    " Created from:",
+    " Call note:",
+    " Call summary:",
+    " Transcript:",
+    " Raw transcript:",
+    " Source context:",
+    " Internal source details:",
+  ];
+  const searchable = ` ${value.toLowerCase()}`;
+  let end = value.length;
+  for (const marker of markers) {
+    const index = searchable.indexOf(marker.toLowerCase());
+    if (index >= 0) {
+      end = Math.min(end, Math.max(0, index - 1));
+    }
+  }
+  return value.slice(0, end).trim();
+}
+
+function startsWithTaskSourceContext(value: string) {
+  return /^(?:scope|recommended next action|created from|call note|call summary|transcript|raw transcript|source context|internal source details):/i.test(value);
+}
+
+function buildTaskThreadMessages(
+  task: TaskQueueItem,
+  composeEmail: NonNullable<TaskQueueItem["composeEmail"]>,
+) {
+  const recipient = composeEmail.contact.email ?? "customer@example.com";
+  const invoiceSummary = composeEmail.invoices
+    .slice(0, 2)
+    .map((invoice) => invoice.invoiceNumber)
+    .join(", ");
+
+  return [
+    {
+      id: `${task.id}-thread-1`,
+      fromEmail: recipient,
+      fromName: composeEmail.contact.fullName,
+      snippet: `Please resend the latest invoice copy for ${invoiceSummary}.`,
+      receivedAt: "10/25/2025 8:16 AM",
+    },
+    {
+      id: `${task.id}-thread-2`,
+      fromEmail: "collections@paywithyield.com",
+      fromName: "Yield Collections",
+      snippet: `Checking in on the payment timing for ${composeEmail.invoices[0]?.invoiceNumber ?? "the overdue invoice"}.`,
+      receivedAt: "10/24/2025 5:44 AM",
+    },
+  ];
+}
 
 const SapBusinessOneConnectPage = ({
   data,
@@ -3217,7 +5319,7 @@ const SapBusinessOneConnectPage = ({
             <form method="POST" action="/integrations/sap-business-one/invoices/sync">
               <button type="submit" className="ghost-button">Sync now</button>
             </form>
-            <a className="ghost-button" href="/cash-app">Open Cash App</a>
+            <a className="ghost-button" href="/invoices">Open invoices</a>
           </div>
         </article>
       </div>
@@ -3495,9 +5597,16 @@ const IntegrationsPage = ({
           </div>
           <div className="header-actions">
             {item.id === "erp" ? (
-              <a className={item.status === "healthy" ? "ghost-button" : "primary-button"} href="/integrations/business-central/connect">
-                {item.status === "healthy" ? "Reconnect" : "Connect"}
-              </a>
+              <div className="header-actions">
+                <a className={item.status === "healthy" ? "ghost-button" : "primary-button"} href="/integrations/business-central/connect">
+                  {item.status === "healthy" ? "Reconnect" : "Connect"}
+                </a>
+                {item.status === "healthy" ? (
+                  <form method="POST" action="/integrations/business-central/sync">
+                    <button type="submit" className="ghost-button">Sync all data</button>
+                  </form>
+                ) : null}
+              </div>
             ) : item.id === "sap-business-one" ? (
               <div className="header-actions">
                 <a className={item.status === "healthy" ? "ghost-button" : "primary-button"} href="/integrations/sap-business-one">
@@ -3692,14 +5801,475 @@ const RulesPage = ({ data }: { data: OperatorConsoleData }) => (
   </section>
 );
 
+const AccessControlUsersPage = ({
+  data,
+  pathname = "/admin/users",
+}: {
+  data: OperatorConsoleData;
+  pathname?: string;
+}) => {
+  const admin = data.accessControlAdmin ?? buildUsersAdminFallback();
+
+  const totalUsers = admin.users.length;
+  const activeUsers = admin.users.filter((user) => user.status === "active").length;
+  const invitedUsers = admin.users.filter((user) => user.status === "invited").length;
+  const inactiveUsers = admin.users.filter((user) => user.status === "disabled").length;
+
+  const closeInviteHref = pathname === "/admin/users" ? "/admin/users" : "#";
+
+  return (
+    <section className="page-section users-admin-page">
+      <div className="users-admin-header">
+        <div className="users-admin-title-block">
+          <h1>Users &amp; Role Management</h1>
+          <p>Manage user access, roles, and permissions across your organization</p>
+        </div>
+        <a className="users-admin-invite-button" href="#invite-user-modal">
+          <AppIcon name="plus" />
+          <span>Invite User</span>
+        </a>
+      </div>
+
+      <div className="users-admin-stats">
+        <article className="users-admin-stat-card">
+          <div className="users-admin-stat-icon users-admin-stat-icon-neutral">
+            <AppIcon name="approvals" />
+          </div>
+          <div className="users-admin-stat-copy">
+            <span>Total Users</span>
+            <strong>{totalUsers}</strong>
+          </div>
+        </article>
+        <article className="users-admin-stat-card">
+          <div className="users-admin-stat-icon users-admin-stat-icon-success">
+            <AppIcon name="customers" />
+          </div>
+          <div className="users-admin-stat-copy">
+            <span>Active</span>
+            <strong className="users-admin-stat-success">{activeUsers}</strong>
+          </div>
+        </article>
+        <article className="users-admin-stat-card">
+          <div className="users-admin-stat-icon users-admin-stat-icon-info">
+            <AppIcon name="mail" />
+          </div>
+          <div className="users-admin-stat-copy">
+            <span>Invited</span>
+            <strong className="users-admin-stat-info">{invitedUsers}</strong>
+          </div>
+        </article>
+        <article className="users-admin-stat-card">
+          <div className="users-admin-stat-icon users-admin-stat-icon-neutral">
+            <AppIcon name="clock" />
+          </div>
+          <div className="users-admin-stat-copy">
+            <span>Inactive</span>
+            <strong>{inactiveUsers}</strong>
+          </div>
+        </article>
+      </div>
+
+      <div className="users-admin-toolbar-card">
+        <div className="users-admin-searchbox">
+          <AppIcon name="search" />
+          <span>Search users by name, email, or ID...</span>
+        </div>
+        <div className="users-admin-filters">
+          <div className="users-admin-filter">All Roles</div>
+          <div className="users-admin-filter">All Status</div>
+        </div>
+      </div>
+
+      <div className="users-admin-table-card">
+        <table className="users-admin-table">
+          <colgroup>
+            <col className="users-admin-col-user" />
+            <col className="users-admin-col-role" />
+            <col className="users-admin-col-scope" />
+            <col className="users-admin-col-status" />
+            <col className="users-admin-col-last-active" />
+            <col className="users-admin-col-actions" />
+          </colgroup>
+          <thead className="users-admin-table-head">
+            <tr>
+              <th>User</th>
+              <th>Role</th>
+              <th>Access Scope</th>
+              <th>Status</th>
+              <th>Last Active</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {admin.users.map((user, index) => (
+              <tr className="users-admin-table-row" key={user.id}>
+                <td>
+            <div className="users-admin-user-cell">
+              <div className="users-admin-avatar">{buildInitials(user.fullName)}</div>
+              <div className="users-admin-user-copy">
+                <span className="users-admin-user-name">{user.fullName}</span>
+                <span className="users-admin-user-email">{user.email}</span>
+              </div>
+            </div>
+          </td>
+          <td>
+                  <span className={`users-admin-role-pill ${rolePillClassName(user.primaryRole)}`}>
+                    {normalizeRoleLabel(user.primaryRole) ?? "Unassigned"}
+                  </span>
+                </td>
+                <td>
+                  <div className="users-admin-scope-cell">
+                    {buildScopeChips(user.scopeSummary).map((scope) => (
+                      <span key={`${user.id}-${scope}`} className="users-admin-scope-pill">
+                        {scope}
+                      </span>
+                    ))}
+                  </div>
+                </td>
+                <td>
+                  <span className={`users-admin-status-pill ${statusPillClassName(user.status)}`}>
+                    {formatUserStatusLabel(user.status)}
+                  </span>
+                </td>
+                <td
+                  className={`users-admin-last-active${
+                    formatUserLastActive(user.lastActiveAt, index) === "—" ? " is-muted" : ""
+                  }`}
+                >
+                  {formatUserLastActive(user.lastActiveAt, index)}
+                </td>
+                <td className="users-admin-actions-cell" aria-hidden="true">⋮</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div id="invite-user" className="users-admin-footnote">
+        Invite/create user, scope assignment, and approval authority editing remain backed by the admin API and audit log.
+      </div>
+
+      <section
+        id="invite-user-modal"
+        className="users-admin-invite-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="invite-user-modal-title"
+      >
+        <a className="users-admin-invite-backdrop" href={closeInviteHref} aria-label="Close invite user modal" />
+        <article className="users-admin-invite-panel">
+          <header className="users-admin-invite-head">
+            <div className="users-admin-invite-title-block">
+              <h2 id="invite-user-modal-title">Invite User</h2>
+              <p>Send an invitation to a new user to join your organization</p>
+            </div>
+            <a className="users-admin-invite-close" href={closeInviteHref} aria-label="Close invite user modal">
+              ×
+            </a>
+          </header>
+
+          <form className="users-admin-invite-form" method="post" action="/admin/users/invite">
+            <label className="users-admin-invite-field">
+              <span>Full Name</span>
+              <input type="text" name="fullName" placeholder="Enter full name" />
+            </label>
+
+            <label className="users-admin-invite-field">
+              <span>Email Address</span>
+              <input type="email" name="email" placeholder="user@company.com" />
+            </label>
+
+            <label className="users-admin-invite-field">
+              <span>Primary Role</span>
+              <select name="primaryRole" defaultValue="commercial_head">
+                <option value="" disabled>Select a role</option>
+                <option value="commercial_head">Sales Manager</option>
+                <option value="finance_head">Finance Head</option>
+                <option value="ar_rep">AR Rep</option>
+                <option value="collections_rep">Collections Rep</option>
+                <option value="platform_admin">Platform Admin</option>
+              </select>
+            </label>
+
+            <label className="users-admin-invite-field">
+              <span>Access Scope (Optional)</span>
+              <select name="scopeType" defaultValue="">
+                <option value="">Select access scope</option>
+                <option value="tenant">Tenant-wide</option>
+                <option value="branch">Branch</option>
+                <option value="billing_account">Billing account</option>
+                <option value="portfolio">Customer portfolio</option>
+                <option value="team">Team</option>
+              </select>
+            </label>
+
+            <div className="users-admin-invite-actions">
+              <a className="users-admin-invite-cancel" href={closeInviteHref}>Cancel</a>
+              <button type="submit" className="users-admin-invite-submit">Send Invitation</button>
+            </div>
+          </form>
+        </article>
+      </section>
+    </section>
+  );
+};
+
+function buildUsersAdminFallback() {
+  return {
+    users: [
+      {
+        id: "user_platform_admin",
+        tenantId: "default",
+        email: "platform.admin@yield.example",
+        fullName: "Pat Reyes",
+        status: "active" as const,
+        primaryRole: "Platform Admin",
+        roleKeys: ["platform_admin"],
+        scopeSummary: "Tenant-wide",
+        lastActiveAt: "2026-04-20T08:00:00.000Z",
+        approvalAuthoritySummary: "No explicit approval authority",
+      },
+      {
+        id: "user_finance_head",
+        tenantId: "default",
+        email: "finance.head@yield.example",
+        fullName: "Alicia Santos",
+        status: "active" as const,
+        primaryRole: "Finance Head",
+        roleKeys: ["finance_head"],
+        scopeSummary: "Tenant-wide",
+        lastActiveAt: "2026-04-20T10:00:00.000Z",
+        approvalAuthoritySummary: "cash_application",
+      },
+      {
+        id: "user_sales_manager",
+        tenantId: "default",
+        email: "sales.manager@yield.example",
+        fullName: "Miguel Cruz",
+        status: "active" as const,
+        primaryRole: "Sales Manager",
+        roleKeys: ["commercial_head"],
+        scopeSummary: "Tenant-wide",
+        lastActiveAt: "2026-04-20T07:00:00.000Z",
+        approvalAuthoritySummary: "outreach_exception",
+      },
+      {
+        id: "user_ar_rep",
+        tenantId: "default",
+        email: "ar.rep@yield.example",
+        fullName: "Jamie Lim",
+        status: "active" as const,
+        primaryRole: "AR Rep",
+        roleKeys: ["ar_rep"],
+        scopeSummary: "billing account:billing_seed_1",
+        lastActiveAt: "2026-04-20T11:00:00.000Z",
+        approvalAuthoritySummary: "No explicit approval authority",
+      },
+      {
+        id: "user_collections_rep",
+        tenantId: "default",
+        email: "collections.rep@yield.example",
+        fullName: "Tricia Dela Cruz",
+        status: "invited" as const,
+        primaryRole: "Collections Rep",
+        roleKeys: ["collections_rep"],
+        scopeSummary: "team:team_ncr",
+        approvalAuthoritySummary: "No explicit approval authority",
+      },
+    ],
+    selectedUser: undefined,
+    roles: [],
+    permissions: [],
+    auditEvents: [],
+    currentUserAccess: {
+      userId: "user_platform_admin",
+      roleKeys: ["platform_admin"],
+      permissionKeys: ["users.manage", "roles.manage", "tenant_config.manage"],
+      scopedPermissions: [],
+      approvalAuthorities: [],
+    },
+  };
+}
+
+function buildInitials(fullName: string) {
+  const parts = fullName
+    .split(" ")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase() ?? "").join("") || "U";
+}
+
+function normalizeRoleLabel(roleLabel?: string) {
+  switch (roleLabel) {
+    case "Commercial Head / Sales Manager":
+    case "Commercial Head":
+      return "Sales Manager";
+    case "Sales / Collections Rep":
+    case "Sales/Collections Rep":
+      return "Collections Rep";
+    default:
+      return roleLabel;
+  }
+}
+
+function rolePillClassName(roleLabel?: string) {
+  switch (normalizeRoleLabel(roleLabel)) {
+    case "Finance Head":
+      return "is-finance";
+    case "AR Rep":
+      return "is-ar";
+    case "Collections Rep":
+      return "is-collections";
+    case "Sales Manager":
+      return "is-commercial";
+    case "Platform Admin":
+      return "is-admin";
+    default:
+      return "is-neutral";
+  }
+}
+
+function buildScopeChips(scopeSummary: string) {
+  if (!scopeSummary || scopeSummary === "No scopes") {
+    return ["None"];
+  }
+
+  if (scopeSummary === "Tenant-wide") {
+    return ["Tenant-wide"];
+  }
+
+  return scopeSummary.split("|").map((scope) => scope.trim()).filter(Boolean);
+}
+
+function formatApprovalAuthoritySummary(summary: string) {
+  if (summary === "No explicit approval authority") {
+    return "None";
+  }
+
+  return summary
+    .replace("authorities", "authorities")
+    .replace("authority", "authority");
+}
+
+function formatUserStatusLabel(status: "active" | "invited" | "disabled") {
+  switch (status) {
+    case "disabled":
+      return "Inactive";
+    case "invited":
+      return "Invited";
+    default:
+      return "Active";
+  }
+}
+
+function statusPillClassName(status: "active" | "invited" | "disabled") {
+  switch (status) {
+    case "invited":
+      return "is-invited";
+    case "disabled":
+      return "is-inactive";
+    default:
+      return "is-active";
+  }
+}
+
+function formatUserLastActive(lastActiveAt: string | undefined, index: number) {
+  if (!lastActiveAt) {
+    const fallback = ["8h ago", "6h ago", "9h ago", "11h ago", "Mar 15", "—"];
+    return fallback[index] ?? "—";
+  }
+
+  const then = new Date(lastActiveAt).getTime();
+  const now = Date.now();
+  const hours = Math.max(1, Math.round((now - then) / (1000 * 60 * 60)));
+  return `${hours}h ago`;
+}
+
+const AccessControlRolesPage = ({ data }: { data: OperatorConsoleData }) => {
+  const admin = data.accessControlAdmin;
+
+  if (!admin) {
+    return (
+      <section className="page-section">
+        <PageHeader
+          title="Roles & Permissions"
+          description="Role and permission data is unavailable right now."
+        />
+      </section>
+    );
+  }
+
+  return (
+    <section className="page-section">
+      <PageHeader
+        title="Roles & Permissions"
+        description="Sales Manager fully configures templates and workflow strategy. Finance Head owns finance-sensitive controls and approvals."
+      />
+
+      <div className="card-grid card-grid-2">
+        {admin.roles.map((role) => (
+          <article className="detail-card" key={role.key}>
+            <div className="title-with-pills">
+              <h2>{role.label}</h2>
+              <span className="pill pill-neutral">{role.assignedUserCount} users</span>
+            </div>
+            <p>{role.description}</p>
+            <p><strong>View:</strong> {role.capabilitySummary.view.join(", ") || "None"}</p>
+            <p><strong>Edit:</strong> {role.capabilitySummary.edit.join(", ") || "None"}</p>
+            <p><strong>Approve:</strong> {role.capabilitySummary.approve.join(", ") || "None"}</p>
+            <p><strong>Configure:</strong> {role.capabilitySummary.configure.join(", ") || "None"}</p>
+          </article>
+        ))}
+      </div>
+
+      <article className="detail-card">
+        <h2>Permission matrix</h2>
+        <div className="table-grid">
+          <div className="table-head">Permission</div>
+          <div className="table-head">Domain</div>
+          <div className="table-head">Description</div>
+          {admin.permissions.map((permission) => (
+            <React.Fragment key={permission.key}>
+              <div className="table-cell"><strong>{permission.key}</strong></div>
+              <div className="table-cell">{permission.domain}</div>
+              <div className="table-cell">{permission.description}</div>
+            </React.Fragment>
+          ))}
+        </div>
+      </article>
+
+      <article className="detail-card">
+        <h2>Audit / change history</h2>
+        <ul>
+          {admin.auditEvents.map((event) => (
+            <li key={event.id}>
+              {event.occurredAt.slice(0, 10)} · {event.action} · {event.actorId}
+            </li>
+          ))}
+        </ul>
+      </article>
+    </section>
+  );
+};
+
 const CustomersPage = ({
   data,
   selectedCustomerId,
   activeTab,
+  callStatus,
+  callMessage,
+  emailStatus,
+  emailMessage,
 }: {
   data: OperatorConsoleData;
   selectedCustomerId?: string;
   activeTab?: string;
+  callStatus?: "started" | "failed";
+  callMessage?: string;
+  emailStatus?: "sent" | "approval_needed" | "failed";
+  emailMessage?: string;
 }) => {
   const selectedCustomer =
     data.customerIndex.find((item) => item.profileId === selectedCustomerId) ??
@@ -3721,10 +6291,10 @@ const CustomersPage = ({
                   <span>Filter</span>
                 </button>
               </div>
-              <a className="customers-export-button" href="/data-sources">
+              <button type="button" className="customers-export-button">
                 <AppIcon name="download" />
                 <span>Export</span>
-              </a>
+              </button>
             </div>
           </div>
 
@@ -3739,7 +6309,7 @@ const CustomersPage = ({
               <div className="customers-table-head">Open Invoices</div>
               <div className="customers-table-head">Oldest Due Date</div>
               <div className="customers-table-head amount">Balance</div>
-              {data.customerIndex.map((customer) => {
+              {data.customerIndex.length > 0 ? data.customerIndex.map((customer) => {
                 const detail = buildCustomerDetailViewModel(data, customer);
 
                 return (
@@ -3768,7 +6338,12 @@ const CustomersPage = ({
                     <div className="customers-table-cell amount">{customer.openAmount}</div>
                   </React.Fragment>
                 );
-              })}
+              }) : (
+                <div className="customers-empty-row">
+                  <strong>No customers loaded.</strong>
+                  <span>Connect ERP/customer profile data or import invoices to populate customer records.</span>
+                </div>
+              )}
             </div>
           </article>
         </div>
@@ -3777,10 +6352,22 @@ const CustomersPage = ({
   }
 
   const detail = buildCustomerDetailViewModel(data, selectedCustomer);
+  const defaultSenderIdentity =
+    data.emailSendingIdentities.find(
+      (identity) => identity.connectionStatus === "connected" && identity.isDefault,
+    ) ??
+    data.emailSendingIdentities.find((identity) => identity.connectionStatus === "connected");
   const availableTabs = selectedCustomer.tabs.filter((tab) =>
-    ["overview", "invoices", "tasks", "activity", "payments", "ap_portal"].includes(tab.id),
+    ["overview", "invoices", "tasks", "activity", "payments"].includes(tab.id),
   );
   const resolvedTab = resolveCustomerTab(activeTab, availableTabs);
+  const callPhoneNumber = normalizeCallablePhone(detail.primaryPhone);
+  const callTarget = callPhoneNumber ? detail.rawComposeEmail : undefined;
+  const emailTarget = detail.rawComposeEmail?.contact.isVerified && detail.rawComposeEmail.contact.allowAutoSend
+    ? detail.rawComposeEmail
+    : undefined;
+  const customerEmailTemplates = getAvailableCollectionsEmailTemplates(data);
+  const outreachEnrollment = resolveCustomerWorkflowEnrollment(data, selectedCustomer);
 
   return (
     <section className="page-section">
@@ -3800,11 +6387,65 @@ const CustomersPage = ({
               <button type="button" className="customers-icon-button" aria-label="Edit customer">
                 <AppIcon name="edit" />
               </button>
-              <button type="button" className="customers-dark-button">
-                <AppIcon name="mail" />
-                <span>Email</span>
-              </button>
-              <button type="button" className="customers-outline-button">Pause Outreach</button>
+              {callTarget ? (
+                <a className="customers-dark-button" href="#customer-call-modal">
+                  <AppIcon name="phone" />
+                  <span>Call</span>
+                </a>
+              ) : (
+                <button type="button" className="customers-dark-button" disabled>
+                  <AppIcon name="phone" />
+                  <span>Call unavailable</span>
+                </button>
+              )}
+              {emailTarget && defaultSenderIdentity ? (
+                <a className="customers-dark-button" href="#customer-email-modal">
+                  <AppIcon name="mail" />
+                  <span>Email</span>
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  className="customers-dark-button"
+                  disabled
+                  title={
+                    defaultSenderIdentity
+                      ? "Add a verified customer email before sending outreach."
+                      : "Connect a sending mailbox before sending customer email."
+                  }
+                >
+                  <AppIcon name="mail" />
+                  <span>{defaultSenderIdentity ? "Email unavailable" : "Connect email first"}</span>
+                </button>
+              )}
+              <form method="post" action="/customers/tasks/create">
+                <input type="hidden" name="customerId" value={selectedCustomer.profileId} />
+                <input type="hidden" name="customerName" value={selectedCustomer.canonicalName} />
+                <input type="hidden" name="billingAccountId" value={selectedCustomer.billingAccountId ?? selectedCustomer.profileId} />
+                <button type="submit" className="customers-outline-button">Create Task</button>
+              </form>
+              <a
+                className="customers-outline-button"
+                href={`/customers/soa?customer=${encodeURIComponent(selectedCustomer.profileId)}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Generate SOA
+              </a>
+              {outreachEnrollment ? (
+                <form
+                  method="post"
+                  action={outreachEnrollment.status === "paused" ? "/customers/outreach/resume" : "/customers/outreach/pause"}
+                >
+                  <input type="hidden" name="customerId" value={selectedCustomer.profileId} />
+                  <input type="hidden" name="workflowId" value={outreachEnrollment.workflowId} />
+                  <input type="hidden" name="executionId" value={outreachEnrollment.executionId} />
+                  <input type="hidden" name="reason" value="Operator changed outreach state from customer profile." />
+                  <button type="submit" className="customers-outline-button">
+                    {outreachEnrollment.status === "paused" ? "Resume Outreach" : "Pause Outreach"}
+                  </button>
+                </form>
+              ) : null}
             </div>
           </div>
 
@@ -3819,6 +6460,30 @@ const CustomersPage = ({
               </a>
             ))}
           </div>
+          {callStatus ? (
+            <div className={`customers-call-status is-${callStatus}`} id="customer-call-status">
+              <AppIcon name={callStatus === "started" ? "phone" : "alert"} />
+              <span>
+                {callMessage ??
+                  (callStatus === "started"
+                    ? "Call started. Activity and tasks will update as Retell posts outcomes."
+                    : "Call could not be started.")}
+              </span>
+            </div>
+          ) : null}
+          {emailStatus ? (
+            <div className={`customers-call-status is-${emailStatus === "failed" ? "failed" : "started"}`} id="customer-email-status">
+              <AppIcon name={emailStatus === "failed" ? "alert" : "mail"} />
+              <span>
+                {emailMessage ??
+                  (emailStatus === "sent"
+                    ? "Email sent."
+                    : emailStatus === "approval_needed"
+                      ? "Email is queued for approval before sending."
+                      : "Email could not be sent.")}
+              </span>
+            </div>
+          ) : null}
         </div>
 
         {resolvedTab === "overview" ? (
@@ -3852,12 +6517,17 @@ const CustomersPage = ({
                       </div>
                       <div className="customers-contact-actions">
                         <span className={`pill ${contact.verified ? "pill-info" : "pill-neutral"}`}>
-                          {contact.verified ? "Verified" : "Internal"}
+                          {contact.verified ? "Verified" : "Unverified"}
                         </span>
                         <span className="more-dot">⋯</span>
                       </div>
                     </div>
                   ))}
+                  {detail.contacts.length === 0 ? (
+                    <div className="customers-contact-empty">
+                      Add a verified email or phone number before starting outbound customer communication.
+                    </div>
+                  ) : null}
                 </div>
               </article>
             </div>
@@ -3930,7 +6600,7 @@ const CustomersPage = ({
               {detail.invoices.map((invoice) => (
                 <React.Fragment key={invoice.id}>
                   <div className="customers-table-cell"><span className="fake-checkbox" /></div>
-                  <div className="customers-table-cell"><a className="customers-primary-link" href="/invoice-detail">{invoice.invoiceNumber}</a></div>
+                  <div className="customers-table-cell"><a className="customers-primary-link" href={buildInvoiceDetailHref(invoice.invoiceNumber)}>{invoice.invoiceNumber}</a></div>
                   <div className="customers-table-cell">{selectedCustomer.canonicalName}</div>
                   <div className="customers-table-cell">{invoice.dueDate ?? "—"}</div>
                   <div className="customers-table-cell">{invoice.issuedAt ?? "—"}</div>
@@ -3996,7 +6666,7 @@ const CustomersPage = ({
                   </div>
                   <div>
                     <div className="customers-activity-heading">
-                      <strong>Received</strong>
+                      <strong>{item.label ?? "Received"}</strong>
                       <span>{item.channel}</span>
                     </div>
                     <p>{item.reference}</p>
@@ -4056,7 +6726,198 @@ const CustomersPage = ({
             </div>
           </article>
         ) : null}
+
+        {callTarget ? (
+          <CustomerCallModal
+            customer={selectedCustomer}
+            account={callTarget.account}
+            contact={callTarget.contact}
+            invoices={callTarget.invoices}
+            {...(callPhoneNumber ? { phoneNumber: callPhoneNumber } : {})}
+          />
+        ) : null}
+        {emailTarget ? (
+          <CustomerEmailModal
+            customer={selectedCustomer}
+            composeEmail={emailTarget}
+            senderIdentities={data.emailSendingIdentities}
+            templates={customerEmailTemplates}
+          />
+        ) : null}
       </div>
+    </section>
+  );
+};
+
+const CustomerCallModal = ({
+  customer,
+  account,
+  contact,
+  invoices,
+  phoneNumber,
+}: {
+  customer: OperatorConsoleData["customerIndex"][number];
+  account: NonNullable<TaskQueueItem["composeEmail"]>["account"];
+  contact: NonNullable<TaskQueueItem["composeEmail"]>["contact"];
+  invoices: NonNullable<TaskQueueItem["composeEmail"]>["invoices"];
+  phoneNumber?: string;
+}) => (
+  <div className="customer-call-modal" id="customer-call-modal" role="dialog" aria-modal="true" aria-labelledby="customer-call-modal-title">
+    <a className="customer-call-backdrop" href={buildCustomerHref(customer.profileId)} aria-label="Close call dialog" />
+    <form method="post" action="/customers/call/start" className="customer-call-panel" data-customer-call-form>
+      <div className="customer-call-head">
+        <div>
+          <h2 id="customer-call-modal-title">Call {customer.canonicalName}</h2>
+          <p>Start a Retell collections call using the current billing account and verified context.</p>
+        </div>
+        <a className="customer-call-close" href={buildCustomerHref(customer.profileId)} aria-label="Close">
+          ×
+        </a>
+      </div>
+
+      <input type="hidden" name="customerId" value={customer.profileId} />
+      <input type="hidden" name="customerName" value={customer.canonicalName} />
+      <input type="hidden" name="accountJson" value={JSON.stringify(account)} />
+      <input type="hidden" name="contactJson" value={JSON.stringify(contact)} />
+      <input type="hidden" name="invoicesJson" value={JSON.stringify(invoices)} />
+
+      <label className="customer-call-field">
+        <span>Phone number</span>
+        <input
+          type="tel"
+          name="phoneNumber"
+          defaultValue={phoneNumber ?? ""}
+          placeholder="+63 917 000 0000"
+          required
+          pattern="^\\+?[0-9][0-9 .()\\-]{6,}$"
+        />
+      </label>
+      <p className="customer-call-helper">The API will still apply Retell pre-call safety checks before dialing.</p>
+
+      <div className="customer-call-actions">
+        <a href={buildCustomerHref(customer.profileId)} className="customers-outline-button">Cancel</a>
+        <button type="submit" className="customers-dark-button" data-loading-label="Calling...">
+          <AppIcon name="phone" />
+          <span>Call</span>
+        </button>
+      </div>
+    </form>
+  </div>
+);
+
+const CustomerEmailModal = ({
+  customer,
+  composeEmail,
+  senderIdentities,
+  templates,
+}: {
+  customer: OperatorConsoleData["customerIndex"][number];
+  composeEmail: NonNullable<TaskQueueItem["composeEmail"]>;
+  senderIdentities: EmailSendingIdentityItem[];
+  templates: ReturnType<typeof getAvailableCollectionsEmailTemplates>;
+}) => {
+  const connectedSenders = senderIdentities.filter((identity) => identity.connectionStatus === "connected");
+  const defaultSender =
+    connectedSenders.find((identity) => identity.isDefault) ??
+    connectedSenders[0];
+  const canSend = Boolean(defaultSender && composeEmail.contact.isVerified && composeEmail.contact.allowAutoSend);
+  const draft = composeEmail.draft;
+
+  return (
+    <section id="customer-email-modal" className="collections-compose-modal customer-email-modal">
+      <a className="collections-compose-backdrop" href={buildCustomerHref(customer.profileId)} aria-label="Close customer email" />
+      <article className="collections-compose-panel customer-email-panel" role="dialog" aria-modal="true" aria-labelledby="customer-email-modal-title">
+        <div className="collections-compose-header">
+          <div>
+            <h2 id="customer-email-modal-title">Email {customer.canonicalName}</h2>
+            <p>Send through the connected outbound mailbox using verified customer contact context.</p>
+          </div>
+          <a className="collections-compose-close" href={buildCustomerHref(customer.profileId)} aria-label="Close">×</a>
+        </div>
+
+        <form method="post" action="/customers/email/send" className="collections-compose-form collections-email-compose-form">
+          <input type="hidden" name="customerId" value={customer.profileId} />
+          <input type="hidden" name="customerName" value={customer.canonicalName} />
+          <input type="hidden" name="accountJson" value={JSON.stringify(composeEmail.account)} />
+          <input type="hidden" name="contactJson" value={JSON.stringify(composeEmail.contact)} />
+          <input type="hidden" name="invoicesJson" value={JSON.stringify(composeEmail.invoices)} />
+
+          <div className="collections-email-template-panel">
+            {templates.length > 0 ? (
+              <>
+                <label className="collections-email-field">
+                  <span>Email template</span>
+                  <select data-email-template-select defaultValue="">
+                    <option value="">Choose a Control Center template</option>
+                    {templates.map((template) => (
+                      <option
+                        key={template.id}
+                        value={template.id}
+                        data-template-subject={renderCustomerTemplateText(template.subject, customer, composeEmail)}
+                        data-template-body={renderCustomerTemplateText(template.body, customer, composeEmail)}
+                      >
+                        {template.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" className="ghost-button" data-email-template-apply>
+                  Apply template
+                </button>
+              </>
+            ) : (
+              <div className="collections-email-empty compact">
+                <strong>No email templates available.</strong>
+                <span>Create an email-compatible template in Control Center to use it here.</span>
+              </div>
+            )}
+          </div>
+
+          <div className="collections-compose-grid">
+            <label className="collections-email-field">
+              <span>From</span>
+              <select name="senderIdentityId" defaultValue={defaultSender?.id ?? ""} required>
+                {connectedSenders.length > 0 ? (
+                  connectedSenders.map((identity) => (
+                    <option key={identity.id} value={identity.id}>
+                      {identity.displayName ? `${identity.displayName} <${identity.senderEmail}>` : identity.senderEmail}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No connected mailbox</option>
+                )}
+              </select>
+            </label>
+            <label className="collections-email-field">
+              <span>To</span>
+              <input name="toEmail" type="email" defaultValue={composeEmail.contact.email} readOnly />
+            </label>
+            <label className="collections-email-field collections-email-subject-field">
+              <span>Subject</span>
+              <input name="subjectLine" defaultValue={draft.subjectLine} required />
+            </label>
+          </div>
+
+          <label className="collections-email-field collections-email-body-field">
+            <span>Body</span>
+            <textarea name="bodyPreview" className="collections-compose-textarea" defaultValue={draft.body} required />
+          </label>
+
+          {!canSend ? (
+            <div className="collections-email-empty compact">
+              <strong>Email is unavailable.</strong>
+              <span>Add a verified contact and connected sender before sending customer outreach.</span>
+            </div>
+          ) : null}
+
+          <div className="collections-compose-footer">
+            <a href={buildCustomerHref(customer.profileId)} className="ghost-button">Discard</a>
+            <button type="submit" className="primary-button" disabled={!canSend}>
+              Send
+            </button>
+          </div>
+        </form>
+      </article>
     </section>
   );
 };
@@ -4068,6 +6929,11 @@ function buildCustomerHref(customerId: string, tab?: CustomerProfileTabId) {
   }
 
   return `/customers?${search.toString()}`;
+}
+
+function buildInvoiceDetailHref(invoiceNumber: string) {
+  const search = new URLSearchParams({ invoice: invoiceNumber });
+  return `/invoice-detail?${search.toString()}`;
 }
 
 function resolveCustomerTab(
@@ -4090,7 +6956,13 @@ function buildCustomerDetailViewModel(
 ) {
   const invoices = data.invoiceIndex.invoices.filter((invoice) => invoiceMatchesCustomer(invoice, customer));
   const queueItem = data.collectionsQueue.find((item) => collectionMatchesCustomer(item, customer));
-  const payments = data.paymentsQueue.filter((item) => paymentMatchesCustomer(item, customer));
+  const liveDetail =
+    data.liveCustomerProfileDetail &&
+    (data.customerProfile.profileId === customer.profileId ||
+      data.customerProfile.profileId === customer.billingAccountId)
+      ? data.liveCustomerProfileDetail
+      : undefined;
+  const payments = liveDetail?.payments ?? data.paymentsQueue.filter((item) => paymentMatchesCustomer(item, customer));
   const notesMatchSelectedProfile = data.customerProfile.profileId === customer.profileId;
   const insightSource = notesMatchSelectedProfile ? data.customerProfile : undefined;
   const learning = notesMatchSelectedProfile ? data.accountWorkspace.learning : undefined;
@@ -4102,24 +6974,33 @@ function buildCustomerDetailViewModel(
     (left.dueDate ?? "9999-12-31").localeCompare(right.dueDate ?? "9999-12-31"),
   )[0];
 
-  const tasks = buildCustomerTasks(customer, queueItem, overdueInvoiceCount);
-  const activity = buildCustomerActivity(customer, queueItem, payments);
-  const contacts = buildCustomerContacts(customer, queueItem);
+  const tasks = liveDetail?.tasks ?? buildCustomerTasks(customer, queueItem, overdueInvoiceCount);
+  const activity = buildCustomerActivity(customer, queueItem, payments, data.callInbox.calls);
+  const invoiceContact = findCustomerInvoiceContact(customer, queueItem, invoices);
+  const contacts = liveDetail?.contacts ?? buildCustomerContacts(invoiceContact);
+  const fallbackComposeEmail = buildCustomerComposeContext({
+    customer,
+    invoices,
+    contact: invoiceContact,
+  });
+  const fallbackInsights = [
+    `${customer.canonicalName} has ${customer.openInvoiceCount} open invoice${customer.openInvoiceCount === 1 ? "" : "s"} under review.`,
+    customer.overdueAmount !== "₱0"
+      ? `Overdue balance remains at ${customer.overdueAmount}; keep operator visibility high.`
+      : "No overdue balance is blocking safe outreach right now.",
+    ...(customer.primaryContactEmail
+      ? [`${customer.primaryContactEmail} remains the safest surfaced contact for follow-up.`]
+      : []),
+  ];
   const insights = learning
     ? [
         learning.accountPaymentBehaviorSummary.summary,
         learning.preferredSendTiming.reasonSummary,
         learning.preferredContactRecommendation.reasonSummary,
       ]
-    : [
-        `${customer.canonicalName} has ${customer.openInvoiceCount} open invoice${customer.openInvoiceCount === 1 ? "" : "s"} under review.`,
-        customer.overdueAmount !== "₱0"
-          ? `Overdue balance remains at ${customer.overdueAmount}; keep operator visibility high.`
-          : "No overdue balance is blocking safe outreach right now.",
-        customer.primaryContactEmail
-          ? `${customer.primaryContactEmail} remains the safest surfaced contact for follow-up.`
-          : "No verified contact is surfaced yet, so automation must stay conservative.",
-      ];
+    : liveDetail?.insights && liveDetail.insights.length > 0
+      ? liveDetail.insights
+      : fallbackInsights;
 
   return {
     invoices,
@@ -4144,9 +7025,10 @@ function buildCustomerDetailViewModel(
     sourceLabel: invoices[0]?.sourceLabel ?? "File Sync",
     externalId: invoices[0]?.externalId ?? `${customer.profileId}-external`,
     hierarchySummary:
-      customer.parentAccountName
+      liveDetail?.hierarchySummary ??
+      (customer.parentAccountName
         ? `parent ${customer.parentAccountName} | billing ${customer.billingAccountId ?? customer.profileId} | branch preserved when known`
-        : `billing ${customer.billingAccountId ?? customer.profileId} | branch preserved when known`,
+        : `billing ${customer.billingAccountId ?? customer.profileId} | branch preserved when known`),
     oldestDueDate: oldestInvoice?.dueDate ?? "—",
     lastOutreach: queueItem?.dueLabel ?? "12 minutes ago",
     openInvoicesLabel:
@@ -4154,13 +7036,16 @@ function buildCustomerDetailViewModel(
         ? `${invoices[0].invoiceNumber} and ${Math.max(invoices.length - 1, 0)} more`
         : `${customer.openInvoiceCount}`,
     overdueInvoiceCount,
-    primaryEmail: customer.primaryContactEmail ?? queueItem?.contactEmail ?? "No verified email",
-    primaryPhone: queueItem?.contactName ? "+63 917 000 0000" : "No verified phone",
+    primaryEmail: liveDetail?.primaryEmail ?? invoiceContact.email ?? "No verified email",
+    primaryPhone: liveDetail?.primaryPhone ?? invoiceContact.phone ?? "No verified phone",
     creditAmount: customer.disputedAmount !== "₱0" ? "₱0.00" : "₱0.00",
-    portalStatus: customer.primaryContactEmail ? "Configured" : "Needs setup",
-    portalType: customer.parentAccountName ? "Customer portal with centralized payer access" : "Customer portal",
-    portalStatementAccess: customer.openInvoiceCount > 0 ? "Statements available" : "No open statements",
+    portalStatus: liveDetail?.portalStatus ?? (customer.primaryContactEmail ? "Configured" : "Needs setup"),
+    portalType: liveDetail?.portalType ?? (customer.parentAccountName ? "Customer portal with centralized payer access" : "Customer portal"),
+    portalStatementAccess: liveDetail?.portalStatementAccess ?? (customer.openInvoiceCount > 0 ? "Statements available" : "No open statements"),
     tagLabel: customer.hasPendingReview ? "Needs review" : "No tags",
+    ...(liveDetail?.rawComposeEmail ?? fallbackComposeEmail
+      ? { rawComposeEmail: liveDetail?.rawComposeEmail ?? fallbackComposeEmail }
+      : {}),
   };
 }
 
@@ -4203,6 +7088,7 @@ function buildCustomerActivity(
   customer: OperatorConsoleData["customerIndex"][number],
   queueItem: CollectionsQueueItem | undefined,
   payments: PaymentQueueItem[],
+  calls: OperatorConsoleData["callInbox"]["calls"],
 ) {
   const primaryEmail = customer.primaryContactEmail ?? queueItem?.contactEmail ?? "No verified email";
   const references = payments.length > 0
@@ -4210,8 +7096,10 @@ function buildCustomerActivity(
     : `Open invoices ${customer.openInvoiceCount}`;
 
   return [
+    ...buildCustomerCallActivity(customer, calls),
     {
       id: `${customer.profileId}-phone-activity`,
+      label: "Received",
       kind: "phone" as const,
       channel: queueItem?.contactName ?? "+63 917 000 0000",
       reference: `${references} and ${Math.max(customer.openInvoiceCount - 1, 0)} more`,
@@ -4221,6 +7109,7 @@ function buildCustomerActivity(
     },
     {
       id: `${customer.profileId}-email-activity`,
+      label: "Received",
       kind: "mail" as const,
       channel: primaryEmail,
       reference: customer.nextAction,
@@ -4231,24 +7120,317 @@ function buildCustomerActivity(
   ];
 }
 
-function buildCustomerContacts(
+function buildCustomerCallActivity(
+  customer: OperatorConsoleData["customerIndex"][number],
+  calls: OperatorConsoleData["callInbox"]["calls"],
+) {
+  return calls
+    .filter((call) => callMatchesCustomer(call, customer))
+    .flatMap((call) => {
+      const base = {
+        kind: "phone" as const,
+        channel: call.customerPhone ?? call.toNumber ?? call.fromNumber ?? "Retell call",
+        dateLabel: formatCustomerActivityDate(call.endedAt ?? call.startedAt),
+        timeAgo: formatRelativeTime(call.endedAt ?? call.startedAt),
+      };
+      const lifecycleItems = [
+        {
+          id: `${call.id}-call-initiated`,
+          label: "Call initiated",
+          reference: `${call.providerCallId} started from ${call.requestedBy ?? "Retell workflow"}.`,
+          tags: ["Call", "Retell", titleCase(call.direction)],
+          at: call.startedAt,
+        },
+        ...(call.status === "completed" || call.status === "needs_review"
+          ? [
+              {
+                id: `${call.id}-call-completed`,
+                label: "Call completed",
+                reference: call.summary ?? `${formatCallDuration(call.durationSeconds)} ${titleCase(call.status)} call.`,
+                tags: ["Call", titleCase(call.status), sentimentSymbol(call.sentiment)],
+                at: call.endedAt ?? call.startedAt,
+              },
+            ]
+          : []),
+        ...(call.summary || call.disposition
+          ? [
+              {
+                id: `${call.id}-call-outcome`,
+                label: "Call outcome recorded",
+                reference: call.summary ?? humanize(call.disposition ?? "call outcome"),
+                tags: ["Outcome", ...call.classifications.slice(0, 2)],
+                at: call.updatedAt,
+              },
+            ]
+          : []),
+        ...(call.openTasksCount > 0
+          ? [
+              {
+                id: `${call.id}-tasks-created`,
+                label: "Tasks created from call",
+                reference: call.taskRefs.map((task) => task.title).join(", "),
+                tags: ["Tasks", `${call.openTasksCount} open`],
+                at: call.updatedAt,
+              },
+            ]
+          : []),
+      ];
+
+      return lifecycleItems.map((item) => ({
+        ...base,
+        ...item,
+        dateLabel: formatCustomerActivityDate(item.at),
+        timeAgo: formatRelativeTime(item.at),
+      }));
+    })
+    .sort((left, right) => new Date(right.at).getTime() - new Date(left.at).getTime())
+    .slice(0, 6);
+}
+
+function callMatchesCustomer(
+  call: OperatorConsoleData["callInbox"]["calls"][number],
+  customer: OperatorConsoleData["customerIndex"][number],
+) {
+  const identifiers = new Set(
+    [customer.profileId, customer.billingAccountId, customer.billingAccountName, customer.canonicalName]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.toLowerCase()),
+  );
+  return [
+    call.billingAccountId,
+    call.parentAccountId,
+    call.customerName,
+  ].some((value) => value && identifiers.has(value.toLowerCase()));
+}
+
+function formatCustomerActivityDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Unknown";
+  }
+  return date.toLocaleDateString("en-PH", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function normalizeCallablePhone(value?: string) {
+  const phone = value?.trim();
+  if (!phone || /^No verified phone$/i.test(phone)) {
+    return undefined;
+  }
+  return phone;
+}
+
+type CustomerInvoiceContact = {
+  name: string;
+  email?: string;
+  phone?: string;
+  verified: boolean;
+};
+
+function findCustomerInvoiceContact(
   customer: OperatorConsoleData["customerIndex"][number],
   queueItem: CollectionsQueueItem | undefined,
-) {
-  const primaryEmail = customer.primaryContactEmail ?? queueItem?.contactEmail ?? "ap@customer.example";
+  invoices: OperatorConsoleData["invoiceIndex"]["invoices"],
+): CustomerInvoiceContact {
+  const metadataContact = invoices.map(readInvoiceContactFromMetadata).find((contact) => contact.email || contact.phone);
+  const email = customer.primaryContactEmail ?? queueItem?.contactEmail ?? metadataContact?.email;
+  const phone = metadataContact?.phone;
+  const verified = Boolean(customer.primaryContactEmail ?? queueItem?.contactEmail);
+
+  return {
+    name: queueItem?.contactName ?? metadataContact?.name ?? customer.canonicalName,
+    ...(email ? { email } : {}),
+    ...(phone ? { phone } : {}),
+    verified,
+  };
+}
+
+function readInvoiceContactFromMetadata(
+  invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number],
+): Partial<CustomerInvoiceContact> {
+  const metadata = invoice.metadata ?? {};
+  const name = readFirstString(metadata, ["contactName", "customerContactName", "primaryContactName", "billToContactName"]);
+  const email = readFirstEmail(metadata, ["email", "contactEmail", "customerEmail", "primaryContactEmail", "billToEmail", "apEmail"]);
+  const phone = readFirstPhone(metadata, ["contactPhone", "customerPhone", "primaryContactPhone", "billToPhone", "mobilePhone"]);
+  return {
+    ...(name ? { name } : {}),
+    ...(email ? { email } : {}),
+    ...(phone ? { phone } : {}),
+  };
+}
+
+function buildCustomerContacts(contact: CustomerInvoiceContact) {
+  if (!contact.email) {
+    return [];
+  }
 
   return [
     {
-      name: customer.canonicalName,
-      email: primaryEmail,
-      verified: Boolean(customer.primaryContactEmail ?? queueItem?.contactEmail),
-    },
-    {
-      name: queueItem?.contactName ?? "Collections Contact",
-      email: customer.primaryContactEmail ?? "collections@example.com",
-      verified: false,
+      name: contact.name,
+      email: contact.email,
+      verified: contact.verified,
     },
   ];
+}
+
+function buildCustomerComposeContext(input: {
+  customer: OperatorConsoleData["customerIndex"][number];
+  invoices: OperatorConsoleData["invoiceIndex"]["invoices"];
+  contact: CustomerInvoiceContact;
+}): NonNullable<TaskQueueItem["composeEmail"]> | undefined {
+  const openInvoices = input.invoices.filter((invoice) => invoice.openAmountCents > 0);
+  const composeInvoices = (openInvoices.length > 0 ? openInvoices : input.invoices).map(mapInvoiceIndexEntryToComposeInvoice);
+  if (!input.contact.email || composeInvoices.length === 0) {
+    return undefined;
+  }
+
+  const firstInvoice = input.invoices[0];
+  const accountId = input.customer.billingAccountId ?? input.customer.profileId;
+  const now = new Date().toISOString();
+  const contactVerified = input.contact.verified;
+
+  return {
+    account: {
+      id: accountId,
+      createdAt: now,
+      updatedAt: now,
+      parentAccountId: firstInvoice?.parentAccountId ?? input.customer.profileId,
+      ...(firstInvoice?.branchId ? { branchId: firstInvoice.branchId } : {}),
+      accountNumber: input.customer.billingAccountId ?? input.customer.profileId,
+      displayName: input.customer.billingAccountName ?? input.customer.canonicalName,
+      currency: firstInvoice?.currency ?? "PHP",
+      accountTier: input.customer.accountTier === "strategic" ? "strategic" : "standard",
+      status: "active",
+      centrallyPaid: Boolean(input.customer.parentAccountName),
+      metadata: {
+        source: "customer_invoice_index",
+        ...(input.customer.parentAccountName ? { parentAccountName: input.customer.parentAccountName } : {}),
+      },
+    },
+    contact: {
+      id: `contact-${sanitizeDomId(accountId)}-${sanitizeDomId(input.contact.email)}`,
+      createdAt: now,
+      updatedAt: now,
+      parentAccountId: firstInvoice?.parentAccountId ?? input.customer.profileId,
+      billingAccountId: accountId,
+      ...(firstInvoice?.branchId ? { branchId: firstInvoice.branchId } : {}),
+      scope: "billing_account",
+      scopeId: accountId,
+      fullName: input.contact.name,
+      email: input.contact.email,
+      ...(input.contact.phone ? { phone: input.contact.phone } : {}),
+      role: input.contact.email.startsWith("ap@") ? "ap" : "customer",
+      isPrimary: true,
+      isVerified: contactVerified,
+      allowAutoSend: contactVerified,
+      recentSuccessfulResponses: 0,
+      metadata: {
+        source: contactVerified ? "verified_customer_profile" : "imported_invoice_metadata",
+        requiresVerificationBeforeAutoSend: !contactVerified,
+      },
+    },
+    invoices: composeInvoices,
+    draft: buildCustomerEmailDraftFallback({
+      customerName: input.customer.canonicalName,
+      contactName: input.contact.name,
+      invoices: composeInvoices,
+    }),
+  };
+}
+
+function mapInvoiceIndexEntryToComposeInvoice(
+  invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number],
+): NonNullable<TaskQueueItem["composeEmail"]>["invoices"][number] {
+  const now = new Date().toISOString();
+  return {
+    id: invoice.canonicalInvoiceId ?? invoice.id,
+    createdAt: invoice.issuedAt ?? now,
+    updatedAt: invoice.lastImportedAt ?? now,
+    state: mapInvoiceStatusToComposeState(invoice.status),
+    parentAccountId: invoice.parentAccountId ?? invoice.billingAccountId ?? invoice.customerName,
+    billingAccountId: invoice.billingAccountId ?? invoice.customerName,
+    ...(invoice.branchId ? { branchId: invoice.branchId } : {}),
+    ...(invoice.issuedAt ? { invoiceDate: invoice.issuedAt } : {}),
+    invoiceNumber: invoice.invoiceNumber,
+    currency: invoice.currency,
+    amountCents: invoice.openAmountCents > 0 ? invoice.openAmountCents : invoice.totalAmountCents,
+    ...(invoice.dueDate ? { dueDate: invoice.dueDate } : {}),
+    ...(invoice.overdueAmountCents ? { disputedAmountCents: invoice.overdueAmountCents } : {}),
+    metadata: {
+      ...invoice.metadata,
+      sourceProvider: invoice.sourceProvider,
+      sourceLabel: invoice.sourceLabel,
+      customerName: invoice.customerName,
+    },
+  };
+}
+
+function mapInvoiceStatusToComposeState(
+  status: OperatorConsoleData["invoiceIndex"]["invoices"][number]["status"],
+): NonNullable<TaskQueueItem["composeEmail"]>["invoices"][number]["state"] {
+  if (status === "paid") {
+    return "paid";
+  }
+  if (status === "partial") {
+    return "partially_paid";
+  }
+  if (status === "disputed") {
+    return "disputed_full";
+  }
+  if (status === "voided") {
+    return "voided";
+  }
+  return "synced_open";
+}
+
+function buildCustomerEmailDraftFallback(input: {
+  customerName: string;
+  contactName: string;
+  invoices: NonNullable<TaskQueueItem["composeEmail"]>["invoices"];
+}) {
+  const invoiceSummary = input.invoices
+    .slice(0, 5)
+    .map((invoice) => `${invoice.invoiceNumber} (${formatCustomerCurrency(invoice.amountCents)})`)
+    .join(", ");
+
+  return {
+    subjectLine: `Statement follow-up for ${input.customerName}`,
+    body: [
+      `Hi ${input.contactName},`,
+      "",
+      `We're following up on the open invoice${input.invoices.length === 1 ? "" : "s"} currently on your account: ${invoiceSummary}.`,
+      "",
+      "Please let us know if payment has already been scheduled or if you need copies of the invoice or statement of account.",
+      "",
+      "Thank you,",
+      "AR Team",
+    ].join("\n"),
+    generatedBy: "fallback" as const,
+    note: "Draft generated from imported invoice context. Unverified contacts still require approval before sending.",
+  };
+}
+
+function readFirstString(metadata: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function readFirstEmail(metadata: Record<string, unknown>, keys: string[]) {
+  const value = readFirstString(metadata, keys);
+  return value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value : undefined;
+}
+
+function readFirstPhone(metadata: Record<string, unknown>, keys: string[]) {
+  const value = readFirstString(metadata, keys);
+  return value && /^\+?[0-9][0-9 .()-]{6,}$/.test(value) ? value : undefined;
 }
 
 function invoiceMatchesCustomer(
@@ -4260,6 +7442,35 @@ function invoiceMatchesCustomer(
     invoice.billingAccountName === customer.billingAccountName ||
     invoice.customerName === customer.canonicalName
   );
+}
+
+function resolveCustomerWorkflowEnrollment(
+  data: OperatorConsoleData,
+  customer: OperatorConsoleData["customerIndex"][number],
+) {
+  const identifiers = new Set(
+    [
+      customer.profileId,
+      customer.billingAccountId,
+      customer.billingAccountName,
+      customer.canonicalName,
+    ].filter((value): value is string => Boolean(value)),
+  );
+
+  for (const workflow of data.controlCenter.workflows) {
+    const execution = workflow.executions.find((candidate) =>
+      identifiers.has(candidate.billingAccountId) || identifiers.has(candidate.parentAccountId ?? ""),
+    );
+    if (execution && execution.status !== "opted_out") {
+      return {
+        workflowId: workflow.id,
+        executionId: execution.id,
+        status: execution.status,
+      };
+    }
+  }
+
+  return undefined;
 }
 
 function collectionMatchesCustomer(
@@ -4286,6 +7497,20 @@ function customerStatusClassName(customer: OperatorConsoleData["customerIndex"][
   }
 
   return "is-neutral";
+}
+
+function workflowStatusPillClassName(status: "active" | "paused" | "opted_out" | "manual_review") {
+  switch (status) {
+    case "active":
+      return "pill-success";
+    case "paused":
+      return "pill-warning";
+    case "opted_out":
+      return "pill-danger";
+    case "manual_review":
+    default:
+      return "pill-info";
+  }
 }
 
 function formatCustomerCurrency(amountCents: number) {
@@ -4329,6 +7554,52 @@ const AccountWorkspacePage = ({ data }: { data: OperatorConsoleData }) => (
         <p>{data.customerProfile.insightSummary.nextBestAction ?? data.accountWorkspace.nextBestAction}</p>
         <p>{data.customerProfile.insightSummary.conciseSummary}</p>
       </div>
+      {data.accountWorkspace.workflow ? (
+        <article className="detail-card">
+          <div className="title-with-pills">
+            <h2>Workflow state</h2>
+            <span className={`pill ${workflowStatusPillClassName(data.accountWorkspace.workflow.status)}`}>
+              {data.accountWorkspace.workflow.statusLabel}
+            </span>
+            <span className="pill pill-neutral">{data.accountWorkspace.workflow.currentTrack}</span>
+            <span className={`pill ${data.accountWorkspace.workflow.latestChangeBy === "ai" ? "pill-info" : "pill-warning"}`}>
+              {data.accountWorkspace.workflow.latestChangeBy === "ai" ? "AI made latest change" : "Human made latest change"}
+            </span>
+            {data.accountWorkspace.workflow.humanReviewRequired ? (
+              <span className="pill pill-danger">Human review required</span>
+            ) : null}
+          </div>
+          <div className="detail-grid">
+            <DetailField label="Workflow" value={data.accountWorkspace.workflow.workflowName} />
+            <DetailField label="Latest decision" value={data.accountWorkspace.workflow.latestDecisionLabel} />
+            <DetailField label="Track" value={data.accountWorkspace.workflow.currentTrack} />
+            <DetailField
+              label="Pause reason"
+              value={data.accountWorkspace.workflow.pauseReason ?? "—"}
+            />
+            <DetailField
+              label="Resume date"
+              value={data.accountWorkspace.workflow.resumeDate ?? "—"}
+            />
+            <DetailField
+              label="Opt-out reason"
+              value={data.accountWorkspace.workflow.optOutReason ?? "—"}
+            />
+          </div>
+          <div className="reason-box">
+            <span className="label-copy">Decision rationale</span>
+            <p>{data.accountWorkspace.workflow.rationale}</p>
+            <p>{data.accountWorkspace.workflow.evidenceSummary}</p>
+          </div>
+          {data.accountWorkspace.workflow.manualOverrideLabel ? (
+            <div className="detail-footer">
+              <button type="button" className="ghost-button">
+                {data.accountWorkspace.workflow.manualOverrideLabel}
+              </button>
+            </div>
+          ) : null}
+        </article>
+      ) : null}
       <div className="card-grid card-grid-2">
         <article className="detail-card">
           <h2>Contact summary</h2>
@@ -4361,6 +7632,38 @@ const AccountWorkspacePage = ({ data }: { data: OperatorConsoleData }) => (
           ))}
         </article>
       </div>
+      {data.accountWorkspace.workflow?.timeline.length ? (
+        <article className="detail-card">
+          <div className="panel-header">
+            <div>
+              <h2>Workflow timeline</h2>
+              <p className="label-copy">Latest AI and operator workflow decisions for this billing account.</p>
+            </div>
+          </div>
+          <div className="activity-list">
+            {data.accountWorkspace.workflow.timeline.map((item) => (
+              <article key={item.id} className="activity-summary-row">
+                <div className="activity-dot" />
+                <div className="activity-summary-body">
+                  <div className="title-with-pills">
+                    <strong>{item.title}</strong>
+                    <span className={`pill ${item.actor === "ai" ? "pill-info" : "pill-warning"}`}>
+                      {item.actor === "ai" ? "AI" : "Human"}
+                    </span>
+                  </div>
+                  <p>{item.summary}</p>
+                  <div className="customers-activity-tags">
+                    {item.tags.map((tag) => (
+                      <span key={tag} className="customers-activity-tag">{tag}</span>
+                    ))}
+                  </div>
+                </div>
+                <span className="activity-summary-time">{item.at}</span>
+              </article>
+            ))}
+          </div>
+        </article>
+      ) : null}
       {data.accountWorkspace.learning ? (
         <div className="card-grid card-grid-2">
           <article className="detail-card">
@@ -4388,48 +7691,126 @@ const AccountWorkspacePage = ({ data }: { data: OperatorConsoleData }) => (
   </section>
 );
 
-const InvoiceDetailPage = ({ data }: { data: OperatorConsoleData }) => (
-  <section className="page-section">
-    <PageHeader
-      title="Invoice detail"
-      description="Identity, due status, branch, docs, dispute state, and next step"
-    />
-    <div className="detail-card">
-      <div className="title-with-pills">
-        <h2>{data.invoiceDetail.invoiceNumber}</h2>
-        <span className="pill pill-danger">{data.invoiceDetail.status}</span>
+const InvoiceDetailPage = ({ data }: { data: OperatorConsoleData }) => {
+  const invoice = resolveInvoiceDetailEntry(data);
+  const customer = resolveInvoiceDetailCustomer(data);
+  const activity = buildInvoiceDetailActivity(data.invoiceDetail);
+  const invoicePromise = resolveInvoicePromiseToPay(invoice);
+
+  return (
+    <section className="page-section invoice-detail-page">
+      <div className="invoice-detail-header">
+        <div className="invoice-detail-title">
+          <h1>{data.invoiceDetail.invoiceNumber}</h1>
+          <span className={`invoice-detail-status ${invoice ? buildInvoiceStatusDisplay(invoice).tone : "is-open"}`}>
+            {invoice ? buildInvoiceStatusDisplay(invoice).label : data.invoiceDetail.status}
+          </span>
+        </div>
+        <div className="invoice-detail-actions">
+          <button type="button" className="invoice-detail-action-button">No Assignee</button>
+          <button type="button" className="invoice-detail-action-button">
+            <AppIcon name="mail" />
+            <span>Email</span>
+          </button>
+          <button type="button" className="invoice-detail-action-button">
+            <AppIcon name="phone" />
+            <span>Call</span>
+          </button>
+          <button type="button" className="invoice-detail-icon-button" aria-label="Refresh invoice detail">
+            <AppIcon name="refresh" />
+          </button>
+          <button type="button" className="invoice-detail-icon-button" aria-label="More invoice actions">
+            <span className="invoice-detail-kebab">⋮</span>
+          </button>
+        </div>
       </div>
-      <div className="detail-grid">
-        <DetailField label="Billing account" value={data.invoiceDetail.billingAccountId} />
-        <DetailField label="Branch ID" value={data.invoiceDetail.branchId} />
-        <DetailField label="Amount" value={data.invoiceDetail.amount} />
-        <DetailField label="Due date" value={data.invoiceDetail.dueDate} />
-        <DetailField label="Collectible" value={data.invoiceDetail.collectibleAmount ?? "—"} />
-        <DetailField label="Disputed" value={data.invoiceDetail.disputedAmount ?? "—"} />
+
+      <div className="invoice-detail-top-grid">
+        <article className="invoice-detail-card">
+          <h2>Invoice Details</h2>
+          <div className="invoice-detail-definition-list">
+            <span>Source</span>
+            <strong>{invoice?.sourceLabel ?? "Sample Data Generator"}</strong>
+            <span>Issued At</span>
+            <strong>{formatLedgerDate(invoice?.issuedAt ?? data.invoiceDetail.dueDate)}</strong>
+            <span>Due Date</span>
+            <strong>{formatLedgerDate(invoice?.dueDate ?? data.invoiceDetail.dueDate)}</strong>
+            <span>Amount</span>
+            <strong>{data.invoiceDetail.amount}</strong>
+            <span>Balance</span>
+            <strong>{invoice ? formatPhp(invoice.openAmountCents) : data.invoiceDetail.amount}</strong>
+            <span>Payment Promised</span>
+            {invoicePromise ? (
+              <strong className="invoice-detail-promise">
+                {invoicePromise.promiseDate ? formatLedgerDate(invoicePromise.promiseDate) : "Captured"}
+                {invoicePromise.promisedAmountCents !== undefined ? (
+                  <span>{formatPromiseAmount(invoicePromise.promisedAmountCents, invoicePromise.currency)}</span>
+                ) : null}
+                {invoicePromise.invoiceCount && invoicePromise.invoiceCount > 1 ? (
+                  <span>Group promise · {invoicePromise.invoiceCount} invoices</span>
+                ) : null}
+              </strong>
+            ) : (
+              <a href="#" className="invoice-detail-inline-link">Set Date</a>
+            )}
+          </div>
+        </article>
+
+        <article className="invoice-detail-card invoice-detail-customer-card">
+          <h2>Customer Details</h2>
+          <div className="invoice-detail-side-block">
+            <span>Customer</span>
+            <a href={buildCustomerHref(customer?.profileId ?? data.invoiceDetail.billingAccountId)} className="invoice-detail-inline-link">
+              {customer?.canonicalName ?? invoice?.customerName ?? data.invoiceDetail.billingAccountId}
+            </a>
+          </div>
+          <div className="invoice-detail-side-block">
+            <span>Billing Address</span>
+            <p>{buildInvoiceDetailAddress(invoice, customer)}</p>
+          </div>
+        </article>
       </div>
-      <div className="reason-box">
-        <span className="label-copy">Dispute state</span>
-        <p>{data.invoiceDetail.disputeState}</p>
-        <p>{data.invoiceDetail.explanation}</p>
-      </div>
-      <div className="card-grid card-grid-2">
-        {data.invoiceDetail.linkedStatuses.map((item) => (
-          <article key={item.id} className="detail-card">
-            <div className="title-with-pills">
-              <h2>{item.reference}</h2>
-              <span className={`pill ${item.kind === "payment" ? "pill-success" : "pill-info"}`}>
-                {humanize(item.kind)}
-              </span>
+
+      <article className="invoice-detail-card">
+        <h2>Line Items</h2>
+        <div className="invoice-detail-line-table invoice-detail-line-table-header">
+          <div>Description</div>
+          <div>Qty</div>
+          <div>Unit Price</div>
+          <div>Total</div>
+        </div>
+        <div className="invoice-detail-line-table invoice-detail-line-row">
+          <div>Invoice total</div>
+          <div>1</div>
+          <div>{data.invoiceDetail.amount}</div>
+          <div>{data.invoiceDetail.amount}</div>
+        </div>
+      </article>
+
+      <article className="invoice-detail-card">
+        <h2>Payments</h2>
+        <p className="invoice-detail-empty">No payments found for this invoice</p>
+      </article>
+
+      <article className="invoice-detail-card">
+        <h2>Recent Activity</h2>
+        <div className="invoice-detail-activity-list">
+          {activity.map((item) => (
+            <div key={item.id} className="invoice-detail-activity-row">
+              <div className={`invoice-detail-activity-icon ${item.kind === "mail" ? "is-mail" : "is-phone"}`}>
+                <AppIcon name={item.kind} />
+              </div>
+              <span className="invoice-detail-activity-pill">{item.label}</span>
+              <span className="invoice-detail-activity-channel">{item.channel}</span>
+              <span className="invoice-detail-activity-reference">{data.invoiceDetail.invoiceNumber}</span>
+              <span className="invoice-detail-activity-date">{item.date}</span>
             </div>
-            <p><strong>Status:</strong> {item.status}</p>
-            {item.amount ? <p><strong>Amount:</strong> {item.amount}</p> : null}
-            <p>{item.detail}</p>
-          </article>
-        ))}
-      </div>
-    </div>
-  </section>
-);
+          ))}
+        </div>
+      </article>
+    </section>
+  );
+};
 
 const BorrowingDashboardPage = ({ data }: { data: OperatorConsoleData }) => (
   <section className="page-section">
@@ -4796,131 +8177,200 @@ const PageHeader = ({
 const AnalyticsMetricCard = ({
   title,
   value,
-  icon,
-  accent,
-  footer,
-}: {
-  title: string;
-  value: string;
-  icon: "currency" | "alert-outline" | "trend" | "sparkle-mini";
-  accent: "info" | "danger" | "success" | "violet";
-  footer: string;
-}) => (
-  <article className="analytics-metric-card">
-    <div className="analytics-metric-top">
-      <p>{title}</p>
-      <span className={`analytics-metric-icon analytics-metric-icon-${accent}`}>
-        <AppIcon name={icon} />
-      </span>
-    </div>
-    <strong className="analytics-metric-value">{value}</strong>
-    <span className={`analytics-metric-footer analytics-metric-footer-${accent}`}>{footer}</span>
-  </article>
-);
-
-const AnalyticsSummaryCard = ({
-  title,
-  value,
-  subtitle,
-  accent,
-  icon,
-}: {
-  title: string;
-  value: string;
-  subtitle: string;
-  accent: "info" | "success" | "violet";
-  icon: "invoice" | "customers" | "clock";
-}) => (
-  <article className="analytics-summary-card">
-    <div className="analytics-summary-top">
-      <span className={`analytics-summary-icon analytics-summary-icon-${accent}`}>
-        <AppIcon name={icon} />
-      </span>
-      <p>{title}</p>
-    </div>
-    <strong className="analytics-summary-value">{value}</strong>
-    <span className={`analytics-summary-subtitle analytics-summary-subtitle-${accent}`}>{subtitle}</span>
-  </article>
-);
-
-const AnalyticsSectionStat = ({
-  label,
-  value,
   tone,
 }: {
-  label: string;
+  title: string;
   value: string;
-  tone: "success" | "info" | "danger";
+  tone: "default" | "danger" | "success";
 }) => (
-  <div className="analytics-section-stat">
-    <span>{label}</span>
-    <strong className={`analytics-section-stat-value analytics-section-stat-value-${tone}`}>{value}</strong>
-  </div>
+  <article className={`analytics-metric-card analytics-metric-card-${tone}`}>
+    <p>{title}</p>
+    <strong className={`analytics-metric-value analytics-metric-value-${tone}`}>{value}</strong>
+  </article>
 );
 
-const AnalyticsLineChart = ({
-  points,
+const AnalyticsImpactCard = ({
+  title,
+  value,
+  icon,
+  accent,
 }: {
-  points: Array<{ label: string; value: number }>;
+  title: string;
+  value: string;
+  icon: "currency" | "trend" | "mail";
+  accent: "info" | "success" | "violet";
+}) => (
+  <article className="analytics-impact-card">
+    <span className={`analytics-impact-icon analytics-impact-icon-${accent}`}>
+        <AppIcon name={icon} />
+    </span>
+    <div className="analytics-impact-copy">
+      <span>{title}</span>
+      <strong>{value}</strong>
+    </div>
+  </article>
+);
+
+const AnalyticsTrendChart = ({
+  labels,
+  series,
+  ariaLabel,
+  yMin,
+  yMax,
+  tickFormatter = (value: number) => String(Math.round(value)),
+  valueFormatter = (value: number) => String(value),
+  hasData = true,
+  emptyMessage = "No data available for this period.",
+}: {
+  labels: string[];
+  series: Array<{ label: string; color: string; values: number[] }>;
+  ariaLabel: string;
+  yMin?: number;
+  yMax?: number;
+  tickFormatter?: (value: number) => string;
+  valueFormatter?: (value: number) => string;
+  hasData?: boolean;
+  emptyMessage?: string;
 }) => {
-  const width = 640;
-  const height = 220;
-  const paddingX = 28;
-  const paddingTop = 24;
-  const paddingBottom = 34;
-  const minValue = Math.min(...points.map((point) => point.value)) - 2;
-  const maxValue = Math.max(...points.map((point) => point.value)) + 2;
-  const innerWidth = width - paddingX * 2;
+  if (!hasData) {
+    return <p className="analytics-empty-state">{emptyMessage}</p>;
+  }
+
+  const width = 680;
+  const height = 260;
+  const paddingLeft = 54;
+  const paddingRight = 18;
+  const paddingTop = 20;
+  const paddingBottom = 40;
+  const allValues = series.flatMap((item) => item.values);
+  const minValue = yMin ?? Math.max(0, Math.min(...allValues) * 0.92);
+  const maxValue = yMax ?? Math.max(...allValues) * 1.08;
+  const innerWidth = width - paddingLeft - paddingRight;
   const innerHeight = height - paddingTop - paddingBottom;
   const denominator = Math.max(1, maxValue - minValue);
-
-  const chartPoints = points.map((point, index) => {
-    const x = paddingX + (innerWidth * index) / Math.max(1, points.length - 1);
-    const y = paddingTop + ((maxValue - point.value) / denominator) * innerHeight;
+  const horizontalGuides = Array.from({ length: 5 }, (_, index) => {
+    const ratio = index / 4;
 
     return {
-      ...point,
-      x,
-      y,
+      y: paddingTop + innerHeight * ratio,
+      value: maxValue - denominator * ratio,
     };
   });
 
-  const polyline = chartPoints.map((point) => `${point.x},${point.y}`).join(" ");
-  const horizontalGuides = Array.from({ length: 4 }, (_, index) => paddingTop + (innerHeight * index) / 3);
-
   return (
-    <div className="analytics-line-chart">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="DSO trend line chart">
-        {horizontalGuides.map((y) => (
-          <line
-            key={y}
-            x1={paddingX}
-            x2={width - paddingX}
-            y1={y}
-            y2={y}
-            className="analytics-line-guide"
-          />
+    <div className="analytics-trend-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={ariaLabel}>
+        {horizontalGuides.map((guide) => (
+          <g key={guide.y}>
+            <line
+              x1={paddingLeft}
+              x2={width - paddingRight}
+              y1={guide.y}
+              y2={guide.y}
+              className="analytics-line-guide"
+            />
+            <text
+              x={paddingLeft - 8}
+              y={guide.y + 4}
+              textAnchor="end"
+              className="analytics-line-value-label"
+            >
+              {tickFormatter(guide.value)}
+            </text>
+          </g>
         ))}
-        {chartPoints.map((point) => (
+        {labels.map((label, index) => {
+          const x = paddingLeft + (innerWidth * index) / Math.max(1, labels.length - 1);
+
+          return (
           <line
-            key={`${point.label}-guide`}
-            x1={point.x}
-            x2={point.x}
+            key={`${label}-guide`}
+            x1={x}
+            x2={x}
             y1={paddingTop}
             y2={height - paddingBottom}
             className="analytics-line-vertical-guide"
           />
-        ))}
-        <polyline points={polyline} className="analytics-line-path" />
-        {chartPoints.map((point) => (
-          <g key={point.label}>
-            <circle cx={point.x} cy={point.y} r="4.5" className="analytics-line-point" />
-            <text x={point.x} y={height - 12} textAnchor="middle" className="analytics-line-label">
-              {point.label}
+          );
+        })}
+        {series.map((item) => {
+          const chartPoints = item.values.map((value, index) => {
+            const x = paddingLeft + (innerWidth * index) / Math.max(1, item.values.length - 1);
+            const y = paddingTop + ((maxValue - value) / denominator) * innerHeight;
+
+            return { label: labels[index] ?? String(index), value, x, y };
+          });
+          const polyline = chartPoints.map((point) => `${point.x},${point.y}`).join(" ");
+
+          return (
+            <g key={item.label}>
+              <polyline points={polyline} className="analytics-line-path" style={{ stroke: item.color }} />
+              {chartPoints.map((point) => {
+                const tooltip = `${item.label} ${point.label}: ${valueFormatter(point.value)}`;
+                const tooltipWidth = Math.max(118, tooltip.length * 6.2 + 20);
+
+                return (
+                  <g
+                    key={`${item.label}-${point.label}`}
+                    className="analytics-point-group"
+                    tabIndex={0}
+                    aria-label={tooltip}
+                  >
+                    <circle
+                      cx={point.x}
+                      cy={point.y}
+                      r="13"
+                      className="analytics-point-hit"
+                    />
+                    <g
+                      className="analytics-point-tooltip"
+                      transform={`translate(${point.x}, ${Math.max(34, point.y - 12)})`}
+                    >
+                      <rect
+                        x={-tooltipWidth / 2}
+                        y="-34"
+                        width={tooltipWidth}
+                        height="24"
+                        rx="6"
+                        className="analytics-tooltip-box"
+                      />
+                      <text y="-18" textAnchor="middle" className="analytics-tooltip-text">
+                        {tooltip}
+                      </text>
+                    </g>
+                    <circle
+                      cx={point.x}
+                      cy={point.y}
+                      r="4.5"
+                      className="analytics-line-point"
+                      style={{ fill: item.color }}
+                    >
+                      <title>{tooltip}</title>
+                    </circle>
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })}
+        {labels.map((label, index) => {
+          const x = paddingLeft + (innerWidth * index) / Math.max(1, labels.length - 1);
+
+          return (
+            <text key={label} x={x} y={height - 12} textAnchor="middle" className="analytics-line-label">
+              {label}
             </text>
-          </g>
-        ))}
+          );
+        })}
       </svg>
+      <div className="analytics-legend">
+        {series.map((item) => (
+          <span key={item.label}>
+            <i className="analytics-legend-dot" style={{ background: item.color }} />
+            {item.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 };
@@ -4999,7 +8449,7 @@ const ActivitySummaryRow = ({ item }: { item: FeedItem }) => (
 
 const CollectionsTableRow = ({ item, index }: { item: CollectionsQueueItem; index: number }) => {
   const accountHref = index === 0 ? "/account-workspace" : "#";
-  const invoiceHref = index === 0 ? "/invoice-detail" : "#";
+  const invoiceHref = index === 0 ? buildInvoiceDetailHref("INV-2026-1234") : "#";
 
   return (
     <>
@@ -5088,54 +8538,238 @@ const InventoryRow = ({
 
 const InvoiceIndexRow = ({
   invoice,
+  customers,
 }: {
   invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number];
-}) => (
-  <>
-    <div className="table-cell">
-      <strong>{invoice.sourceLabel}</strong>
-      <p>
-        {invoice.importMode === "live_connection"
-          ? "Live import"
-          : invoice.importMode === "manual_upload"
-            ? "Manual spreadsheet upload"
-            : "Seed fallback"}
-      </p>
+  customers: OperatorConsoleData["customerIndex"];
+}) => {
+  const customer = resolveInvoiceCustomer(customers, invoice);
+  const statusDisplay = buildInvoiceStatusDisplay(invoice);
+
+  return (
+    <div className="invoice-ledger-table invoice-ledger-row">
+      <div className="invoice-ledger-cell invoice-ledger-cell-checkbox">
+        <input type="checkbox" aria-label={`Select invoice ${invoice.invoiceNumber}`} />
+      </div>
+      <div className="invoice-ledger-cell" data-label="Number">
+        <a href={buildInvoiceDetailHref(invoice.invoiceNumber)} className="invoice-ledger-link">{invoice.invoiceNumber}</a>
+      </div>
+      <div className="invoice-ledger-cell invoice-ledger-customer-cell" data-label="Customer">
+        <a href={buildCustomerHref(customer?.profileId ?? invoice.billingAccountId ?? invoice.customerName)} className="invoice-ledger-customer-link">
+          {invoice.customerName}
+        </a>
+        <div className="invoice-customer-popover" role="dialog" aria-label={`${invoice.customerName} account summary`}>
+          <div className="invoice-customer-popover-header">
+            <span className="invoice-customer-popover-icon">
+              <AppIcon name="customers" />
+            </span>
+            <strong>{invoice.customerName}</strong>
+          </div>
+        <div className="invoice-customer-popover-grid">
+            <span>Account #</span>
+            <strong>{customer?.billingAccountId ?? invoice.customerReference ?? invoice.billingAccountId ?? "—"}</strong>
+            <span>Overdue Balance</span>
+            <strong>{customer?.overdueAmount ?? formatPhp(getInvoiceOverdueAmountCents(invoice))}</strong>
+            <span>Open Invoices</span>
+            <strong>{customer?.openInvoiceCount ?? (invoice.openAmountCents > 0 ? 1 : 0)}</strong>
+            <span>Segment</span>
+            <a href={buildCustomerHref(customer?.profileId ?? invoice.billingAccountId ?? invoice.customerName)} className="invoice-customer-popover-segment">
+              {customer ? humanize(customer.accountTier) : "Standard"}
+            </a>
+          </div>
+          <a href={buildCustomerHref(customer?.profileId ?? invoice.billingAccountId ?? invoice.customerName)} className="invoice-customer-popover-action">
+            View Details
+          </a>
+        </div>
+      </div>
+      <div className="invoice-ledger-cell" data-label="Due Date">{formatLedgerDate(invoice.dueDate)}</div>
+      <div className="invoice-ledger-cell" data-label="Issue Date">{formatLedgerDate(invoice.issuedAt)}</div>
+      <div className="invoice-ledger-cell" data-label="Paid Date">{invoice.paidAmountCents > 0 && invoice.openAmountCents === 0 ? formatLedgerDate(invoice.lastImportedAt) : "—"}</div>
+      <div className="invoice-ledger-cell" data-label="Promise To Pay">{formatLedgerDate(resolveInvoicePromiseToPayDate(invoice))}</div>
+      <div className="invoice-ledger-cell" data-label="Status">
+        <span className={`invoice-ledger-status ${statusDisplay.tone}`}>{statusDisplay.label}</span>
+      </div>
     </div>
-    <div className="table-cell">
-      <strong>{invoice.invoiceNumber}</strong>
-      <p>{invoice.externalId ?? invoice.canonicalInvoiceId ?? "No external ID"}</p>
-    </div>
-    <div className="table-cell">
-      <strong>{invoice.customerName}</strong>
-      <p>
-        {invoice.customerReference ??
-          invoice.billingAccountName ??
-          (invoice.sourceProvider === "spreadsheet_upload" ? "Manual spreadsheet import" : "No customer reference")}
-      </p>
-    </div>
-    <div className="table-cell">
-      <strong>{invoice.billingAccountName ?? invoice.billingAccountId ?? "Unmapped billing account"}</strong>
-      <p>{invoice.branchName ?? invoice.branchId ?? invoice.parentAccountName ?? "No branch tag"}</p>
-    </div>
-    <div className="table-cell">
-      <span className={`pill ${invoiceStatusClassName(invoice.status)}`}>{humanize(invoice.status)}</span>
-      <p>{invoice.sourceStatus}</p>
-    </div>
-    <div className="table-cell">
-      <strong>{invoice.dueDate ?? "No due date"}</strong>
-      <p>{invoice.issuedAt ?? invoice.lastImportedAt ?? "No import timestamp"}</p>
-    </div>
-    <div className="table-cell">
-      <strong>{formatPhp(invoice.openAmountCents)}</strong>
-      <p>{invoice.daysPastDue ? `${invoice.daysPastDue} days past due` : "Current or undated"}</p>
-    </div>
-    <div className="table-cell">
-      <strong>{formatPhp(invoice.totalAmountCents)}</strong>
-      <p>{invoice.currency}</p>
-    </div>
-  </>
-);
+  );
+};
+
+function resolveInvoiceCustomer(
+  customers: OperatorConsoleData["customerIndex"],
+  invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number],
+) {
+  return customers.find((customer) =>
+    customer.profileId === invoice.billingAccountId ||
+    customer.billingAccountId === invoice.billingAccountId ||
+    customer.canonicalName === invoice.customerName ||
+    customer.billingAccountName === invoice.billingAccountName,
+  );
+}
+
+function resolveInvoiceDetailEntry(data: OperatorConsoleData) {
+  const exactInvoice = data.invoiceIndex.invoices.find(
+    (invoice) => invoice.invoiceNumber === data.invoiceDetail.invoiceNumber,
+  );
+  if (exactInvoice) {
+    return exactInvoice;
+  }
+
+  return data.invoiceIndex.invoices.find(
+    (invoice) => invoice.billingAccountId === data.invoiceDetail.billingAccountId,
+  );
+}
+
+function resolveInvoiceDetailCustomer(data: OperatorConsoleData) {
+  return data.customerIndex.find((customer) =>
+    customer.profileId === data.invoiceDetail.billingAccountId ||
+    customer.billingAccountId === data.invoiceDetail.billingAccountId,
+  );
+}
+
+function buildInvoiceDetailAddress(
+  invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number] | undefined,
+  customer: OperatorConsoleData["customerIndex"][number] | undefined,
+) {
+  const lines = [
+    invoice?.billingAccountName ?? customer?.billingAccountName ?? customer?.canonicalName,
+    invoice?.branchName ?? invoice?.branchId ?? customer?.branchNames[0],
+    invoice?.parentAccountName,
+  ].filter((value): value is string => Boolean(value));
+
+  return lines.length > 0 ? lines.join(", ") : "Billing address unavailable";
+}
+
+function buildInvoiceDetailActivity(invoiceDetail: OperatorConsoleData["invoiceDetail"]) {
+  if (invoiceDetail.linkedStatuses.length === 0) {
+    return [
+      {
+        id: "activity-fallback-1",
+        kind: "mail" as const,
+        label: "Sent",
+        channel: "workflow@paywithyield.com",
+        date: "Feb 28, 2026 02:00 AM",
+      },
+    ];
+  }
+
+  return invoiceDetail.linkedStatuses.map((item, index) => ({
+    id: item.id,
+    kind: index === 0 ? "mail" as const : "phone" as const,
+    label: index === 0 ? "Sent" : "Outbound",
+    channel: "workflow@paywithyield.com",
+    date: index === 0 ? "Feb 28, 2026 02:00 AM" : "Feb 08, 2026 02:00 AM",
+  }));
+}
+
+function buildInvoiceStatusDisplay(invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number]) {
+  if ((invoice.daysPastDue ?? 0) > 0 && invoice.openAmountCents > 0) {
+    return {
+      label: `${invoice.daysPastDue} day${invoice.daysPastDue === 1 ? "" : "s"} overdue`,
+      tone: "is-overdue",
+    };
+  }
+
+  if (invoice.status === "partial") {
+    return { label: "Partial", tone: "is-partial" };
+  }
+
+  if (invoice.status === "paid") {
+    return { label: "Paid", tone: "is-paid" };
+  }
+
+  if (invoice.status === "disputed") {
+    return { label: "Disputed", tone: "is-overdue" };
+  }
+
+  return { label: "Open", tone: "is-open" };
+}
+
+function formatLedgerDate(value?: string) {
+  if (!value) {
+    return "—";
+  }
+
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) {
+    return `${match[2]}/${match[3]}/${match[1]}`;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  return `${String(parsed.getMonth() + 1).padStart(2, "0")}/${String(parsed.getDate()).padStart(2, "0")}/${parsed.getFullYear()}`;
+}
+
+function getInvoiceOverdueAmountCents(invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number]) {
+  return (invoice.daysPastDue ?? 0) > 0 ? invoice.openAmountCents : 0;
+}
+
+function resolveInvoicePromiseToPayDate(invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number]) {
+  const metadata = invoice.metadata as Record<string, unknown>;
+  const value = metadata.promiseToPayDate ?? metadata.promise_to_pay_date ?? metadata.nextInstallmentDueDate;
+  return typeof value === "string" ? value : undefined;
+}
+
+function resolveInvoicePromiseToPay(
+  invoice: OperatorConsoleData["invoiceIndex"]["invoices"][number] | undefined,
+) {
+  if (!invoice) {
+    return undefined;
+  }
+
+  const metadata = invoice.metadata as Record<string, unknown>;
+  const promiseDate = readMetadataString(metadata.promiseToPayDate ?? metadata.promise_to_pay_date);
+  const promisedAmountCents = readMetadataNumber(
+    metadata.promiseToPayAmountCents ??
+      metadata.promisedAmountCents ??
+      metadata.promised_amount_cents,
+  );
+  const promiseToPayId = readMetadataString(metadata.promiseToPayId ?? metadata.promise_to_pay_id);
+  const state = readMetadataString(metadata.promiseToPayState ?? metadata.promise_to_pay_state);
+  const invoiceCount = readMetadataNumber(metadata.promiseToPayInvoiceCount ?? metadata.promise_to_pay_invoice_count);
+  if (!promiseDate && promisedAmountCents === undefined && !promiseToPayId) {
+    return undefined;
+  }
+
+  return {
+    ...(promiseToPayId ? { promiseToPayId } : {}),
+    ...(promiseDate ? { promiseDate } : {}),
+    ...(state ? { state } : {}),
+    ...(promisedAmountCents !== undefined ? { promisedAmountCents } : {}),
+    ...(invoiceCount !== undefined ? { invoiceCount } : {}),
+    currency: readMetadataString(metadata.promiseToPayCurrency ?? metadata.currency) ?? invoice.currency,
+  };
+}
+
+function readMetadataString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function readMetadataNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function formatPromiseAmount(valueCents: number, currency: string) {
+  if (currency === "PHP") {
+    return formatPhp(valueCents);
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 2,
+  }).format(valueCents / 100);
+}
 
 const AppIcon = ({
   name,
@@ -5174,6 +8808,7 @@ const AppIcon = ({
     | "copy"
     | "eye"
     | "edit"
+    | "paperclip"
     | "close"
     | "plus"
     | "folder-plus"
@@ -5383,6 +9018,11 @@ const AppIcon = ({
         <path d="M12.8 7.1l3 3" />
       </>
     ),
+    paperclip: (
+      <>
+        <path d="M9 12.5l5.8-5.8a3 3 0 1 1 4.2 4.2l-7.3 7.3a4.5 4.5 0 1 1-6.4-6.4l7-7" />
+      </>
+    ),
     close: (
       <>
         <path d="M7 7l10 10" />
@@ -5415,14 +9055,8 @@ const AppIcon = ({
   );
 };
 
-function formatTopbarDate(value: string) {
-  return new Intl.DateTimeFormat("en-PH", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "Asia/Manila",
-  }).format(new Date(value));
+function formatTopbarDate() {
+  return formatOperatorToday();
 }
 
 function normalizeCashAppTab(value?: string): CashAppTab {
@@ -5501,93 +9135,212 @@ function cashRemittanceStatusClassName(state: string) {
   return state === "review_required" ? "needs-review" : "approved";
 }
 
-function buildAnalyticsViewModel(data: OperatorConsoleData) {
+function buildAnalyticsViewModel(data: OperatorConsoleData, trend: "weekly" | "monthly" = "monthly") {
+  const todayDateKey = formatOperatorDateKey();
   const totalOutstandingCents = data.invoiceIndex.summary.openAmountCents;
   const overdueBalanceCents = data.overdueExposure.overdueOpenAmountCents;
-  const estimatedDsoDays = estimateDsoDays(data.invoiceAgingAnalytics);
-  const collectionsRate = Math.max(
-    0,
-    Math.min(100, data.collectibleVsDisputed.collectibleCoverageRatio * 100),
-  );
-  const monthlyPerformance = buildAnalyticsMonthlyPerformance(
-    totalOutstandingCents,
-    data.collectibleVsDisputed.collectibleCoverageRatio,
-    data.generatedAt,
-  );
-  const topCustomers = buildAnalyticsTopCustomers(data.invoiceIndex.invoices);
-  const activeCustomerCount = new Set(
-    data.invoiceIndex.invoices
-      .filter((invoice) => invoice.openAmountCents > 0)
-      .map((invoice) => invoice.billingAccountId ?? invoice.customerReference ?? invoice.customerName),
-  ).size;
-  const overdueShare =
-    data.homeSnapshotMetrics.openInvoiceCount > 0
-      ? (data.homeSnapshotMetrics.overdueInvoiceCount / data.homeSnapshotMetrics.openInvoiceCount) * 100
+  const paymentEvents = collectAnalyticsPaymentEvents(data, todayDateKey);
+  const outreachEvents = collectAnalyticsOutreachEvents(data, todayDateKey);
+  const periods = buildAnalyticsPeriods(trend, todayDateKey);
+  const overdueAggregation = buildAnalyticsOverdueBalanceTrend(data.invoiceIndex.invoices, periods, todayDateKey);
+  const cashAggregation = buildAnalyticsCashCollectedTrend(paymentEvents, periods);
+  const dsoAggregation = buildAnalyticsDsoTrend(data.invoiceIndex.invoices, periods, todayDateKey);
+  const currentMonthKey = operatorMonthKey(todayDateKey);
+  const currentMonthPaymentEvents = paymentEvents.filter((event) => operatorMonthKey(event.dateKey) === currentMonthKey);
+  const currentMonthOutreachEvents = outreachEvents.filter((event) => operatorMonthKey(event.dateKey) === currentMonthKey);
+  const cashCollectedThisMonthCents = currentMonthPaymentEvents.reduce((sum, event) => sum + event.amountCents, 0);
+  const yieldCollectedCents = currentMonthPaymentEvents
+    .filter((event) => event.yieldAssisted)
+    .reduce((sum, event) => sum + event.amountCents, 0);
+  const invoicesCollectedThisMonth = uniqueStrings(currentMonthPaymentEvents.flatMap((event) => event.invoiceNumbers)).length;
+  const invoicesFollowedUpThisMonth = uniqueStrings(currentMonthOutreachEvents.flatMap((event) => event.invoiceNumbers)).length;
+  const automatedCommunicationsCount =
+    data.emailInbox.messages.filter((message) => message.direction === "outbound").length +
+    data.callInbox.calls.length +
+    data.aiFeed.length;
+  const estimatedDsoDays = calculateWeightedDaysOpen(data.invoiceIndex.invoices, todayDateKey);
+  const weightedAverageAgreedTermsDays = estimateWeightedAverageAgreedTermsDays(data.invoiceIndex.invoices);
+  const collectionsRate =
+    cashCollectedThisMonthCents + overdueBalanceCents > 0
+      ? Math.min(100, (cashCollectedThisMonthCents / (cashCollectedThisMonthCents + overdueBalanceCents)) * 100)
       : 0;
-  const agingLegend = buildAnalyticsAgingLegend(data.invoiceAgingAnalytics.buckets);
-  const dsoTrend = buildAnalyticsDsoTrend(estimatedDsoDays, data.generatedAt);
+  const topCustomers = buildAnalyticsTopCustomers(data.invoiceIndex.invoices);
 
   return {
+    periodLabels: periods.map((period) => period.label),
     totalOutstandingCents,
     overdueBalanceCents,
+    cashCollectedThisMonthCents,
+    invoicesFollowedUpThisMonth,
+    invoicesCollectedThisMonth,
+    yieldCollectedCents,
     estimatedDsoDays,
+    weightedAverageAgreedTermsDays,
     collectionsRate,
-    monthlyPerformance,
+    automatedCommunicationsCount,
+    overdueBalanceTrend: overdueAggregation.values,
+    overdueBalanceTrendHasData: overdueAggregation.hasData,
+    cashCollectedTrend: cashAggregation.totalValues,
+    yieldCollectedTrend: cashAggregation.yieldValues,
+    cashCollectedTrendHasData: cashAggregation.hasData,
+    dsoTrend: dsoAggregation.dsoValues,
+    agreedTermsTrend: dsoAggregation.termsValues,
+    dsoTrendHasData: dsoAggregation.hasData,
     topCustomers,
-    activeCustomerCount,
-    customersNeedingAttention: Math.min(activeCustomerCount, data.collectionsQueue.length + data.exceptionCounts.totalOpen),
-    openInvoiceCount: data.homeSnapshotMetrics.openInvoiceCount,
-    overdueInvoiceCount: data.homeSnapshotMetrics.overdueInvoiceCount,
-    overdueShareLabel: `${Math.round(overdueShare)}%`,
-    avgCollectionTimeDays: Math.max(estimatedDsoDays - 7, 1),
-    agingLegend,
-    agingChart: buildAnalyticsConicGradient(agingLegend),
-    dsoTrend,
   };
 }
 
-function estimateDsoDays(invoiceAgingAnalytics: OperatorConsoleData["invoiceAgingAnalytics"]) {
-  const midpointByBucket: Record<string, number> = {
-    current: 12,
-    days_1_30: 24,
-    days_31_60: 46,
-    days_61_90: 73,
-    days_90_plus: 102,
-  };
-  const weightedTotal = invoiceAgingAnalytics.buckets.reduce((sum, bucket) => {
-    return sum + bucket.openAmountCents * (midpointByBucket[bucket.id] ?? 0);
-  }, 0);
-  const totalOpen = invoiceAgingAnalytics.buckets.reduce((sum, bucket) => sum + bucket.openAmountCents, 0);
-
-  return totalOpen > 0 ? Math.round(weightedTotal / totalOpen) : 0;
+interface AnalyticsPeriod {
+  key: string;
+  label: string;
+  startDateKey: string;
+  endDateKey: string;
 }
 
-function buildAnalyticsMonthlyPerformance(
-  totalOutstandingCents: number,
-  collectibleCoverageRatio: number,
-  generatedAt: string,
-) {
-  const baseTargetMultipliers = [0.78, 0.86, 0.91, 0.88, 0.95, 1];
-  const collectedPerformance = [0.92, 0.95, 0.97, 0.96, 0.99, 1.02];
-  const maxTargetCents = totalOutstandingCents * 1.02;
+interface AnalyticsPaymentEvent {
+  id: string;
+  dateKey: string;
+  amountCents: number;
+  invoiceNumbers: string[];
+  yieldAssisted: boolean;
+}
 
-  return baseTargetMultipliers.map((multiplier, index) => {
-    const date = new Date(generatedAt);
-    date.setUTCMonth(date.getUTCMonth() - (baseTargetMultipliers.length - index - 1));
-    const targetCents = Math.round(totalOutstandingCents * multiplier);
-    const collectedRatio = index < collectedPerformance.length ? collectedPerformance[index]! : 1;
-    const collectedCents = Math.round(
-      targetCents * Math.max(0.74, Math.min(0.98, collectibleCoverageRatio + 0.08)) * collectedRatio,
-    );
+interface AnalyticsOutreachEvent {
+  id: string;
+  dateKey: string;
+  invoiceNumbers: string[];
+}
 
-    return {
-      label: new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "Asia/Manila" }).format(date),
-      targetCents,
-      collectedCents,
-      targetRatio: targetCents / Math.max(maxTargetCents, 1),
-      collectedRatio: collectedCents / Math.max(maxTargetCents, 1),
-    };
-  });
+function collectAnalyticsPaymentEvents(data: OperatorConsoleData, todayDateKey: string): AnalyticsPaymentEvent[] {
+  const events: AnalyticsPaymentEvent[] = [];
+  const seenPaymentIds = new Set<string>();
+
+  for (const row of data.cashApplicationQueue.reviewRows) {
+    const dateKey = readOperationalDateKey(row.receivedOn);
+    if (!dateKey || row.amountCents <= 0) {
+      continue;
+    }
+
+    seenPaymentIds.add(row.paymentId);
+    events.push({
+      id: `review:${row.paymentId}`,
+      dateKey,
+      amountCents: row.amountCents,
+      invoiceNumbers: uniqueStrings(row.matches.map((match) => match.invoiceNumber)),
+      yieldAssisted: row.matches.length > 0,
+    });
+  }
+
+  for (const transaction of data.cashApplicationQueue.bankTransactions) {
+    const dateKey = readOperationalDateKey(transaction.postedAt);
+    if (
+      !dateKey ||
+      transaction.direction !== "credit" ||
+      transaction.amountCents <= 0 ||
+      (transaction.paymentId && seenPaymentIds.has(transaction.paymentId))
+    ) {
+      continue;
+    }
+
+    if (transaction.paymentId) {
+      seenPaymentIds.add(transaction.paymentId);
+    }
+    events.push({
+      id: `bank:${transaction.id}`,
+      dateKey,
+      amountCents: transaction.amountCents,
+      invoiceNumbers: [],
+      yieldAssisted: transaction.matchStatus === "linked_payment",
+    });
+  }
+
+  for (const remittance of data.cashApplicationQueue.remittances) {
+    const dateKey = readOperationalDateKey(remittance.receivedAt);
+    if (!dateKey || !remittance.amountCents || (remittance.paymentId && seenPaymentIds.has(remittance.paymentId))) {
+      continue;
+    }
+
+    events.push({
+      id: `remittance:${remittance.id}`,
+      dateKey,
+      amountCents: remittance.amountCents,
+      invoiceNumbers: uniqueStrings(remittance.invoiceReferences),
+      yieldAssisted: remittance.invoiceReferences.length > 0,
+    });
+  }
+
+  if (events.length === 0 && data.cashApplicationQueue.overviewSummary.totalAppliedTodayCents > 0) {
+    events.push({
+      id: "cash-app-summary:applied-today",
+      dateKey: todayDateKey,
+      amountCents: data.cashApplicationQueue.overviewSummary.totalAppliedTodayCents,
+      invoiceNumbers: [],
+      yieldAssisted: true,
+    });
+  }
+
+  return events;
+}
+
+function collectAnalyticsOutreachEvents(data: OperatorConsoleData, todayDateKey: string): AnalyticsOutreachEvent[] {
+  const events: AnalyticsOutreachEvent[] = [];
+
+  for (const task of data.taskQueue) {
+    const dateKey = readTaskDateKey(task, todayDateKey);
+    if (!dateKey) {
+      continue;
+    }
+
+    events.push({
+      id: `task:${task.id}`,
+      dateKey,
+      invoiceNumbers: readTaskInvoiceNumbers(task, data.invoiceIndex.invoices),
+    });
+  }
+
+  for (const call of data.callInbox.calls) {
+    const dateKey = readOperationalDateKey(call.endedAt ?? call.startedAt);
+    if (!dateKey) {
+      continue;
+    }
+
+    events.push({
+      id: `call:${call.id}`,
+      dateKey,
+      invoiceNumbers: uniqueStrings(call.invoiceRefs.map((invoice) => invoice.invoiceNumber)),
+    });
+  }
+
+  for (const message of data.emailInbox.messages) {
+    const dateKey = readOperationalDateKey(message.receivedAt);
+    if (!dateKey) {
+      continue;
+    }
+
+    events.push({
+      id: `email:${message.providerMessageId}`,
+      dateKey,
+      invoiceNumbers: readInvoiceNumbersFromText(
+        `${message.subjectLine ?? ""} ${message.snippet ?? ""}`,
+        data.invoiceIndex.invoices,
+      ),
+    });
+  }
+
+  for (const item of data.aiFeed) {
+    const dateKey = readOperationalDateKey(item.at);
+    if (!dateKey) {
+      continue;
+    }
+
+    events.push({
+      id: `feed:${item.id}`,
+      dateKey,
+      invoiceNumbers: readInvoiceNumbersFromText(item.summary, data.invoiceIndex.invoices),
+    });
+  }
+
+  return events;
 }
 
 function buildAnalyticsTopCustomers(invoices: InvoiceIndexEntry[]) {
@@ -5625,120 +9378,429 @@ function buildAnalyticsTopCustomers(invoices: InvoiceIndexEntry[]) {
   }));
 }
 
-function buildAnalyticsAgingLegend(buckets: OperatorConsoleData["invoiceAgingAnalytics"]["buckets"]) {
-  const colors = ["#15b981", "#2f6fed", "#f59e0b", "#ef4444", "#991b1b"];
-  const positions = ["top", "bottom-left", "bottom-right", "right-lower", "right-upper"];
-  const total = buckets.reduce((sum, bucket) => sum + bucket.openAmountCents, 0);
+function estimateWeightedAverageAgreedTermsDays(invoices: InvoiceIndexEntry[]) {
+  const rows = invoices
+    .map((invoice) => ({
+      days: diffCalendarDays(invoice.issuedAt, invoice.dueDate),
+      weight: Math.max(invoice.totalAmountCents, invoice.openAmountCents, 0),
+    }))
+    .filter((row): row is { days: number; weight: number } => typeof row.days === "number" && row.weight > 0);
 
-  return buckets.map((bucket, index) => ({
-    label: bucket.id === "current" ? "Current days" : bucket.label,
-    amountCents: bucket.openAmountCents,
-    percent: total > 0 ? Math.round((bucket.openAmountCents / total) * 100) : 0,
-    color: colors[index] ?? "#94a3b8",
-    position: positions[index] ?? "top",
-  }));
+  if (rows.length === 0) {
+    return 0;
+  }
+
+  const weightedDays = rows.reduce((sum, row) => sum + row.days * row.weight, 0);
+  const totalWeight = rows.reduce((sum, row) => sum + row.weight, 0);
+
+  return Math.max(7, Math.round(weightedDays / Math.max(totalWeight, 1)));
 }
 
-function buildAnalyticsConicGradient(
-  legend: Array<{ percent: number; color: string }>,
+function buildAnalyticsPeriods(trend: "weekly" | "monthly", todayDateKey: string): AnalyticsPeriod[] {
+  const count = trend === "monthly" ? 7 : 8;
+
+  if (trend === "monthly") {
+    return Array.from({ length: count }, (_, index) => {
+      const startDateKey = addOperatorCalendarMonths(`${todayDateKey.slice(0, 7)}-01`, -(count - index - 1));
+      const nextMonthStart = addOperatorCalendarMonths(startDateKey, 1);
+      const endDateKey = addOperatorCalendarDays(nextMonthStart, -1);
+
+      return {
+        key: operatorMonthKey(startDateKey),
+        label: formatOperatorDate(operatorDateKeyToDate(startDateKey), { month: "short" }),
+        startDateKey,
+        endDateKey,
+      };
+    });
+  }
+
+  const currentWeekStart = startOfOperatorWeek(todayDateKey);
+
+  return Array.from({ length: count }, (_, index) => {
+    const startDateKey = addOperatorCalendarDays(currentWeekStart, -(count - index - 1) * 7);
+    const endDateKey = addOperatorCalendarDays(startDateKey, 6);
+
+    return {
+      key: startDateKey,
+      label: formatOperatorDate(operatorDateKeyToDate(startDateKey), { month: "short", day: "numeric" }),
+      startDateKey,
+      endDateKey,
+    };
+  });
+}
+
+function buildAnalyticsOverdueBalanceTrend(
+  invoices: InvoiceIndexEntry[],
+  periods: AnalyticsPeriod[],
+  todayDateKey: string,
 ) {
-  let currentOffset = 0;
-  const stops = legend.map((segment, index) => {
-    const start = currentOffset;
-    const end = index === legend.length - 1 ? 100 : currentOffset + segment.percent;
-    currentOffset = end;
+  let hasData = false;
+  const values = periods.map((period) => {
+    const periodInvoices = invoices.filter((invoice) => {
+      const dateKey = invoice.dueDate ?? invoice.issuedAt;
+      return invoice.openAmountCents > 0 && isDateKeyInPeriod(dateKey, period);
+    });
+    const openAmountCents = periodInvoices.reduce((sum, invoice) => sum + invoice.openAmountCents, 0);
+    const overdueAmountCents = periodInvoices.reduce(
+      (sum, invoice) => sum + (readInvoiceDaysPastDue(invoice, todayDateKey) > 0 ? invoice.openAmountCents : 0),
+      0,
+    );
 
-    return `${segment.color} ${start}% ${end}%`;
+    if (openAmountCents > 0) {
+      hasData = true;
+    }
+
+    return openAmountCents > 0 ? Number(((overdueAmountCents / openAmountCents) * 100).toFixed(1)) : 0;
   });
 
-  return `conic-gradient(${stops.join(", ")})`;
+  return { values, hasData };
 }
 
-function buildAnalyticsDsoTrend(currentDsoDays: number, generatedAt: string) {
-  const offsets = [10, 8, 6, 4, 2, 0];
-
-  return offsets.map((offset, index) => {
-    const date = new Date(generatedAt);
-    date.setUTCMonth(date.getUTCMonth() - (offsets.length - index - 1));
-
-    return {
-      label: new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "Asia/Manila" }).format(date),
-      value: currentDsoDays + offset,
-    };
-  });
-}
-
-function buildHomeCalendarDays(generatedAt: string) {
-  const baseDate = new Date(generatedAt);
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    weekday: "short",
-    day: "numeric",
-    timeZone: "Asia/Manila",
-  });
-
-  return Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(baseDate);
-    date.setUTCDate(baseDate.getUTCDate() - 3 + index);
-    const parts = formatter.formatToParts(date);
-    const weekday = parts.find((part) => part.type === "weekday")?.value ?? "";
-    const label = parts.find((part) => part.type === "day")?.value ?? "";
-
-    return {
-      weekday,
-      label,
-      isActive: index === 3,
-    };
-  });
-}
-
-function formatHomeCalendarMonth(generatedAt: string) {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    year: "numeric",
-    timeZone: "Asia/Manila",
-  }).format(new Date(generatedAt));
-}
-
-function buildHomeTaskAgeBuckets(totalTaskCount: number) {
-  const ratios = [0.42, 0.28, 0.18, 0.08, 0.74];
-  const labels = ["1-7d", "8-14d", "15-21d", "22-30d", ">30d"];
-  const counts = ratios.map((ratio, index) => {
-    const baseline = Math.max(index === ratios.length - 1 ? 2 : 1, Math.round(totalTaskCount * ratio));
-    return totalTaskCount > 0 ? baseline : 0;
-  });
-  const maxCount = Math.max(...counts, 1);
+function buildAnalyticsCashCollectedTrend(events: AnalyticsPaymentEvent[], periods: AnalyticsPeriod[]) {
+  const totalValues = periods.map((period) =>
+    events
+      .filter((event) => isDateKeyInPeriod(event.dateKey, period))
+      .reduce((sum, event) => sum + event.amountCents, 0),
+  );
+  const yieldValues = periods.map((period) =>
+    events
+      .filter((event) => event.yieldAssisted && isDateKeyInPeriod(event.dateKey, period))
+      .reduce((sum, event) => sum + event.amountCents, 0),
+  );
 
   return {
-    axis: [12, 9, 6, 3, 0],
-    buckets: labels.map((label, index) => ({
-      label,
-      count: counts[index] ?? 0,
-      height: Math.max(10, Math.round(((counts[index] ?? 0) / maxCount) * 100)),
+    totalValues,
+    yieldValues,
+    hasData: totalValues.some((value) => value > 0) || yieldValues.some((value) => value > 0),
+  };
+}
+
+function buildAnalyticsDsoTrend(
+  invoices: InvoiceIndexEntry[],
+  periods: AnalyticsPeriod[],
+  todayDateKey: string,
+) {
+  let hasData = false;
+  const dsoValues: number[] = [];
+  const termsValues: number[] = [];
+
+  for (const period of periods) {
+    const periodInvoices = invoices.filter((invoice) => isDateKeyInPeriod(invoice.issuedAt ?? invoice.dueDate, period));
+    if (periodInvoices.length > 0) {
+      hasData = true;
+    }
+    dsoValues.push(calculateWeightedDaysOpen(periodInvoices, todayDateKey));
+    termsValues.push(estimateWeightedAverageAgreedTermsDays(periodInvoices));
+  }
+
+  return { dsoValues, termsValues, hasData };
+}
+
+function calculateWeightedDaysOpen(invoices: InvoiceIndexEntry[], todayDateKey: string) {
+  const rows = invoices
+    .map((invoice) => {
+      const startDateKey = invoice.issuedAt ?? invoice.dueDate;
+      const weight = Math.max(invoice.openAmountCents, invoice.totalAmountCents, 0);
+      return startDateKey && weight > 0
+        ? { days: Math.max(0, diffOperatorCalendarDays(startDateKey, todayDateKey)), weight }
+        : undefined;
+    })
+    .filter((row): row is { days: number; weight: number } => Boolean(row));
+  const totalWeight = rows.reduce((sum, row) => sum + row.weight, 0);
+
+  return totalWeight > 0
+    ? Math.round(rows.reduce((sum, row) => sum + row.days * row.weight, 0) / totalWeight)
+    : 0;
+}
+
+function addOperatorCalendarMonths(dateKey: string, months: number) {
+  const { year, month, day } = parseDateKeyParts(dateKey);
+  const date = new Date(Date.UTC(year, month - 1 + months, day));
+  const nextYear = String(date.getUTCFullYear()).padStart(4, "0");
+  const nextMonth = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const nextDay = String(date.getUTCDate()).padStart(2, "0");
+
+  return `${nextYear}-${nextMonth}-${nextDay}`;
+}
+
+function startOfOperatorWeek(dateKey: string) {
+  const { year, month, day } = parseDateKeyParts(dateKey);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const dayOfWeek = date.getUTCDay();
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+
+  return addOperatorCalendarDays(dateKey, mondayOffset);
+}
+
+function isDateKeyInPeriod(dateKey: string | undefined, period: AnalyticsPeriod) {
+  return Boolean(dateKey && dateKey >= period.startDateKey && dateKey <= period.endDateKey);
+}
+
+function parseDateKeyParts(dateKey: string) {
+  const [year = 1970, month = 1, day = 1] = dateKey.split("-").map((part) => Number(part));
+
+  return { year, month, day };
+}
+
+function readInvoiceNumbersFromText(text: string, invoices: InvoiceIndexEntry[]) {
+  return uniqueStrings(
+    invoices
+      .filter((invoice) => text.includes(invoice.invoiceNumber))
+      .map((invoice) => invoice.invoiceNumber),
+  );
+}
+
+function buildHomeCalendar(input: {
+  data: OperatorConsoleData;
+  selectedDateKey: string;
+  todayDateKey: string;
+}) {
+  const activityByDate = buildHomeCalendarActivityByDate(input.data, input.todayDateKey);
+  const days = Array.from({ length: 7 }, (_, index) => {
+    const dateKey = addOperatorCalendarDays(input.selectedDateKey, index - 3);
+    const date = operatorDateKeyToDate(dateKey);
+    const activity = activityByDate.get(dateKey) ?? emptyHomeCalendarActivity();
+
+    return {
+      dateKey,
+      weekday: formatOperatorDate(date, { weekday: "short" }),
+      label: formatOperatorDate(date, { day: "numeric" }),
+      isActive: dateKey === input.selectedDateKey,
+      isToday: dateKey === input.todayDateKey,
+      activity,
+    };
+  });
+  const activityCount = days.reduce((sum, day) => sum + day.activity.totalCount, 0);
+
+  return {
+    days,
+    activityCount,
+    monthLabel: formatOperatorDate(operatorDateKeyToDate(input.selectedDateKey), {
+      month: "short",
+      year: "numeric",
+    }),
+    previousHref: homeCalendarHref(addOperatorCalendarDays(input.selectedDateKey, -7)),
+    nextHref: homeCalendarHref(addOperatorCalendarDays(input.selectedDateKey, 7)),
+  };
+}
+
+function buildHomeCalendarActivityByDate(data: OperatorConsoleData, todayDateKey: string) {
+  const byDate = new Map<string, HomeCalendarActivity>();
+
+  for (const task of data.taskQueue) {
+    if (!isOpenTaskStatus(task.status)) {
+      continue;
+    }
+
+    const dateKey = readTaskDateKey(task, todayDateKey);
+    if (!dateKey) {
+      continue;
+    }
+
+    incrementHomeCalendarActivity(byDate, dateKey, "tasks");
+  }
+
+  for (const row of data.cashApplicationQueue.reviewRows) {
+    const dateKey = readOperationalDateKey(row.receivedOn);
+    if (dateKey) {
+      incrementHomeCalendarActivity(byDate, dateKey, "payments");
+    }
+  }
+
+  for (const transaction of data.cashApplicationQueue.bankTransactions) {
+    if (transaction.direction !== "credit") {
+      continue;
+    }
+
+    const dateKey = readOperationalDateKey(transaction.postedAt);
+    if (dateKey) {
+      incrementHomeCalendarActivity(byDate, dateKey, "payments");
+    }
+  }
+
+  for (const remittance of data.cashApplicationQueue.remittances) {
+    const dateKey = readOperationalDateKey(remittance.receivedAt);
+    if (dateKey) {
+      incrementHomeCalendarActivity(byDate, dateKey, "payments");
+    }
+  }
+
+  for (const message of data.emailInbox.messages) {
+    const dateKey = readOperationalDateKey(message.receivedAt);
+    if (dateKey) {
+      incrementHomeCalendarActivity(byDate, dateKey, "outreach");
+    }
+  }
+
+  for (const call of data.callInbox.calls) {
+    const dateKey = readOperationalDateKey(call.endedAt ?? call.startedAt);
+    if (dateKey) {
+      incrementHomeCalendarActivity(byDate, dateKey, "outreach");
+    }
+  }
+
+  for (const item of data.aiFeed) {
+    const dateKey = readOperationalDateKey(item.at);
+    if (dateKey) {
+      incrementHomeCalendarActivity(byDate, dateKey, "customerActivity");
+    }
+  }
+
+  return byDate;
+}
+
+interface HomeCalendarActivity {
+  tasks: number;
+  payments: number;
+  outreach: number;
+  customerActivity: number;
+  totalCount: number;
+  label: string;
+  tooltip: string;
+}
+
+function emptyHomeCalendarActivity(): HomeCalendarActivity {
+  return {
+    tasks: 0,
+    payments: 0,
+    outreach: 0,
+    customerActivity: 0,
+    totalCount: 0,
+    label: "",
+    tooltip: "No activity",
+  };
+}
+
+function incrementHomeCalendarActivity(
+  byDate: Map<string, HomeCalendarActivity>,
+  dateKey: string,
+  type: "tasks" | "payments" | "outreach" | "customerActivity",
+) {
+  const current = byDate.get(dateKey) ?? emptyHomeCalendarActivity();
+  current[type] += 1;
+  current.totalCount += 1;
+  current.label = formatCalendarActivityLabel(current);
+  current.tooltip = formatCalendarActivityTooltip(current);
+  byDate.set(dateKey, current);
+}
+
+function formatCalendarActivityLabel(activity: HomeCalendarActivity) {
+  const parts = [
+    activity.tasks > 0 ? `${activity.tasks} task${pluralizeCount(activity.tasks)}` : undefined,
+    activity.payments > 0 ? `${activity.payments} payment${pluralizeCount(activity.payments)}` : undefined,
+    activity.outreach > 0 ? `${activity.outreach} outreach` : undefined,
+    activity.customerActivity > 0 ? `${activity.customerActivity} update${pluralizeCount(activity.customerActivity)}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+
+  return parts.slice(0, 2).join(", ");
+}
+
+function formatCalendarActivityTooltip(activity: HomeCalendarActivity) {
+  return [
+    `${activity.tasks} task${pluralizeCount(activity.tasks)}`,
+    `${activity.payments} payment${pluralizeCount(activity.payments)}`,
+    `${activity.outreach} outreach item${pluralizeCount(activity.outreach)}`,
+    `${activity.customerActivity} customer update${pluralizeCount(activity.customerActivity)}`,
+  ].join(" · ");
+}
+
+function homeCalendarHref(dateKey: string) {
+  const todayDateKey = formatOperatorDateKey();
+
+  return dateKey === todayDateKey ? "/" : `/?calendarDate=${encodeURIComponent(dateKey)}`;
+}
+
+function buildHomeTaskAgeBuckets(input: {
+  tasks: TaskQueueItem[];
+  invoices: InvoiceIndexEntry[];
+  calls: OperatorConsoleData["callInbox"]["calls"];
+  todayDateKey: string;
+}) {
+  const buckets = [
+    { id: "current", label: "Current", count: 0 },
+    { id: "days_1_30", label: "1-30", count: 0 },
+    { id: "days_31_60", label: "31-60", count: 0 },
+    { id: "days_61_90", label: "61-90", count: 0 },
+    { id: "days_90_plus", label: "90+", count: 0 },
+  ];
+  const invoicesByNumber = new Map(input.invoices.map((invoice) => [invoice.invoiceNumber, invoice]));
+  const invoiceNumbersByTaskId = buildCallInvoiceNumbersByTaskId(input.calls);
+
+  for (const task of input.tasks) {
+    if (!isOpenTaskStatus(task.status)) {
+      continue;
+    }
+
+    const invoiceNumbers = readTaskInvoiceNumbers(task, input.invoices, invoiceNumbersByTaskId.get(task.id));
+    const linkedInvoices = invoiceNumbers
+      .map((invoiceNumber) => invoicesByNumber.get(invoiceNumber))
+      .filter((invoice): invoice is InvoiceIndexEntry => Boolean(invoice));
+    const bucketId = readOldestInvoiceAgingBucket(linkedInvoices, input.todayDateKey);
+    const bucket = buckets.find((item) => item.id === bucketId);
+    if (bucket) {
+      bucket.count += 1;
+    }
+  }
+
+  const maxCount = Math.max(...buckets.map((bucket) => bucket.count), 1);
+  const totalCount = buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+
+  return {
+    totalCount,
+    axis: buildHomeTaskAgeAxis(maxCount),
+    buckets: buckets.map((bucket) => ({
+      ...bucket,
+      height: bucket.count > 0 ? Math.max(12, Math.round((bucket.count / maxCount) * 100)) : 0,
     })),
   };
 }
 
+function getCanonicalOpenTasks(tasks: TaskQueueItem[]) {
+  return tasks.filter((task) => isOpenTaskStatus(task.status));
+}
+
 function buildHomeTaskTypeBuckets(
-  items: Array<{ label: string; count: number }>,
+  tasks: TaskQueueItem[],
 ) {
   const palette = ["#5b8def", "#6d61f2", "#8b5cf6", "#a78bfa"];
-  const segments = items.slice(0, 4).map((item, index) => ({
-    label: item.label,
-    value: item.count,
-    color: palette[index] ?? "#c4b5fd",
-  }));
+  const countsByType = new Map<string, number>();
 
-  if (segments.length === 0) {
-    segments.push({ label: "Follow up", value: 1, color: palette[0]! });
+  for (const task of tasks) {
+    const label = taskTypeLabel(task.type);
+    countsByType.set(label, (countsByType.get(label) ?? 0) + 1);
   }
+
+  const segments = [...countsByType.entries()]
+    .map(([label, value]) => ({ label, value }))
+    .sort((left, right) => right.value - left.value)
+    .slice(0, 4)
+    .map((item, index) => ({
+      label: item.label,
+      value: item.value,
+      color: palette[index] ?? "#c4b5fd",
+    }));
 
   return { segments };
 }
 
 function buildHomeCustomerBuckets(
-  items: Array<{ label: string; count: number }>,
+  tasks: TaskQueueItem[],
+  fallbackItems: Array<{ label: string; count: number }>,
 ) {
   const palette = ["#7c6cf2", "#6d61f2", "#8b5cf6", "#c4b5fd"];
+  const countsByCustomer = new Map<string, number>();
+
+  for (const task of tasks) {
+    if (task.customerName && task.customerName !== "—") {
+      countsByCustomer.set(task.customerName, (countsByCustomer.get(task.customerName) ?? 0) + 1);
+    }
+  }
+
+  const items = countsByCustomer.size > 0
+    ? [...countsByCustomer.entries()]
+        .map(([label, count]) => ({ label, count }))
+        .sort((left, right) => right.count - left.count)
+    : fallbackItems;
   const topItems = items.slice(0, 3);
   const othersCount = items.slice(3).reduce((sum, item) => sum + item.count, 0);
   const totalCustomers = items.length;
@@ -5756,44 +9818,249 @@ function buildHomeCustomerBuckets(
     });
   }
 
-  if (segments.length === 0) {
-    segments.push({ label: "Others", value: 1, color: palette[3]! });
-  }
-
   return {
     totalCustomers,
     segments,
   };
 }
 
-function buildHomeRespondToItems(input: {
-  customerItems: Array<{ label: string; count: number; actionPath: string }>;
-  taskTypeItems: Array<{ label: string; count: number; actionPath: string }>;
-}) {
-  const primaryCustomer = input.customerItems[0];
-  const primaryTaskType = input.taskTypeItems[0];
-  const secondaryTaskType = input.taskTypeItems[1];
+function buildHomeTaskAgeAxis(maxCount: number) {
+  const top = Math.max(1, maxCount);
+  const step = Math.max(1, Math.ceil(top / 4));
 
-  return [
-    primaryCustomer
-      ? {
-          label: `${primaryCustomer.count} open tasks from ${primaryCustomer.label}`,
-          actionPath: primaryCustomer.actionPath,
-        }
-      : null,
-    primaryTaskType
-      ? {
-          label: `${primaryTaskType.count} ${primaryTaskType.label.toLowerCase()} tasks ready for action`,
-          actionPath: primaryTaskType.actionPath,
-        }
-      : null,
-    secondaryTaskType
-      ? {
-          label: `${secondaryTaskType.count} ${secondaryTaskType.label.toLowerCase()} tasks next in queue`,
-          actionPath: secondaryTaskType.actionPath,
-        }
-      : null,
-  ].filter((item): item is { label: string; actionPath: string } => Boolean(item));
+  return [step * 4, step * 3, step * 2, step, 0];
+}
+
+function buildCallInvoiceNumbersByTaskId(calls: OperatorConsoleData["callInbox"]["calls"]) {
+  const byTaskId = new Map<string, string[]>();
+
+  for (const call of calls) {
+    const invoiceNumbers = call.invoiceRefs
+      .map((invoice) => invoice.invoiceNumber)
+      .filter((invoiceNumber) => invoiceNumber.length > 0);
+    if (invoiceNumbers.length === 0) {
+      continue;
+    }
+
+    for (const task of call.taskRefs) {
+      byTaskId.set(task.id, uniqueStrings([...(byTaskId.get(task.id) ?? []), ...invoiceNumbers]));
+    }
+  }
+
+  return byTaskId;
+}
+
+function readTaskInvoiceNumbers(
+  task: TaskQueueItem,
+  invoices: InvoiceIndexEntry[],
+  linkedCallInvoiceNumbers: string[] = [],
+) {
+  const explicitNumbers = task.composeEmail?.invoices.map((invoice) => invoice.invoiceNumber) ?? [];
+  const searchableText = [
+    task.relatedRecord,
+    task.invoiceContextLabel,
+    task.invoiceContextDetail,
+    task.title,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ");
+  const matchedNumbers = invoices
+    .filter((invoice) => searchableText.includes(invoice.invoiceNumber))
+    .map((invoice) => invoice.invoiceNumber);
+
+  return uniqueStrings([...explicitNumbers, ...linkedCallInvoiceNumbers, ...matchedNumbers]);
+}
+
+function readOldestInvoiceAgingBucket(invoices: InvoiceIndexEntry[], todayDateKey: string) {
+  if (invoices.length === 0) {
+    return undefined;
+  }
+
+  const oldestDaysPastDue = Math.max(
+    ...invoices.map((invoice) => readInvoiceDaysPastDue(invoice, todayDateKey)),
+  );
+
+  if (oldestDaysPastDue <= 0) {
+    return "current";
+  }
+  if (oldestDaysPastDue <= 30) {
+    return "days_1_30";
+  }
+  if (oldestDaysPastDue <= 60) {
+    return "days_31_60";
+  }
+  if (oldestDaysPastDue <= 90) {
+    return "days_61_90";
+  }
+
+  return "days_90_plus";
+}
+
+function readInvoiceDaysPastDue(invoice: InvoiceIndexEntry, todayDateKey: string) {
+  if (!invoice.dueDate) {
+    return typeof invoice.daysPastDue === "number" ? Math.max(0, invoice.daysPastDue) : 0;
+  }
+
+  return Math.max(0, diffOperatorCalendarDays(invoice.dueDate, todayDateKey));
+}
+
+function buildHomeRespondToItems(input: {
+  todayDateKey: string;
+  invoices: InvoiceIndexEntry[];
+  taskQueue: OperatorConsoleData["taskQueue"];
+  collectionsQueue: CollectionsQueueItem[];
+  calls: OperatorConsoleData["callInbox"]["calls"];
+}) {
+  const disputeTasks = findOpenDisputeTasks(input.taskQueue);
+  const brokenPromiseTasks = findOpenBrokenPromiseTasks(input);
+  const openTasks = getCanonicalOpenTasks(input.taskQueue);
+  const openTaskCustomerCount = new Set(
+    openTasks
+      .map((item) => item.customerName)
+      .filter((customerName) => customerName && customerName !== "—"),
+  ).size;
+  const hasData = disputeTasks.length > 0 || brokenPromiseTasks.length > 0 || openTasks.length > 0;
+
+  return {
+    items: hasData
+      ? [
+          {
+            label: `Invoice payment disputes: ${disputeTasks.length} open dispute review task${pluralizeCount(disputeTasks.length)}`,
+            detail: "Invoice payment disputes count open dispute-related tasks in the task queue, not raw disputed invoice records.",
+            actionPath: "/tasks",
+            actionLabel: "View",
+          },
+          {
+            label: `Broken promises to pay: ${brokenPromiseTasks.length} open follow-up task${pluralizeCount(brokenPromiseTasks.length)}`,
+            detail: "Broken promises to pay count open task-queue follow-ups for missed or broken payment promises.",
+            actionPath: "/tasks",
+            actionLabel: "View",
+          },
+          {
+            label: `${openTasks.length} open task${pluralizeCount(openTasks.length)} from ${openTaskCustomerCount} customer${pluralizeCount(openTaskCustomerCount)}`,
+            detail: "Open tasks use the canonical task queue definition: open, in progress, or pending approval; completed and closed work is excluded.",
+            actionPath: "/tasks",
+            actionLabel: "Open tasks",
+          },
+        ]
+      : [],
+  };
+}
+
+function buildHomeDueTodaySummary(input: {
+  todayDateKey: string;
+  invoices: InvoiceIndexEntry[];
+}) {
+  const dueTodayInvoices = input.invoices.filter(
+    (invoice) =>
+      invoice.openAmountCents > 0 &&
+      invoice.dueDate === input.todayDateKey &&
+      invoice.status !== "paid" &&
+      invoice.status !== "voided",
+  );
+  const customerCount = new Set(
+    dueTodayInvoices.map((invoice) => invoice.billingAccountId ?? invoice.billingAccountName ?? invoice.customerName),
+  ).size;
+  const amountCents = dueTodayInvoices.reduce(
+    (sum, invoice) =>
+      sum + Math.max(readInvoiceDueNowAmount(invoice) ?? invoice.openAmountCents, 0),
+    0,
+  );
+
+  return {
+    label: `${formatPhp(amountCents)} currently due today from ${customerCount} customer${pluralizeCount(customerCount)}`,
+    actionPath: "/invoices",
+  };
+}
+
+function readInvoiceDueNowAmount(invoice: InvoiceIndexEntry) {
+  const value = (invoice as InvoiceIndexEntry & { dueNowAmountCents?: unknown }).dueNowAmountCents;
+  return typeof value === "number" ? value : undefined;
+}
+
+function readOperationalDateKey(value?: string) {
+  if (!value || value === "—") {
+    return undefined;
+  }
+
+  const normalizedDateKey = normalizeOperatorDateKey(value.slice(0, 10));
+  if (normalizedDateKey) {
+    return normalizedDateKey;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+
+  return formatOperatorDateKey(parsed);
+}
+
+function readTaskDateKey(task: TaskQueueItem, todayDateKey: string) {
+  return parseOperatorTaskDateLabel(task.dueDateLabel, todayDateKey) ??
+    parseOperatorTaskDateLabel(task.createdLabel, todayDateKey);
+}
+
+function parseOperatorTaskDateLabel(label: string, todayDateKey: string) {
+  if (!label || label === "—") {
+    return undefined;
+  }
+  if (/\bago$/i.test(label)) {
+    return todayDateKey;
+  }
+
+  const normalizedDateKey = normalizeOperatorDateKey(label.slice(0, 10));
+  if (normalizedDateKey) {
+    return normalizedDateKey;
+  }
+
+  const referenceYear = Number(todayDateKey.slice(0, 4));
+  const parsed = new Date(`${label}, ${referenceYear} GMT+0800`);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+
+  return formatOperatorDateKey(parsed);
+}
+
+function isOpenTaskStatus(status: TaskQueueItem["status"] | string) {
+  return status === "open" || status === "in_progress" || status === "pending_approval";
+}
+
+function findOpenDisputeTasks(taskQueue: OperatorConsoleData["taskQueue"]) {
+  return taskQueue.filter((task) =>
+    isOpenTaskStatus(task.status) &&
+    /dispute/i.test([
+      task.title,
+      task.brief,
+      task.recommendedNextAction,
+      task.transcriptSnippet,
+      task.sourceLabel,
+    ].filter((value): value is string => Boolean(value)).join(" ")),
+  );
+}
+
+function findOpenBrokenPromiseTasks(input: {
+  todayDateKey: string;
+  taskQueue: OperatorConsoleData["taskQueue"];
+}) {
+  return input.taskQueue.filter((task) => {
+    const text = `${task.title} ${task.brief ?? ""}`.toLowerCase();
+    if (!isOpenTaskStatus(task.status) || (!text.includes("promise") && !text.includes("ptp"))) {
+      return false;
+    }
+
+    const dueDateKey = parseOperatorTaskDateLabel(task.dueDateLabel, input.todayDateKey);
+    return text.includes("broken") || text.includes("missed") || Boolean(dueDateKey && dueDateKey < input.todayDateKey);
+  });
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values.filter((value) => value.trim().length > 0))];
+}
+
+function pluralizeCount(count: number) {
+  return count === 1 ? "" : "s";
 }
 
 function humanize(value: string) {
@@ -5879,14 +10146,62 @@ interface CollectionsInboxListItem {
   id: string;
   customerName: string;
   email: string;
+  fromEmail?: string;
+  toEmail?: string;
+  fromName?: string;
   subjectLine?: string;
   preview: string;
   owner: string;
   receivedLabel: string;
-  bucket: "unread" | "sent" | "draft";
+  bucket: "unread" | "sent" | "draft" | "read";
   isLinked?: boolean;
+  customerFilterValue?: string;
+  workflowKey?: string;
+  workflowName?: string;
   providerThreadId?: string;
   providerMessageId?: string;
+  contactName?: string;
+  billingAccountId?: string;
+  parentAccountId?: string;
+  accountNumber?: string;
+  relatedInvoices: Array<{
+    invoiceNumber: string;
+    openAmountCents: number;
+    overdueAmountCents?: number;
+    currency: string;
+    billingAccountId?: string;
+    parentAccountId?: string;
+  }>;
+}
+
+interface NormalizedCollectionsEmailFilters {
+  folder: CollectionsEmailFolderFilter;
+  customer: string;
+  workflow: string;
+  q: string;
+}
+
+interface NormalizedCollectionsCallFilters {
+  direction: CallInboxDirection | "all";
+  status: CallInboxStatus | "all";
+  voicemail: CollectionsCallVoicemailFilter;
+  customer: string;
+  classification: string;
+  workflow: string;
+  date: string;
+  dateFrom: string;
+  dateTo: string;
+}
+
+interface FilterOption {
+  value: string;
+  label: string;
+}
+
+interface EmailCustomerMatch extends FilterOption {
+  billingAccountId?: string;
+  parentAccountId?: string;
+  accountNumber?: string;
 }
 
 function buildCollectionsInboxItems(data: OperatorConsoleData): CollectionsInboxListItem[] {
@@ -5900,48 +10215,770 @@ function buildCollectionsInboxItems(data: OperatorConsoleData): CollectionsInbox
           ? messageAddresses.includes(item.contactEmail.toLowerCase())
           : false;
       });
-      const customerName =
-        queueItem?.accountName ??
-        message.fromName ??
-        message.fromEmail ??
-        message.toEmail ??
-        `Collections thread ${index + 1}`;
+      const invoiceMatch = findEmailInvoiceMention(data, message);
+      const customerMatch = findEmailCustomerMatch(data, message, queueItem, invoiceMatch);
+      const customerName = customerMatch?.label ?? message.fromName ?? message.fromEmail ?? "Unknown sender";
       const directionBucket =
-        message.direction === "outbound" ? "sent" : message.unread ? "unread" : "draft";
+        message.direction === "outbound" ? "sent" : message.unread ? "unread" : "read";
+      const relatedInvoices = findEmailRelatedInvoices(data, customerMatch?.label, queueItem, invoiceMatch);
+      const contactEmail = queueItem?.contactEmail ?? message.fromEmail ?? message.toEmail;
+      const workflowMatch = findEmailWorkflowMatch(data, customerMatch?.label, relatedInvoices);
+      const billingAccountId = customerMatch?.billingAccountId ?? relatedInvoices[0]?.billingAccountId;
+      const parentAccountId = customerMatch?.parentAccountId ?? relatedInvoices[0]?.parentAccountId;
+      const accountNumber = customerMatch?.accountNumber ?? customerMatch?.billingAccountId ?? relatedInvoices[0]?.billingAccountId;
 
       return {
         id: message.providerMessageId,
         customerName,
-        email: queueItem?.contactEmail ?? message.fromEmail ?? message.toEmail ?? "unknown@customer.com",
+        email: contactEmail ?? "No email address",
+        ...(message.fromEmail ? { fromEmail: message.fromEmail } : {}),
+        ...(message.toEmail ? { toEmail: message.toEmail } : {}),
+        ...(message.fromName ? { fromName: message.fromName } : {}),
         ...(message.subjectLine ? { subjectLine: message.subjectLine } : {}),
-        preview: message.subjectLine ?? message.snippet ?? queueItem?.nextAction ?? "Open thread for context.",
-        owner: queueItem?.assignee ?? "Juan Cruz",
+        preview: message.snippet ?? queueItem?.nextAction ?? "No preview available.",
+        owner: queueItem?.assignee ?? "Unassigned",
         receivedLabel: formatCollectionsMessageTime(message.receivedAt),
         bucket: directionBucket,
-        isLinked: Boolean(queueItem),
+        isLinked: Boolean(customerMatch),
+        ...(customerMatch?.value ? { customerFilterValue: customerMatch.value } : {}),
+        ...(workflowMatch?.value ? { workflowKey: workflowMatch.value } : {}),
+        ...(workflowMatch?.label ? { workflowName: workflowMatch.label } : {}),
         ...(message.providerThreadId ? { providerThreadId: message.providerThreadId } : {}),
         providerMessageId: message.providerMessageId,
+        ...(queueItem?.contactName ?? message.fromName ? { contactName: queueItem?.contactName ?? message.fromName } : {}),
+        ...(billingAccountId ? { billingAccountId } : {}),
+        ...(parentAccountId ? { parentAccountId } : {}),
+        ...(accountNumber ? { accountNumber } : {}),
+        relatedInvoices,
       };
     });
   }
 
-  return data.collectionsQueue.slice(0, 4).map((item, index) => ({
-    id: item.id,
-    customerName: item.accountName,
-    email: item.contactEmail ?? collectionEmail(index),
-    subjectLine: `Re: ${item.nextAction}`,
-    preview: [
-      `Re: ${item.nextAction}`,
-      `${item.rationale}`,
-      `Collections update: ${item.promiseDue}. ${item.nextAction}`,
-      `Need customer confirmation before release. ${item.rationale}`,
-    ][index] ?? item.nextAction,
-    owner: item.assignee ?? collectionAssignee(index),
-    receivedLabel: ["3 hours ago", "3 hours ago", "10/24/2025", "10/22/2025"][index] ?? "Just now",
-    bucket: (["unread", "unread", "sent", "draft"] as const)[index] ?? "unread",
-    isLinked: index === 2,
-    providerMessageId: item.id,
-  }));
+  return [];
+}
+
+function buildCollectionsInboxCounts(items: CollectionsInboxListItem[]) {
+  return {
+    all: items.length,
+    unread: items.filter((item) => item.bucket === "unread").length,
+    sent: items.filter((item) => item.bucket === "sent").length,
+    drafts: items.filter((item) => item.bucket === "draft").length,
+  };
+}
+
+function normalizeCollectionsEmailFilters(filters?: CollectionsEmailFilterInput): NormalizedCollectionsEmailFilters {
+  const folder =
+    filters?.folder === "unread" || filters?.folder === "sent" || filters?.folder === "drafts"
+      ? filters.folder
+      : "all";
+  return {
+    folder,
+    customer: normalizeSelectFilterValue(filters?.customer),
+    workflow: "all",
+    q: filters?.q?.trim() ?? "",
+  };
+}
+
+function normalizeCollectionsCallFilters(
+  filters?:
+    | CollectionsCallFilterInput
+    | {
+        direction?: CallInboxDirection;
+        status?: CallInboxStatus;
+        voicemail?: boolean;
+        customer?: string;
+        classification?: string;
+        workflow?: string;
+        dateFrom?: string;
+        dateTo?: string;
+      },
+): NormalizedCollectionsCallFilters {
+  const explicitDate = filters && "date" in filters ? filters.date?.trim() : undefined;
+  const date = explicitDate || (filters?.dateFrom && filters.dateFrom === filters.dateTo ? filters.dateFrom : "");
+  const voicemail =
+    typeof filters?.voicemail === "boolean"
+      ? filters.voicemail
+        ? "yes"
+        : "no"
+      : filters?.voicemail === "yes" || filters?.voicemail === "no"
+        ? filters.voicemail
+        : "all";
+  return {
+    direction:
+      filters?.direction === "inbound" || filters?.direction === "outbound" || filters?.direction === "unknown"
+        ? filters.direction
+        : "all",
+    status:
+      filters?.status === "processing" ||
+      filters?.status === "completed" ||
+      filters?.status === "needs_review" ||
+      filters?.status === "failed" ||
+      filters?.status === "archived"
+        ? filters.status
+        : "all",
+    voicemail,
+    customer: normalizeSelectFilterValue(filters?.customer),
+    classification: normalizeSelectFilterValue(filters?.classification),
+    workflow: normalizeSelectFilterValue(filters?.workflow),
+    date,
+    dateFrom: filters?.dateFrom?.trim() ?? date,
+    dateTo: filters?.dateTo?.trim() ?? date,
+  };
+}
+
+function normalizeSelectFilterValue(value: string | undefined) {
+  const normalized = value?.trim();
+  return normalized && normalized !== "all" ? normalized : "all";
+}
+
+function hasActiveCollectionsEmailFilters(filters: NormalizedCollectionsEmailFilters) {
+  return filters.folder !== "all" || filters.customer !== "all" || filters.q.length > 0;
+}
+
+function hasActiveCollectionsCallFilters(filters: NormalizedCollectionsCallFilters) {
+  return (
+    filters.direction !== "all" ||
+    filters.status !== "all" ||
+    filters.voicemail !== "all" ||
+    filters.customer !== "all" ||
+    filters.classification !== "all" ||
+    filters.workflow !== "all" ||
+    filters.date.length > 0 ||
+    filters.dateFrom.length > 0 ||
+    filters.dateTo.length > 0
+  );
+}
+
+function buildEmailCustomerFilterOptions(data: OperatorConsoleData): FilterOption[] {
+  return buildCallFilterOptions(
+    data.customerIndex.map((customer) => ({
+      value: customer.profileId ?? customer.billingAccountId ?? customer.canonicalName,
+      label: customer.canonicalName ?? customer.billingAccountName ?? customer.billingAccountId ?? customer.profileId,
+    })),
+  );
+}
+
+function buildCallFilterOptions(options: FilterOption[]): FilterOption[] {
+  const seen = new Map<string, FilterOption>();
+  for (const option of options) {
+    const value = option.value.trim();
+    const label = option.label.trim();
+    if (!value || !label) {
+      continue;
+    }
+    const key = value.toLowerCase();
+    if (!seen.has(key)) {
+      seen.set(key, { value, label });
+    }
+  }
+  return [...seen.values()].sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function filterCollectionsEmailItems(
+  data: OperatorConsoleData,
+  items: CollectionsInboxListItem[],
+  filters: NormalizedCollectionsEmailFilters,
+): CollectionsInboxListItem[] {
+  const query = filters.q.toLowerCase();
+  const customerFilter = filters.customer.toLowerCase();
+  const workflowFilter = filters.workflow.toLowerCase();
+  return items.filter((item) => {
+    if (filters.folder === "drafts" && item.bucket !== "draft") {
+      return false;
+    }
+    if (filters.folder !== "all" && filters.folder !== "drafts" && item.bucket !== filters.folder) {
+      return false;
+    }
+    const relatedTasks = findEmailInboxTasks(data, item);
+    const haystack = buildEmailItemSearchText(item, relatedTasks);
+    if (customerFilter !== "all" && !emailItemMatchesCustomer(item, customerFilter)) {
+      return false;
+    }
+    if (
+      workflowFilter !== "all" &&
+      item.workflowKey?.toLowerCase() !== workflowFilter &&
+      item.workflowName?.toLowerCase() !== workflowFilter &&
+      !haystack.includes(workflowFilter)
+    ) {
+      return false;
+    }
+    if (query && !haystack.includes(query)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function buildEmailItemSearchText(item: CollectionsInboxListItem, tasks: TaskQueueItem[]) {
+  return [
+    item.customerName,
+    item.email,
+    item.fromEmail,
+    item.toEmail,
+    item.fromName,
+    item.subjectLine,
+    item.preview,
+    item.billingAccountId,
+    item.parentAccountId,
+    item.accountNumber,
+    item.workflowName,
+    item.workflowKey,
+    ...item.relatedInvoices.flatMap((invoice) => [
+      invoice.invoiceNumber,
+      invoice.billingAccountId,
+      invoice.parentAccountId,
+    ]),
+    ...tasks.flatMap((task) => [
+      task.title,
+      task.brief,
+      task.type,
+      task.relatedRecord,
+      task.customerName,
+      task.ownerTeam,
+    ]),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+}
+
+function emailItemMatchesCustomer(item: CollectionsInboxListItem, customerFilter: string) {
+  return [
+    item.customerFilterValue,
+    item.customerName,
+    item.billingAccountId,
+    item.parentAccountId,
+    item.accountNumber,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .some((value) => value.toLowerCase() === customerFilter || value.toLowerCase().includes(customerFilter));
+}
+
+function filterCallInboxItems(
+  items: OperatorConsoleData["callInbox"]["items"],
+  filters: NormalizedCollectionsCallFilters,
+) {
+  const customerFilter = filters.customer.toLowerCase();
+  const classificationFilter = filters.classification.toLowerCase();
+  const workflowFilter = filters.workflow.toLowerCase();
+  const dateFrom = filters.dateFrom ? operatorDateKeyToDate(filters.dateFrom).getTime() : undefined;
+  const dateTo = filters.dateTo ? new Date(`${filters.dateTo}T23:59:59.999+08:00`).getTime() : undefined;
+  return items.filter((item) => {
+    if (filters.direction !== "all" && item.direction !== filters.direction) {
+      return false;
+    }
+    if (filters.status !== "all" && item.status !== filters.status) {
+      return false;
+    }
+    if (filters.voicemail === "yes" && !item.voicemail) {
+      return false;
+    }
+    if (filters.voicemail === "no" && item.voicemail) {
+      return false;
+    }
+    if (
+      customerFilter !== "all" &&
+      !item.customerName.toLowerCase().includes(customerFilter) &&
+      !item.billingAccountId?.toLowerCase().includes(customerFilter)
+    ) {
+      return false;
+    }
+    if (
+      classificationFilter !== "all" &&
+      !item.classifications.some((classification) =>
+        classification.toLowerCase().includes(classificationFilter),
+      )
+    ) {
+      return false;
+    }
+    if (workflowFilter !== "all" && !item.workflowName?.toLowerCase().includes(workflowFilter)) {
+      return false;
+    }
+    const startedAt = new Date(item.startedAt).getTime();
+    if (dateFrom !== undefined && startedAt < dateFrom) {
+      return false;
+    }
+    if (dateTo !== undefined && startedAt > dateTo) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function buildCollectionsEmailHref(
+  filters: NormalizedCollectionsEmailFilters,
+  extra?: { threadId?: string },
+) {
+  const params = new URLSearchParams();
+  params.set("tab", "email");
+  if (filters.folder !== "all") {
+    params.set("folder", filters.folder);
+  }
+  if (filters.customer !== "all") {
+    params.set("customer", filters.customer);
+  }
+  if (filters.workflow !== "all") {
+    params.set("workflow", filters.workflow);
+  }
+  if (filters.q) {
+    params.set("q", filters.q);
+  }
+  if (extra?.threadId) {
+    params.set("threadId", extra.threadId);
+  }
+  return `/collections?${params.toString()}`;
+}
+
+function buildCallInboxExportHref(filters: NormalizedCollectionsCallFilters, fallback: string) {
+  const params = new URLSearchParams();
+  if (filters.direction !== "all") {
+    params.set("direction", filters.direction);
+  }
+  if (filters.status !== "all") {
+    params.set("status", filters.status);
+  }
+  if (filters.voicemail !== "all") {
+    params.set("voicemail", filters.voicemail === "yes" ? "true" : "false");
+  }
+  if (filters.customer !== "all") {
+    params.set("customer", filters.customer);
+  }
+  if (filters.classification !== "all") {
+    params.set("classification", filters.classification);
+  }
+  if (filters.workflow !== "all") {
+    params.set("workflow", filters.workflow);
+  }
+  if (filters.dateFrom) {
+    params.set("dateFrom", filters.dateFrom);
+  }
+  if (filters.dateTo) {
+    params.set("dateTo", filters.dateTo);
+  }
+  const query = params.toString();
+  return query ? `/collections/call-inbox/export?${query}` : fallback;
+}
+
+function buildCallInboxHref(filters: NormalizedCollectionsCallFilters) {
+  const params = new URLSearchParams();
+  params.set("tab", "call-inbox");
+  if (filters.direction !== "all") {
+    params.set("direction", filters.direction);
+  }
+  if (filters.status !== "all") {
+    params.set("status", filters.status);
+  }
+  if (filters.voicemail !== "all") {
+    params.set("voicemail", filters.voicemail === "yes" ? "true" : "false");
+  }
+  if (filters.customer !== "all") {
+    params.set("customer", filters.customer);
+  }
+  if (filters.classification !== "all") {
+    params.set("classification", filters.classification);
+  }
+  if (filters.workflow !== "all") {
+    params.set("workflow", filters.workflow);
+  }
+  if (filters.dateFrom) {
+    params.set("dateFrom", filters.dateFrom);
+  }
+  if (filters.dateTo) {
+    params.set("dateTo", filters.dateTo);
+  }
+  return `/collections?${params.toString()}`;
+}
+
+function formatCallDateRangeLabel(dateFrom: string, dateTo: string) {
+  if (!dateFrom && !dateTo) {
+    return "";
+  }
+  const formatDate = (value: string) =>
+    formatOperatorDate(operatorDateKeyToDate(value), {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  if (dateFrom && dateTo && dateFrom === dateTo) {
+    return formatDate(dateFrom);
+  }
+  if (dateFrom && dateTo) {
+    return `${formatDate(dateFrom)} - ${formatDate(dateTo)}`;
+  }
+  if (dateFrom) {
+    return `From ${formatDate(dateFrom)}`;
+  }
+  return `Through ${formatDate(dateTo)}`;
+}
+
+function collectionsEmailModalId(item: CollectionsInboxListItem) {
+  return `collections-email-detail-${sanitizeDomId(item.providerThreadId ?? item.id)}`;
+}
+
+function sanitizeDomId(value: string) {
+  return value.replace(/[^A-Za-z0-9_-]/g, "-");
+}
+
+function findEmailCustomerMatch(
+  data: OperatorConsoleData,
+  message: OperatorConsoleData["emailInbox"]["messages"][number],
+  queueItem?: CollectionsQueueItem,
+  invoiceMatch?: InvoiceIndexEntry,
+): EmailCustomerMatch | undefined {
+  const messageAddresses = [message.fromEmail, message.toEmail]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.trim().toLowerCase());
+  const queueEmail = queueItem?.contactEmail?.trim().toLowerCase();
+  const candidates = data.customerIndex;
+  const byEmail = candidates.find((customer) =>
+    customer.primaryContactEmail
+      ? messageAddresses.includes(customer.primaryContactEmail.trim().toLowerCase())
+      : false,
+  );
+  const byInvoice = invoiceMatch
+    ? candidates.find(
+        (customer) =>
+          (invoiceMatch.billingAccountId && customer.billingAccountId === invoiceMatch.billingAccountId) ||
+          namesMatch(customer.parentAccountName, invoiceMatch.parentAccountName) ||
+          namesMatch(customer.canonicalName, invoiceMatch.customerName) ||
+          namesMatch(customer.billingAccountName, invoiceMatch.billingAccountName),
+      )
+    : undefined;
+  const byQueue = queueItem
+    ? candidates.find(
+        (customer) =>
+          (queueEmail && customer.primaryContactEmail?.trim().toLowerCase() === queueEmail) ||
+          namesMatch(customer.canonicalName, queueItem.accountName) ||
+          namesMatch(customer.billingAccountName, queueItem.accountName),
+      )
+    : undefined;
+  const customer = byEmail ?? byInvoice ?? byQueue;
+  if (customer) {
+    return {
+      label: customer.canonicalName || customer.billingAccountName || queueItem?.accountName || invoiceMatch?.customerName || "Unknown customer",
+      value: customer.profileId ?? customer.billingAccountId ?? customer.canonicalName,
+      ...(customer.billingAccountId ? { billingAccountId: customer.billingAccountId } : {}),
+      ...(customer.billingAccountId ? { accountNumber: customer.billingAccountId } : {}),
+    };
+  }
+  if (queueItem) {
+    return {
+      label: queueItem.accountName,
+      value: queueItem.id,
+    };
+  }
+  if (invoiceMatch) {
+    return {
+      label: invoiceMatch.customerName,
+      value: invoiceMatch.billingAccountId ?? invoiceMatch.parentAccountId ?? invoiceMatch.customerName,
+      ...(invoiceMatch.billingAccountId ? { billingAccountId: invoiceMatch.billingAccountId } : {}),
+      ...(invoiceMatch.parentAccountId ? { parentAccountId: invoiceMatch.parentAccountId } : {}),
+      ...(invoiceMatch.billingAccountId ? { accountNumber: invoiceMatch.billingAccountId } : {}),
+    };
+  }
+  return undefined;
+}
+
+function namesMatch(left: string | undefined, right: string | undefined) {
+  const normalizedLeft = left?.trim().toLowerCase();
+  const normalizedRight = right?.trim().toLowerCase();
+  return Boolean(
+    normalizedLeft &&
+      normalizedRight &&
+      (normalizedLeft === normalizedRight ||
+        normalizedLeft.includes(normalizedRight) ||
+        normalizedRight.includes(normalizedLeft)),
+  );
+}
+
+function findEmailWorkflowMatch(
+  data: OperatorConsoleData,
+  customerName: string | undefined,
+  relatedInvoices: CollectionsInboxListItem["relatedInvoices"],
+): FilterOption | undefined {
+  const invoiceRefs = new Set(relatedInvoices.map((invoice) => invoice.invoiceNumber.toLowerCase()));
+  const matchingTask = data.taskQueue.find((task) => {
+    const relatedRecord = task.relatedRecord?.toLowerCase();
+    return (
+      Boolean(customerName && namesMatch(task.customerName, customerName)) ||
+      Boolean(relatedRecord && invoiceRefs.has(relatedRecord))
+    );
+  });
+  if (matchingTask?.ownerTeam) {
+    return { value: matchingTask.ownerTeam, label: titleCase(matchingTask.ownerTeam.replace(/_/g, " ")) };
+  }
+  const workflow = data.controlCenter.workflows.find((candidate) =>
+    customerName ? candidate.name.toLowerCase().includes(customerName.toLowerCase()) : false,
+  );
+  return workflow ? { value: workflow.id, label: workflow.name } : undefined;
+}
+
+function findEmailRelatedInvoices(
+  data: OperatorConsoleData,
+  customerName: string | undefined,
+  queueItem?: CollectionsQueueItem,
+  invoiceMatch?: InvoiceIndexEntry,
+): CollectionsInboxListItem["relatedInvoices"] {
+  const candidates = [
+    customerName,
+    queueItem?.accountName,
+    invoiceMatch?.customerName,
+    invoiceMatch?.billingAccountName,
+    invoiceMatch?.billingAccountId,
+    invoiceMatch?.parentAccountName,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const explicitInvoiceNumber = invoiceMatch?.invoiceNumber.toLowerCase();
+
+  return data.invoiceIndex.invoices
+    .filter((invoice) => {
+      if (explicitInvoiceNumber && invoice.invoiceNumber.toLowerCase() === explicitInvoiceNumber) {
+        return true;
+      }
+      const invoiceNames = [invoice.customerName, invoice.billingAccountName, invoice.parentAccountName]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => value.trim().toLowerCase());
+      const invoiceIds = [invoice.billingAccountId, invoice.parentAccountId]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => value.trim().toLowerCase());
+      return candidates.some((candidate) => {
+        const idMatch = invoiceIds.some((id) => id === candidate);
+        const nameMatch = invoiceNames.some((name) => name === candidate || name.includes(candidate) || candidate.includes(name));
+        return idMatch || nameMatch;
+      });
+    })
+    .filter((invoice) => invoice.openAmountCents > 0)
+    .slice(0, 6)
+    .map((invoice) => ({
+      invoiceNumber: invoice.invoiceNumber,
+      openAmountCents: invoice.openAmountCents,
+      ...(invoice.overdueAmountCents !== undefined ? { overdueAmountCents: invoice.overdueAmountCents } : {}),
+      currency: invoice.currency,
+      ...(invoice.billingAccountId ? { billingAccountId: invoice.billingAccountId } : {}),
+      ...(invoice.parentAccountId ? { parentAccountId: invoice.parentAccountId } : {}),
+    }));
+}
+
+function findEmailInvoiceMention(
+  data: OperatorConsoleData,
+  message: OperatorConsoleData["emailInbox"]["messages"][number],
+) {
+  const haystack = [message.subjectLine, message.snippet]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+  if (!haystack) {
+    return undefined;
+  }
+  return data.invoiceIndex.invoices.find((invoice) =>
+    haystack.includes(invoice.invoiceNumber.toLowerCase()),
+  );
+}
+
+function buildCollectionsEmailThreadMessages(data: OperatorConsoleData, item: CollectionsInboxListItem) {
+  if (
+    item.providerThreadId &&
+    data.emailInbox.selectedThread?.providerThreadId === item.providerThreadId &&
+    data.emailInbox.selectedThread.messages.length > 0
+  ) {
+    return data.emailInbox.selectedThread.messages;
+  }
+
+  const message = data.emailInbox.messages.find((candidate) => candidate.providerMessageId === item.providerMessageId);
+  return message ? [message] : [];
+}
+
+function findEmailInboxTasks(data: OperatorConsoleData, item: CollectionsInboxListItem) {
+  const normalizedCustomer = item.customerName.toLowerCase();
+  const invoiceRefs = new Set(item.relatedInvoices.map((invoice) => invoice.invoiceNumber.toLowerCase()));
+
+  return data.taskQueue.filter((task) => {
+    const taskCustomer = task.customerName.toLowerCase();
+    const relatedRecord = task.relatedRecord?.toLowerCase();
+    return (
+      taskCustomer === normalizedCustomer ||
+      taskCustomer.includes(normalizedCustomer) ||
+      normalizedCustomer.includes(taskCustomer) ||
+      (relatedRecord ? invoiceRefs.has(relatedRecord) : false)
+    );
+  });
+}
+
+function buildCollectionsEmailDraft(item: CollectionsInboxListItem) {
+  const invoiceList = item.relatedInvoices.map((invoice) => invoice.invoiceNumber).join(", ");
+  const invoiceSentence = invoiceList
+    ? `We are reviewing ${invoiceList} and will keep the billing-account context attached before any next step.`
+    : "We are reviewing the account context before any next step.";
+
+  return [
+    "Hi,",
+    "",
+    "Thanks for the update.",
+    invoiceSentence,
+    "If payment has already been released, please share the remittance details so we can reconcile safely.",
+    "",
+    "Thank you.",
+  ].join("\n");
+}
+
+function buildCollectionsEmailComposeContext(data: OperatorConsoleData, item: CollectionsInboxListItem) {
+  const now = new Date().toISOString();
+  const relatedInvoiceNumbers = new Set(item.relatedInvoices.map((invoice) => invoice.invoiceNumber));
+  const matchedInvoices = data.invoiceIndex.invoices.filter((invoice) =>
+    relatedInvoiceNumbers.has(invoice.invoiceNumber),
+  );
+  const invoices: NonNullable<TaskQueueItem["composeEmail"]>["invoices"] =
+    matchedInvoices.length > 0
+      ? matchedInvoices.map(mapInvoiceIndexEntryToComposeInvoice)
+      : item.relatedInvoices.map((invoice) => ({
+          id: `collections-invoice-${sanitizeDomId(invoice.invoiceNumber)}`,
+          createdAt: now,
+          updatedAt: now,
+          state: "synced_open" as const,
+          parentAccountId:
+            invoice.parentAccountId ?? item.parentAccountId ?? item.billingAccountId ?? item.id,
+          billingAccountId:
+            invoice.billingAccountId ?? item.billingAccountId ?? item.id,
+          invoiceNumber: invoice.invoiceNumber,
+          currency: invoice.currency,
+          amountCents: invoice.openAmountCents,
+          metadata: {
+            source: "collections_email_context",
+            customerName: item.customerName,
+          },
+        }));
+  const firstInvoice = invoices[0];
+  const billingAccountId =
+    item.billingAccountId ?? firstInvoice?.billingAccountId ?? item.accountNumber ?? item.id;
+  const parentAccountId = item.parentAccountId ?? firstInvoice?.parentAccountId ?? billingAccountId;
+
+  return {
+    account: {
+      id: billingAccountId,
+      createdAt: now,
+      updatedAt: now,
+      parentAccountId,
+      ...(firstInvoice?.branchId ? { branchId: firstInvoice.branchId } : {}),
+      accountNumber: item.accountNumber ?? billingAccountId,
+      displayName: item.customerName,
+      currency: firstInvoice?.currency ?? item.relatedInvoices[0]?.currency ?? "PHP",
+      accountTier: "standard" as const,
+      status: "active" as const,
+      centrallyPaid: Boolean(item.parentAccountId),
+      metadata: {
+        source: "collections_email_context",
+        ...(item.workflowName ? { workflowName: item.workflowName } : {}),
+      },
+    },
+    contact: {
+      id: `collections-contact-${sanitizeDomId(item.email)}`,
+      createdAt: now,
+      updatedAt: now,
+      parentAccountId,
+      billingAccountId,
+      ...(firstInvoice?.branchId ? { branchId: firstInvoice.branchId } : {}),
+      scope: "billing_account" as const,
+      scopeId: billingAccountId,
+      fullName: item.contactName ?? item.customerName,
+      email: item.email === "No email address" ? undefined : item.email,
+      role: "ap" as const,
+      isPrimary: true,
+      isVerified: true,
+      allowAutoSend: true,
+      recentSuccessfulResponses: 0,
+      metadata: {
+        source: "collections_email_context",
+        trustedLiveThreadReply: Boolean(item.providerThreadId),
+      },
+    },
+    invoices,
+  };
+}
+
+function getAvailableCollectionsEmailTemplates(data: OperatorConsoleData) {
+  return data.controlCenter.templates.filter(
+    (template) => template.channelCompatibility.includes("email") && !template.isArchived,
+  );
+}
+
+function renderCollectionsTemplateText(templateText: string, item: CollectionsInboxListItem) {
+  return applyTemplatePreviewVariables(templateText, buildCollectionsTemplateVariables(item));
+}
+
+function renderCustomerTemplateText(
+  templateText: string,
+  customer: OperatorConsoleData["customerIndex"][number],
+  composeEmail: NonNullable<TaskQueueItem["composeEmail"]>,
+) {
+  const overdueInvoices = composeEmail.invoices.filter((invoice) => invoice.state !== "paid" && (invoice.dueDate ?? "") < formatOperatorDateKey(new Date()));
+  const openBalanceCents = composeEmail.invoices.reduce((sum, invoice) => sum + invoice.amountCents, 0);
+  const overdueBalanceCents = overdueInvoices.reduce((sum, invoice) => sum + invoice.amountCents, 0);
+  const invoiceNumbers = composeEmail.invoices.map((invoice) => invoice.invoiceNumber).join(", ");
+  const invoiceSummary = (overdueInvoices.length > 0 ? overdueInvoices : composeEmail.invoices)
+    .map((invoice) => `- Invoice ${invoice.invoiceNumber}: ${formatPhp(invoice.amountCents)}${overdueInvoices.includes(invoice) ? " overdue" : " open"}`)
+    .join("\n");
+  return applyTemplatePreviewVariables(templateText, {
+    customer_name: composeEmail.contact.fullName,
+    name: composeEmail.contact.fullName,
+    customer_company_name: customer.canonicalName,
+    billing_account_name: composeEmail.account.displayName,
+    customer_external_id: composeEmail.account.accountNumber,
+    sender_company_name: "Yield AROS",
+    invoice_numbers: invoiceNumbers,
+    overdue_invoice_summary: invoiceSummary || "No linked invoices.",
+    overdue_balance: formatPhp(overdueBalanceCents),
+    upcoming_balance: formatPhp(Math.max(openBalanceCents - overdueBalanceCents, 0)),
+    total_account_balance: formatPhp(openBalanceCents),
+    payment_url: composeEmail.account.accountNumber ? `https://pay.yieldaros.example/account/${composeEmail.account.accountNumber}` : "",
+    num_upcoming_invoices: String(Math.max(composeEmail.invoices.length - overdueInvoices.length, 0)),
+  });
+}
+
+function buildCollectionsTemplateVariables(item: CollectionsInboxListItem) {
+  const overdueInvoices = item.relatedInvoices.filter((invoice) => (invoice.overdueAmountCents ?? 0) > 0);
+  const openBalanceCents = item.relatedInvoices.reduce((sum, invoice) => sum + invoice.openAmountCents, 0);
+  const overdueBalanceCents = overdueInvoices.reduce((sum, invoice) => sum + (invoice.overdueAmountCents ?? 0), 0);
+  const invoiceNumbers = item.relatedInvoices.map((invoice) => invoice.invoiceNumber).join(", ");
+  const overdueSummary = overdueInvoices.length > 0
+    ? overdueInvoices
+        .map((invoice) => `- Invoice ${invoice.invoiceNumber}: ${formatPhp(invoice.overdueAmountCents ?? invoice.openAmountCents)} overdue`)
+        .join("\n")
+    : item.relatedInvoices
+        .map((invoice) => `- Invoice ${invoice.invoiceNumber}: ${formatPhp(invoice.openAmountCents)} open`)
+        .join("\n");
+  const contactName = item.contactName ?? item.fromName ?? item.customerName;
+  return {
+    customer_name: contactName,
+    name: contactName,
+    customer_company_name: item.isLinked ? item.customerName : "",
+    billing_account_name: item.isLinked ? item.customerName : "",
+    customer_external_id: item.accountNumber ?? item.billingAccountId ?? "",
+    sender_company_name: "Yield AROS",
+    invoice_numbers: invoiceNumbers,
+    overdue_invoice_summary: overdueSummary || "No linked invoices.",
+    overdue_balance: formatPhp(overdueBalanceCents),
+    upcoming_balance: formatPhp(0),
+    total_account_balance: formatPhp(openBalanceCents),
+    payment_url: item.accountNumber ? `https://pay.yieldaros.example/account/${item.accountNumber}` : "",
+    num_upcoming_invoices: "0",
+  };
+}
+
+function formatEmailMessageActor(message: OperatorConsoleData["emailInbox"]["messages"][number]) {
+  if (message.direction === "outbound") {
+    return message.toEmail ? `To ${message.toEmail}` : "Outbound message";
+  }
+  return message.fromName && message.fromEmail
+    ? `${message.fromName} <${message.fromEmail}>`
+    : message.fromEmail ?? "Inbound message";
+}
+
+function initialsForName(value: string) {
+  const parts = value.trim().split(/\s+/).filter(Boolean);
+  const initials = parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
+  return initials || "AR";
 }
 
 function formatCollectionsMessageTime(value?: string) {
@@ -6019,7 +11056,7 @@ function formatPhpShort(valueCents: number) {
   const amount = valueCents / 100;
 
   if (Math.abs(amount) >= 1_000_000) {
-    return `₱${(amount / 1_000_000).toFixed(1)}M`;
+    return `₱${formatCompactUnit(amount / 1_000_000, 3)}M`;
   }
   if (Math.abs(amount) >= 1_000) {
     return `₱${Math.round(amount / 1_000)}K`;
@@ -6032,13 +11069,28 @@ function formatPhpCompactLong(valueCents: number) {
   const amount = valueCents / 100;
 
   if (Math.abs(amount) >= 1_000_000) {
-    return `₱${(amount / 1_000_000).toFixed(1)}M`;
+    return `₱${formatCompactUnit(amount / 1_000_000, 3)}M`;
   }
   if (Math.abs(amount) >= 1_000) {
     return `₱${(amount / 1_000).toFixed(1)}K`;
   }
 
   return formatPhp(valueCents);
+}
+
+function formatCompactUnit(value: number, maxFractionDigits: number) {
+  return value.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: maxFractionDigits,
+  });
+}
+
+function formatCount(value: number) {
+  return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatChartMoneyMillions(valueCents: number) {
+  return `${Math.round(valueCents / 100_000_000)}`;
 }
 
 function formatCompactCount(value: number) {
@@ -6081,6 +11133,20 @@ function formatFileSize(fileSizeBytes: number) {
   return `${fileSizeBytes} B`;
 }
 
+function diffCalendarDays(start?: string, end?: string) {
+  if (!start || !end) {
+    return undefined;
+  }
+
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return undefined;
+  }
+
+  return Math.max(0, Math.round((endDate.getTime() - startDate.getTime()) / 86_400_000));
+}
+
 function approvalAccount(requestType: string, index: number) {
   switch (requestType) {
     case "strategic_outreach":
@@ -6115,11 +11181,118 @@ function invoiceStatusClassName(status: string) {
   }
 }
 
+const NEW_CONTROL_CENTER_TEMPLATE_ID = "__new_template__";
+const CONTROL_CENTER_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] as const;
+const DEFAULT_TEMPLATE_SAMPLE_VARIABLES: Record<string, string> = {
+  customer_name: "Luzon Distributor Group - Manila",
+  customer_email: "ap@luzondistributor.example",
+  customer_company_name: "Luzon Distributor Group - Manila",
+  billing_account_name: "Luzon Distributor Group - Manila",
+  customer_external_id: "ACC-10024",
+  branch_name: "Makati City Branch",
+  sender_company_name: "Yield AROS",
+  invoice_numbers: "INV-1023, INV-1027",
+  overdue_invoice_summary: "- Invoice INV-1023: PHP 24,000.00 due on September 11, 2025",
+  overdue_balance: "PHP 24,000.00",
+  upcoming_balance: "PHP 2,400.00",
+  total_account_balance: "PHP 26,400.00",
+  payment_url: "https://pay.yieldaros.example/account/ACC-10024",
+  num_upcoming_invoices: "1",
+  name: "Maria Santos",
+};
+
+type ControlCenterWorkflowRow = OperatorConsoleData["controlCenter"]["workflows"][number];
+type ControlCenterSenderIdentity = OperatorConsoleData["emailSendingIdentities"][number];
+
+function resolveControlCenterSender(
+  workflow: ControlCenterWorkflowRow,
+  identities: OperatorConsoleData["emailSendingIdentities"],
+): ControlCenterSenderIdentity | undefined {
+  const connected = identities.filter((identity) => identity.connectionStatus === "connected");
+  return (
+    connected.find((identity) => identity.id === workflow.senderIdentityId) ??
+    connected.find((identity) => identity.senderEmail === workflow.senderEmail || identity.sendAsEmail === workflow.senderEmail) ??
+    connected.find((identity) => identity.isDefault) ??
+    connected[0]
+  );
+}
+
+function senderDisplayEmail(identity?: ControlCenterSenderIdentity) {
+  return identity?.sendAsEmail ?? identity?.senderEmail ?? "";
+}
+
+function describeWorkflowAvailability(input: {
+  workflow: ControlCenterWorkflowRow;
+  senderIdentity?: ControlCenterSenderIdentity;
+  callAgentConfig: OperatorConsoleData["controlCenter"]["callAgentConfig"];
+}) {
+  const supportedStages = input.workflow.stages.filter((stage) => stage.enabled && stage.outreachType !== "sms");
+  const hasEmailStage = supportedStages.some((stage) => stage.outreachType === "email");
+  const hasCallStage = supportedStages.some((stage) => stage.outreachType === "call");
+  const missing: string[] = [];
+
+  if (supportedStages.length === 0) {
+    missing.push("Add an email or call stage");
+  }
+  if (hasEmailStage && !input.senderIdentity) {
+    missing.push("Connect a sender identity");
+  }
+  if (hasCallStage && (!input.callAgentConfig.phoneNumber || !input.callAgentConfig.outboundCallingEnabled)) {
+    missing.push("Connect and enable a Retell outbound number");
+  }
+
+  if (missing.length > 0) {
+    return {
+      available: false,
+      label: "Not available",
+      detail: missing.join(". "),
+    };
+  }
+
+  return {
+    available: true,
+    label: input.workflow.enabled ? "Active" : "Inactive",
+    detail: input.workflow.enabled
+      ? "This workflow can run for enrolled customers."
+      : "This workflow is ready but currently inactive.",
+  };
+}
+
+function applyTemplatePreviewConditionals(value: string, sampleVariables: Record<string, string>) {
+  const hasUpcomingInvoices = Number(sampleVariables.num_upcoming_invoices ?? "0") > 0;
+  return value.replace(/\{%\s*if\s+num_upcoming_invoices\s*>\s*0\s*%\}([\s\S]*?)\{%\s*endif\s*%\}/gi, (_match, content: string) =>
+    hasUpcomingInvoices ? content : "",
+  );
+}
+
+function applyTemplatePreviewVariables(value: string, sampleVariables: Record<string, string>) {
+  const aliasedValue = applyTemplatePreviewConditionals(value, sampleVariables)
+    .replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key: string) => sampleVariables[key] ?? match);
+  const aliasReplacements: Array<[string, string | undefined]> = [
+    ["Customer Name", sampleVariables.customer_name],
+    ["Customer Company Name", sampleVariables.customer_company_name],
+    ["Sender Company Name", sampleVariables.sender_company_name],
+    ["Overdue Invoices Summary", sampleVariables.overdue_invoice_summary],
+    ["Overdue Balance", sampleVariables.overdue_balance],
+    ["Upcoming Balance", sampleVariables.upcoming_balance],
+    ["Total Account Balance", sampleVariables.total_account_balance],
+    ["Payment URL", sampleVariables.payment_url],
+  ];
+  return aliasReplacements
+    .reduce((output, [from, to]) => output.replaceAll(from, to ?? from), aliasedValue)
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 const ControlCenterPage = ({
   data,
   activeTab = "workflows",
   expandedWorkflowId,
   selectedTemplateId,
+  templateSearch = "",
+  actionStatus,
+  actionMessage,
+  enrollModalWorkflowId,
   stageModalWorkflowId,
   stageModalChannel = "email",
   stageModalTemplateMode = "pre_saved_template",
@@ -6128,6 +11301,10 @@ const ControlCenterPage = ({
   activeTab?: "workflows" | "email-templates" | "call-agent" | "config";
   expandedWorkflowId?: string;
   selectedTemplateId?: string;
+  templateSearch?: string;
+  actionStatus?: "success" | "error";
+  actionMessage?: string;
+  enrollModalWorkflowId?: string;
   stageModalWorkflowId?: string;
   stageModalChannel?: "email" | "call" | "sms";
   stageModalTemplateMode?: "pre_saved_template" | "ai_generated";
@@ -6139,36 +11316,97 @@ const ControlCenterPage = ({
       sms: { smsDraft: { variants: [] } },
       voice: { voicePayload: { safeTalkingPoints: [], handoffConditions: [] } },
     },
-    callAgent: { providerType: "retell", phoneNumber: "", defaultBehaviorFlags: [] },
+    callAgentConfig: {
+      id: "cc_call_agent_fallback",
+      tenantId: "default",
+      createdAt: data.generatedAt,
+      updatedAt: data.generatedAt,
+      phoneNumber: "",
+      smsEnabled: false,
+      outboundCallingEnabled: false,
+      handoffToHumanEnabled: false,
+      manualAgentInstructions: "",
+      callRecordingDisclaimerEnabled: false,
+      providerType: "retell",
+      providerConfigMetadata: {},
+      defaultBehaviorFlags: [],
+    },
     config: {
+      id: "cc_config_fallback",
+      tenantId: "default",
+      createdAt: data.generatedAt,
+      updatedAt: data.generatedAt,
       defaultTimezone: "Asia/Manila",
+      defaultSenderBehavior: "workflow_specific",
       allowedChannels: ["email", "sms", "call"],
       channelFallbackPolicy: "manual_review_only",
       sandboxMode: "audit_preview_only",
+      defaultRiskApprovalMode: "strict",
+      seededDemoFlags: {},
     },
     templateFolders: [],
     templates: [],
     providerPreview: { providerType: "retell", payload: {} },
   };
-  const emailPreview = controlCenter.generationPreview.email.emailDraft;
-  const smsPreview = controlCenter.generationPreview.sms.smsDraft;
-  const voicePreview = controlCenter.generationPreview.voice.voicePayload;
+  const visibleActiveTab = activeTab === "config" ? "workflows" : activeTab;
   const collectionWorkflows = controlCenter.workflows.filter((workflow) => workflow.category === "collections");
+  const selectedEnrollWorkflow = controlCenter.workflows.find((workflow) => workflow.id === enrollModalWorkflowId);
   const selectedStageWorkflow = controlCenter.workflows.find((workflow) => workflow.id === stageModalWorkflowId);
-  const selectedTemplate = controlCenter.templates.find((template) => template.id === selectedTemplateId);
-  const selectedTemplatePreview = data.controlCenterTemplatePreview;
+  const isCreatingTemplate = selectedTemplateId === NEW_CONTROL_CENTER_TEMPLATE_ID;
+  const selectedTemplate =
+    controlCenter.templates.find((template) => template.id === selectedTemplateId) ??
+    (isCreatingTemplate
+      ? ({
+          id: NEW_CONTROL_CENTER_TEMPLATE_ID,
+          tenantId: "default",
+          version: 1,
+          createdAt: data.generatedAt,
+          updatedAt: data.generatedAt,
+          name: "New Template",
+          subject: "Collections follow-up",
+          body: "Hi {{customer_name}},\n\nWe are following up on {{invoice_numbers}}.",
+          ccEmails: [],
+          channelCompatibility: ["email"],
+          autoCorrectEnabled: false,
+          isDefault: false,
+          isArchived: false,
+          previewSeedKey: "bill-default",
+        } satisfies OperatorConsoleData["controlCenter"]["templates"][number])
+      : undefined);
+  const selectedTemplatePreview = isCreatingTemplate ? undefined : data.controlCenterTemplatePreview;
+  const templateSampleVariables = {
+    ...DEFAULT_TEMPLATE_SAMPLE_VARIABLES,
+    ...(selectedTemplatePreview?.sampleVariables ?? {}),
+  };
+  const templateVariableOptions = Object.keys(templateSampleVariables).sort();
   const workflowRows = collectionWorkflows.length > 0 ? collectionWorkflows : controlCenter.workflows;
+  const normalizedTemplateSearch = templateSearch.trim().toLowerCase();
+  const visibleTemplates = controlCenter.templates.filter((template) => {
+    if (template.isArchived) {
+      return false;
+    }
+    if (!normalizedTemplateSearch) {
+      return true;
+    }
+    const searchable = `${template.name} ${template.subject} ${template.body}`.toLowerCase();
+    return searchable.includes(normalizedTemplateSearch);
+  });
+  const normalizedStageModalChannel = stageModalChannel === "sms" ? "email" : stageModalChannel;
   const availableTemplates = controlCenter.templates.filter((template) => {
-    if (stageModalChannel === "call") {
+    if (normalizedStageModalChannel === "call") {
       return template.channelCompatibility.includes("voice_agent");
     }
-    return template.channelCompatibility.includes(stageModalChannel);
+    return template.channelCompatibility.includes(normalizedStageModalChannel);
   });
   const activeExpandedWorkflowId = expandedWorkflowId;
+  const defaultSenderIdentity = data.emailSendingIdentities.find(
+    (identity) => identity.connectionStatus === "connected" && identity.isDefault,
+  ) ?? data.emailSendingIdentities.find((identity) => identity.connectionStatus === "connected");
   const buildControlCenterHref = ({
-    tab = activeTab,
+    tab = visibleActiveTab,
     workflow,
     selectedTemplate,
+    enrollWorkflow,
     stageWorkflow,
     stageChannel,
     stageTemplateMode: templateMode,
@@ -6176,19 +11414,26 @@ const ControlCenterPage = ({
     tab?: "workflows" | "email-templates" | "call-agent" | "config";
     workflow?: string;
     selectedTemplate?: string;
+    enrollWorkflow?: string;
     stageWorkflow?: string;
     stageChannel?: "email" | "call" | "sms";
     stageTemplateMode?: "pre_saved_template" | "ai_generated";
   } = {}) => {
     const params = new URLSearchParams();
-    if (tab && tab !== "workflows") {
+    if (tab && tab !== "workflows" && tab !== "config") {
       params.set("controlCenterTab", tab);
+    }
+    if (tab === "email-templates" && templateSearch.trim()) {
+      params.set("templateSearch", templateSearch.trim());
     }
     if (workflow) {
       params.set("workflow", workflow);
     }
     if (selectedTemplate) {
       params.set("selectedTemplateId", selectedTemplate);
+    }
+    if (enrollWorkflow) {
+      params.set("enrollWorkflow", enrollWorkflow);
     }
     if (stageWorkflow) {
       params.set("stageWorkflow", stageWorkflow);
@@ -6202,7 +11447,7 @@ const ControlCenterPage = ({
     const query = params.toString();
     return query ? `/control-center?${query}` : "/control-center";
   };
-  const stageModalBaseHref = (channel: "email" | "call" | "sms", templateMode = stageModalTemplateMode) =>
+  const stageModalBaseHref = (channel: "email" | "call", templateMode = stageModalTemplateMode) =>
     buildControlCenterHref({
       tab: "workflows",
       workflow: stageModalWorkflowId ?? activeExpandedWorkflowId ?? "",
@@ -6211,25 +11456,27 @@ const ControlCenterPage = ({
       stageTemplateMode: templateMode,
     });
   const templateModeHref = (templateMode: "pre_saved_template" | "ai_generated") =>
-    stageModalBaseHref(stageModalChannel, templateMode);
-  const folderNameById = new Map(
-    controlCenter.folders.map((folder: OperatorConsoleData["controlCenter"]["folders"][number]) => [folder.id, folder.name]),
-  );
+    stageModalBaseHref(normalizedStageModalChannel, templateMode);
   const describeStageSentence = (
     stage: OperatorConsoleData["controlCenter"]["workflows"][number]["stages"][number],
   ) => {
     const comparator = stage.triggerConfig.comparator ?? stage.triggerType;
     const outreachLabel =
-      stage.outreachType === "email" ? "email reminder" : stage.outreachType === "call" ? "call follow-up" : "SMS reminder";
+      stage.outreachType === "email" ? "email reminder" : stage.outreachType === "call" ? "call reminder" : "SMS reminder";
     const templateLabel =
       stage.templateMode === "pre_saved_template" && stage.templateId
         ? controlCenter.templates.find((template) => template.id === stage.templateId)?.name ?? "saved template"
         : "AI Generate";
+    const offsetDays = stage.triggerConfig.offsetDays ?? 0;
+    const dayLabel = offsetDays === 1 ? "day" : "days";
     if (comparator === "due_in_days") {
-      return `When an invoice is ${stage.triggerConfig.offsetDays ?? 0} days until due date send an ${outreachLabel} using ${templateLabel}`;
+      return `When an invoice is ${offsetDays} ${dayLabel} until due date send an ${outreachLabel}${stage.templateMode === "pre_saved_template" && stage.outreachType === "email" ? ` using email template ${templateLabel}` : ""}`;
+    }
+    if (comparator === "due_today") {
+      return `When an invoice is due send an ${outreachLabel}${stage.templateMode === "pre_saved_template" && stage.outreachType === "email" ? ` using email template ${templateLabel}` : ""}`;
     }
     if (comparator === "days_past_due") {
-      return `When an invoice is ${stage.triggerConfig.offsetDays ?? 0} days past due send a ${outreachLabel} using ${templateLabel}`;
+      return `When an invoice is ${offsetDays} ${dayLabel} past due send a ${outreachLabel}${stage.templateMode === "pre_saved_template" && stage.outreachType === "email" ? ` using email template ${templateLabel}` : ""}`;
     }
     if (comparator === "remittance_missing_after_payment") {
       return `When remittance is missing after payment detected start a ${outreachLabel} using ${templateLabel}`;
@@ -6239,28 +11486,189 @@ const ControlCenterPage = ({
     }
     return `Trigger ${comparator.replaceAll("_", " ")} with ${outreachLabel} using ${templateLabel}`;
   };
-	  const renderWorkflowCard = (workflow: OperatorConsoleData["controlCenter"]["workflows"][number]) => (
+  const renderStageSentence = (
+    stage: OperatorConsoleData["controlCenter"]["workflows"][number]["stages"][number],
+  ) => {
+    const comparator = stage.triggerConfig.comparator ?? stage.triggerType;
+    const offsetDays = stage.triggerConfig.offsetDays ?? 0;
+    const dayLabel = offsetDays === 1 ? "day" : "days";
+    const templateLabel =
+      stage.templateMode === "pre_saved_template" && stage.templateId
+        ? controlCenter.templates.find((template) => template.id === stage.templateId)?.name ?? "saved template"
+        : "AI Generate";
+    const actionLabel = stage.outreachType === "email" ? "email reminder" : "call reminder";
+
+    if (comparator === "due_in_days") {
+      return (
+        <>
+          When an invoice is <strong>{offsetDays} {dayLabel} until due date</strong> send an <span className="stage-linkish">{actionLabel}</span>
+          {stage.templateMode === "pre_saved_template" && stage.outreachType === "email" ? <> using email template <strong>{templateLabel}</strong></> : null}
+        </>
+      );
+    }
+    if (comparator === "due_today") {
+      return (
+        <>
+          When an invoice is <strong>due</strong> send an <span className="stage-linkish">{actionLabel}</span>
+          {stage.templateMode === "pre_saved_template" && stage.outreachType === "email" ? <> using email template <strong>{templateLabel}</strong></> : null}
+        </>
+      );
+    }
+    if (comparator === "days_past_due") {
+      return (
+        <>
+          When an invoice is <strong>{offsetDays} {dayLabel} past due</strong> send a <span className="stage-linkish">{actionLabel}</span>
+          {stage.templateMode === "pre_saved_template" && stage.outreachType === "email" ? <> using email template <strong>{templateLabel}</strong></> : null}
+        </>
+      );
+    }
+    return describeStageSentence(stage);
+  };
+  const adaptivePolicySummary = {
+    autoPauseOutcomes: ["Promise to pay", "Payment in process", "Callback requested"],
+    trackSwitchOutcomes: ["Promise to pay", "Invoice resend request", "Email only / do not call"],
+    humanReviewOutcomes: ["Dispute detected", "Low-confidence AI outcome", "Legal or strategic handling"],
+  };
+  const renderOutcomeBadges = (outcomes: string[]) => (
+    <div className="control-center-stage-tags">
+      {outcomes.map((outcome) => (
+        <span key={outcome} className="workflow-stage-badge">{outcome}</span>
+      ))}
+    </div>
+  );
+  const customerByBillingAccountId = new Map(
+    data.customerIndex.map((customer: OperatorConsoleData["customerIndex"][number]) => [
+      customer.billingAccountId ?? customer.profileId,
+      customer,
+    ]),
+  );
+  const renderWorkflowExecutionRow = (
+    workflow: OperatorConsoleData["controlCenter"]["workflows"][number],
+    execution: OperatorConsoleData["controlCenter"]["workflows"][number]["executions"][number],
+  ) => {
+    const customer = customerByBillingAccountId.get(execution.billingAccountId);
+    const metadata = execution.metadata as Record<string, unknown>;
+    const accountName =
+      typeof metadata.customerName === "string"
+        ? metadata.customerName
+        : customer?.canonicalName ?? customer?.billingAccountName ?? execution.billingAccountId;
+    const accountId =
+      typeof metadata.accountNumber === "string"
+        ? metadata.accountNumber
+        : customer?.billingAccountId ?? execution.billingAccountId;
+    const overdueAmount =
+      typeof metadata.overdueAmount === "string" ? metadata.overdueAmount : customer?.overdueAmount ?? "Overdue amount unavailable";
+    const openInvoiceCount =
+      typeof metadata.openInvoiceCount === "number"
+        ? metadata.openInvoiceCount
+        : customer?.openInvoiceCount ?? 0;
+    const enrolledOn = new Date(execution.createdAt).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+
+    return (
+      <article key={execution.id} className="control-center-enrollment-item">
+        <div className="control-center-enrollment-check">
+          <input
+            type="checkbox"
+            aria-label={`Select ${accountName}`}
+            className="control-center-enrollment-checkbox"
+            data-workflow-id={workflow.id}
+          />
+        </div>
+        <div className="control-center-enrollment-copy">
+          <div className="control-center-enrollment-title-row">
+            <h5>{accountName}</h5>
+            <span className="workflow-stage-badge">{accountId}</span>
+            {execution.status === "paused" ? <span className="pill pill-warning">Paused</span> : null}
+          </div>
+          <p className="control-center-enrollment-meta">
+            <span>Overdue: {overdueAmount}</span>
+            <span>{openInvoiceCount} open invoices</span>
+            <span>Enrolled: {enrolledOn}</span>
+          </p>
+        </div>
+        <div className="control-center-enrollment-actions">
+          {execution.status === "paused" ? (
+            <form method="post" action="/control-center/workflows/customer/resume">
+              <input type="hidden" name="workflowId" value={workflow.id} />
+              <input type="hidden" name="executionId" value={execution.id} />
+              <button type="submit" className="control-center-inline-action">
+                <span className="control-center-inline-action-icon">▷</span>
+                Resume
+              </button>
+            </form>
+          ) : (
+            <form method="post" action="/control-center/workflows/customer/pause">
+              <input type="hidden" name="workflowId" value={workflow.id} />
+              <input type="hidden" name="executionId" value={execution.id} />
+              <button type="submit" className="control-center-inline-action">
+                <span className="control-center-inline-action-icon">Ⅱ</span>
+                Pause
+              </button>
+            </form>
+          )}
+          <form method="post" action="/control-center/workflows/customer/unenroll">
+            <input type="hidden" name="workflowId" value={workflow.id} />
+            <input type="hidden" name="executionId" value={execution.id} />
+            <button type="submit" className="control-center-inline-action is-danger">
+              <span className="control-center-inline-action-icon">◌</span>
+              Unenroll
+            </button>
+          </form>
+        </div>
+      </article>
+    );
+  };
+  const renderWorkflowCard = (workflow: OperatorConsoleData["controlCenter"]["workflows"][number]) => {
+    const visibleStages = workflow.stages.filter((stage) => stage.outreachType !== "sms");
+    const enrolledBillingAccountIds = new Set(workflow.executions.map((execution) => execution.billingAccountId));
+    const availableCustomers = data.customerIndex.filter(
+      (customer) => !enrolledBillingAccountIds.has(customer.billingAccountId ?? customer.profileId),
+    );
+    const workflowSender = resolveControlCenterSender(workflow, data.emailSendingIdentities);
+    const resolvedSenderEmail = senderDisplayEmail(workflowSender);
+    const availability = describeWorkflowAvailability({
+      workflow,
+      ...(workflowSender ? { senderIdentity: workflowSender } : {}),
+      callAgentConfig: controlCenter.callAgentConfig,
+    });
+    const toggleDisabled = !workflow.enabled && !availability.available;
+
+    return (
     <details key={workflow.id} className="control-center-workflow-row" open={workflow.id === activeExpandedWorkflowId}>
 	      <summary>
 	        <div className="control-center-workflow-summary">
-          <form method="post" action="/control-center/workflows/toggle" className="control-center-toggle-form">
+          <form
+            method="post"
+            action="/control-center/workflows/toggle"
+            className="control-center-toggle-form"
+            data-workflow-toggle-form
+          >
             <input type="hidden" name="workflowId" value={workflow.id} />
             <input type="hidden" name="enabled" value={workflow.enabled ? "false" : "true"} />
             <button
               type="submit"
-              className={`workflow-toggle${workflow.enabled ? " is-active" : ""}`}
-              aria-label={workflow.enabled ? "Disable workflow" : "Enable workflow"}
+              className={`workflow-toggle${workflow.enabled ? " is-active" : ""}${toggleDisabled ? " is-disabled" : ""}`}
+              aria-label={toggleDisabled ? `${workflow.name} is not available` : workflow.enabled ? "Disable workflow" : "Enable workflow"}
+              disabled={toggleDisabled}
+              data-workflow-toggle-button
             >
               <span className="workflow-toggle-knob" />
             </button>
           </form>
           <div className="control-center-workflow-copy">
             <h3>{workflow.name}</h3>
-            <p>{workflow.approxTargetCount} customers</p>
+            <p>{workflow.executions.length} customers enrolled · {availability.detail}</p>
           </div>
 	        </div>
 	        <div className="control-center-workflow-actions">
-	          <span className="workflow-stage-badge">{workflow.stageCount} Stages</span>
+	          <span className={`workflow-state-badge${availability.available ? workflow.enabled ? " is-active" : " is-inactive" : " is-unavailable"}`}>
+              {availability.label}
+            </span>
+	          <span className="workflow-stage-badge">{visibleStages.length} Stages</span>
 	          <span className="workflow-chevron workflow-chevron-icon" aria-hidden="true">
               <AppIcon name="chevron-right" />
             </span>
@@ -6274,15 +11682,29 @@ const ControlCenterPage = ({
       </summary>
 
       <div className="control-center-workflow-body">
-        <form method="post" action="/control-center/workflows/update" className="control-center-grid-form">
+        <form method="post" action="/control-center/workflows/update" className="control-center-grid-form" data-control-center-action-form>
           <input type="hidden" name="workflowId" value={workflow.id} />
+          <input type="hidden" name="timezone" value={workflow.timezone || controlCenter.config.defaultTimezone || "Asia/Manila"} />
+          {workflowSender ? <input type="hidden" name="senderIdentityId" value={workflowSender.id} /> : null}
+          {resolvedSenderEmail ? <input type="hidden" name="senderEmail" value={resolvedSenderEmail} /> : null}
           <label>
             <span>Name</span>
             <input type="text" name="name" defaultValue={workflow.name} />
           </label>
           <label>
             <span>Email sender</span>
-            <input type="email" name="senderEmail" defaultValue={workflow.senderEmail ?? ""} />
+            <input
+              type="email"
+              defaultValue={resolvedSenderEmail}
+              placeholder="No connected sender configured"
+              readOnly
+              aria-readonly="true"
+            />
+            <span className={`control-center-field-help${resolvedSenderEmail ? "" : " is-unavailable"}`}>
+              {resolvedSenderEmail
+                ? `Outbound email will send from ${resolvedSenderEmail}.`
+                : "Connect a Gmail sender identity in Integrations before enabling email outreach."}
+            </span>
           </label>
           <label>
             <span>Test email recipient</span>
@@ -6293,48 +11715,104 @@ const ControlCenterPage = ({
             <input type="text" name="testCallRecipient" defaultValue={workflow.testCallRecipient ?? ""} />
           </label>
           <label>
-            <span>Timezone</span>
-            <input type="text" name="timezone" defaultValue={workflow.timezone} />
-          </label>
-          <label>
             <span>Outreach window</span>
             <div className="control-center-inline-row">
-              <input type="text" name="outreachWindowStart" defaultValue={workflow.outreachWindowStart} />
-              <input type="text" name="outreachWindowEnd" defaultValue={workflow.outreachWindowEnd} />
+              <input type="time" name="outreachWindowStart" defaultValue={workflow.outreachWindowStart} />
+              <input type="time" name="outreachWindowEnd" defaultValue={workflow.outreachWindowEnd} />
             </div>
+            <span className="control-center-field-help">{workflow.timezone || controlCenter.config.defaultTimezone || "Asia/Manila"}</span>
           </label>
           <div className="control-center-full-row">
             <span className="control-center-field-label">Selected outreach days</span>
-            <input type="hidden" name="outreachDays" value={workflow.outreachDays.join(",")} />
             <div className="weekday-pill-row" aria-label="Selected outreach days">
-              {(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] as const).map((day) => (
-                <span key={day} className={`weekday-pill${workflow.outreachDays.includes(day) ? " is-active" : ""}`}>
-                  {day.slice(0, 3).replace(/^./, (letter) => letter.toUpperCase())}
-                </span>
+              {CONTROL_CENTER_WEEKDAYS.map((day) => (
+                <label key={day} className={`weekday-pill${workflow.outreachDays.includes(day) ? " is-active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    name="outreachDays"
+                    value={day}
+                    defaultChecked={workflow.outreachDays.includes(day)}
+                  />
+                  <span>{day.slice(0, 3).replace(/^./, (letter) => letter.toUpperCase())}</span>
+                </label>
               ))}
             </div>
           </div>
-          <div className="control-center-full-row control-center-toggle-row">
-            <span className="control-center-field-label">Weekend Calling</span>
-            <label className="workflow-toggle control-center-inline-toggle">
-              <input
-                type="checkbox"
-                name="weekendCallingEnabled"
-                defaultChecked={workflow.weekendCallingEnabled}
-                className="sr-only"
-              />
-              <span className="workflow-toggle-knob" />
-            </label>
-          </div>
-          <div className="control-center-full-row">
-            <button type="submit" className="primary-button">Save Workflow</button>
+          <div className="control-center-full-row control-center-form-actions">
+            <button
+              type="submit"
+              className="ghost-button"
+              formAction="/control-center/workflows/test-email"
+              data-loading-label="Sending..."
+              disabled={!resolvedSenderEmail}
+            >
+              Send test email
+            </button>
+            <button
+              type="submit"
+              className="ghost-button"
+              formAction="/control-center/workflows/test-call"
+              data-loading-label="Calling..."
+              disabled={!controlCenter.callAgentConfig.phoneNumber || !controlCenter.callAgentConfig.outboundCallingEnabled}
+            >
+              Start test call
+            </button>
+            <button type="submit" className="primary-button" data-loading-label="Saving...">
+              Save workflow
+            </button>
           </div>
         </form>
+
+        <article className="control-center-preview-panel control-center-enrollment-panel">
+          <div className="panel-header control-center-enrollment-head">
+            <button
+              type="button"
+              className="control-center-enrollment-summary-button"
+              data-enrollment-toggle
+              data-enrollment-target={`workflow-enrollment-${workflow.id}`}
+              aria-expanded="true"
+            >
+              <h4 className="control-center-enrollment-title">
+                Enrolled Customers ({workflow.executions.length})
+              </h4>
+              <span className="workflow-chevron workflow-chevron-icon is-open" aria-hidden="true">
+                <AppIcon name="chevron-right" />
+              </span>
+            </button>
+            <a
+              href={buildControlCenterHref({ tab: "workflows", workflow: workflow.id, enrollWorkflow: workflow.id })}
+              className="primary-button control-center-button-with-icon"
+            >
+              <AppIcon name="plus" />
+              Enroll Customers
+            </a>
+          </div>
+          <div className="control-center-enrollment-list" id={`workflow-enrollment-${workflow.id}`}>
+            {workflow.executions.length > 0 ? (
+              <>
+                <div className="control-center-select-all-row">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all enrolled customers"
+                    className="control-center-select-all-checkbox"
+                    data-workflow-id={workflow.id}
+                  />
+                  <span>Select All</span>
+                </div>
+                {workflow.executions.map((execution) => renderWorkflowExecutionRow(workflow, execution))}
+              </>
+            ) : (
+              <div className="control-center-enrollment-empty">
+                <p>No customers are enrolled in this workflow yet.</p>
+              </div>
+            )}
+          </div>
+        </article>
 
 	        <div className="control-center-stage-header">
 	          <div>
 	            <h4>Stages</h4>
-	            <p>Add email, SMS, or call steps with safe trigger rules.</p>
+	            <p>Add email or call steps with safe trigger rules.</p>
 	          </div>
 	          <a href={`/control-center?workflow=${encodeURIComponent(workflow.id)}&stageWorkflow=${encodeURIComponent(workflow.id)}&stageChannel=email&stageTemplateMode=pre_saved_template`} className="primary-button control-center-button-with-icon">
               <AppIcon name="plus" />
@@ -6342,32 +11820,63 @@ const ControlCenterPage = ({
             </a>
 	        </div>
         <div className="control-center-stage-list">
-          {workflow.stages.map((stage: OperatorConsoleData["controlCenter"]["workflows"][number]["stages"][number]) => (
+          {visibleStages.map((stage: OperatorConsoleData["controlCenter"]["workflows"][number]["stages"][number]) => (
             <article key={stage.id} className="control-center-stage-item">
               <div className="control-center-stage-sentence">
                 <span className={`stage-channel-icon is-${stage.outreachType}`} aria-hidden="true">
-                  {stage.outreachType === "email" ? "✉" : stage.outreachType === "call" ? "⌕" : "◫"}
+                  <AppIcon name={stage.outreachType === "email" ? "mail" : "phone"} />
                 </span>
-                <div>
-                  <p className="control-center-stage-sentence-copy">{describeStageSentence(stage)}</p>
-                  <p className="control-center-stage-meta">
-                    {stage.enabled ? "Active" : "Inactive"} · {stage.requiresApproval ? "Approval required" : "No approval"}
-                  </p>
-                </div>
+                <p className="control-center-stage-sentence-copy">{renderStageSentence(stage)}</p>
 	              </div>
-	              <div className="control-center-stage-tags">
-	                <span className="workflow-chevron workflow-chevron-icon" aria-hidden="true">
-                    <AppIcon name="chevron-right" />
-                  </span>
+	              <div className="control-center-stage-actions">
+                  {stage.templateMode === "ai_generated" || stage.outreachType === "call" ? (
+                    <span className="stage-ai-pill">AI</span>
+                  ) : null}
+                  <form method="post" action="/control-center/stages/delete">
+                    <input type="hidden" name="workflowId" value={workflow.id} />
+                    <input type="hidden" name="stageId" value={stage.id} />
+                    <button type="submit" className="icon-button" aria-label="Delete stage">
+                      <AppIcon name="trash" />
+                    </button>
+                  </form>
 	              </div>
 	            </article>
 	          ))}
+          {visibleStages.length === 0 ? (
+            <div className="control-center-enrollment-empty">
+              <p>No runnable email or call stages are configured yet.</p>
+            </div>
+          ) : null}
         </div>
+        <article className="control-center-preview-panel">
+          <div className="panel-header">
+            <div>
+              <h4>Adaptive outcomes</h4>
+              <p>These runtime decisions reuse the current workflow and approval surfaces.</p>
+            </div>
+            <span className="workflow-stage-badge">Policy guided</span>
+          </div>
+          <div className="card-grid card-grid-3">
+            <div className="reason-box">
+              <span className="label-copy">Auto-pause outcomes</span>
+              {renderOutcomeBadges(adaptivePolicySummary.autoPauseOutcomes)}
+            </div>
+            <div className="reason-box">
+              <span className="label-copy">Track switching</span>
+              {renderOutcomeBadges(adaptivePolicySummary.trackSwitchOutcomes)}
+            </div>
+            <div className="reason-box">
+              <span className="label-copy">Human review triggers</span>
+              {renderOutcomeBadges(adaptivePolicySummary.humanReviewOutcomes)}
+            </div>
+          </div>
+        </article>
       </div>
 	    </details>
 	  );
+  };
 
-  const tabHref = (tab: "workflows" | "email-templates" | "call-agent" | "config") =>
+  const tabHref = (tab: "workflows" | "email-templates" | "call-agent") =>
     buildControlCenterHref({
       tab,
       ...(tab === "workflows" && activeExpandedWorkflowId ? { workflow: activeExpandedWorkflowId } : {}),
@@ -6385,6 +11894,8 @@ const ControlCenterPage = ({
     }
     return <p key={`${templateId}-preview-${index}`}>{paragraph}</p>;
   };
+  const previewSubject = selectedTemplatePreview?.subject ?? applyTemplatePreviewVariables(selectedTemplate?.subject ?? "", templateSampleVariables);
+  const previewBody = selectedTemplatePreview?.body ?? applyTemplatePreviewVariables(selectedTemplate?.body ?? "", templateSampleVariables);
 
   return (
     <section className="page-shell control-center-page">
@@ -6396,19 +11907,28 @@ const ControlCenterPage = ({
       </header>
 
       <nav className="control-center-tabbar" aria-label="Control Center tabs">
-        <a href={tabHref("workflows")} className={`control-center-tab${activeTab === "workflows" ? " is-active" : ""}`}>Workflows</a>
-        <a href={tabHref("email-templates")} className={`control-center-tab${activeTab === "email-templates" ? " is-active" : ""}`}>Email Templates</a>
-        <a href={tabHref("call-agent")} className={`control-center-tab${activeTab === "call-agent" ? " is-active" : ""}`}>Call Agent</a>
-        <a href={tabHref("config")} className={`control-center-tab${activeTab === "config" ? " is-active" : ""}`}>Config</a>
+        <a href={tabHref("workflows")} className={`control-center-tab${visibleActiveTab === "workflows" ? " is-active" : ""}`}>Workflows</a>
+        <a href={tabHref("email-templates")} className={`control-center-tab${visibleActiveTab === "email-templates" ? " is-active" : ""}`}>Email Templates</a>
+        <a href={tabHref("call-agent")} className={`control-center-tab${visibleActiveTab === "call-agent" ? " is-active" : ""}`}>Call Agent</a>
       </nav>
 
-      {activeTab === "workflows" ? (
+      {actionStatus && actionMessage ? (
+        <article className={`control-center-action-banner is-${actionStatus}`} role="status">
+          <strong>{actionStatus === "success" ? "Action completed." : "Action could not complete."}</strong>
+          <p>{actionMessage}</p>
+        </article>
+      ) : null}
+
+      {visibleActiveTab === "workflows" ? (
         <>
           <div className="control-center-intro-row">
 	            <p className="control-center-lead">Configure time based email or call triggers to conduct outreach for collection.</p>
 	            <form method="post" action="/control-center/workflows/create" className="control-center-inline-form">
 	              <input type="hidden" name="category" value="collections" />
 	              <input type="hidden" name="name" value="New workflow" />
+                <input type="hidden" name="timezone" value={controlCenter.config.defaultTimezone || "Asia/Manila"} />
+                {defaultSenderIdentity ? <input type="hidden" name="senderIdentityId" value={defaultSenderIdentity.id} /> : null}
+                {defaultSenderIdentity ? <input type="hidden" name="senderEmail" value={senderDisplayEmail(defaultSenderIdentity)} /> : null}
 	              <button type="submit" className="primary-button control-center-button-with-icon">
                   <AppIcon name="plus" />
                   New Workflow
@@ -6417,27 +11937,6 @@ const ControlCenterPage = ({
 	          </div>
 
 	          <div className="control-center-layout">
-	            <aside className="control-center-sidebar">
-	              <a href={buildControlCenterHref({ tab: "workflows" })} className="control-center-category-card is-active">
-	                <div className="control-center-category-icon" aria-hidden="true">
-                    <AppIcon name="sparkle-mini" />
-                  </div>
-	                <div>
-	                  <h3>Collections</h3>
-	                  <p>Define how your agent monitors and follows up on open invoices.</p>
-	                </div>
-	              </a>
-	              <a href={buildControlCenterHref({ tab: "workflows" })} className="control-center-category-card">
-	                <div className="control-center-category-icon payments" aria-hidden="true">
-                    <AppIcon name="cash" />
-                  </div>
-	                <div>
-	                  <h3>Payments</h3>
-                  <p>Enable and customize your Yield-powered payment experience.</p>
-                </div>
-              </a>
-            </aside>
-
             <div className="control-center-main">
               <div id="collections-workflows" className="control-center-workflow-group">
                 {workflowRows.length > 0 ? workflowRows.map(renderWorkflowCard) : <p>No collection workflows yet.</p>}
@@ -6447,41 +11946,32 @@ const ControlCenterPage = ({
         </>
       ) : null}
 
-      {activeTab === "email-templates" ? (
+      {visibleActiveTab === "email-templates" ? (
         <div className="control-center-main">
           <section className="control-center-templates-screen">
             <div className="control-center-template-toolbar">
-              <div className="control-center-template-filter-row">
-                <button type="button" className="template-filter-pill is-active">All</button>
-                <form method="post" action="/control-center/folders/create">
-                  <input type="hidden" name="name" value="New Folder" />
-                  <button type="submit" className="template-filter-pill template-outline-pill">
-                    <AppIcon name="folder-plus" />
-                    New Folder
-                  </button>
-                </form>
-                {controlCenter.folders.map((folder: OperatorConsoleData["controlCenter"]["folders"][number]) => (
-                  <button key={folder.id} type="button" className="template-filter-pill template-outline-pill">
-                    {folder.name}
-                  </button>
-                ))}
-              </div>
-              <form method="post" action="/control-center/templates/create">
-                <input type="hidden" name="name" value="New Template" />
-                <input type="hidden" name="subject" value="Collections follow-up" />
-                <input type="hidden" name="body" value="Hi {{customer_name}}, we are following up on {{invoice_numbers}}." />
-                <input type="hidden" name="channelCompatibility" value="email" />
-                <button type="submit" className="primary-button control-center-button-with-icon">
-                  <AppIcon name="plus" />
-                  Template
-                </button>
-              </form>
+              <a
+                href={buildControlCenterHref({ tab: "email-templates", selectedTemplate: NEW_CONTROL_CENTER_TEMPLATE_ID })}
+                className="primary-button control-center-button-with-icon"
+              >
+                <AppIcon name="plus" />
+                Create Template
+              </a>
             </div>
 
-            <div className="control-center-template-searchbar">
+            <form className="control-center-template-searchbar" method="get" action="/control-center">
+              <input type="hidden" name="controlCenterTab" value="email-templates" />
               <AppIcon name="search" />
-              <input type="text" value="" placeholder="Search by template name" readOnly aria-label="Search by template name" />
-            </div>
+              <input
+                type="search"
+                name="templateSearch"
+                defaultValue={templateSearch}
+                placeholder="Search templates"
+                aria-label="Search templates"
+              />
+              {templateSearch ? <a href="/control-center?controlCenterTab=email-templates" className="control-center-search-clear">Clear</a> : null}
+              <button type="submit" className="ghost-button">Search</button>
+            </form>
 
             <div className="control-center-template-table-wrap">
               <div className="control-center-template-table control-center-template-table-head">
@@ -6491,10 +11981,9 @@ const ControlCenterPage = ({
                 <div className="control-center-template-cell">Name</div>
                 <div className="control-center-template-cell">Subject</div>
                 <div className="control-center-template-cell">Body</div>
-                <div className="control-center-template-cell">Folder</div>
               </div>
 
-	              {controlCenter.templates.map((template: OperatorConsoleData["controlCenter"]["templates"][number]) => (
+	              {visibleTemplates.map((template: OperatorConsoleData["controlCenter"]["templates"][number]) => (
 	                <div key={template.id} className="control-center-template-table control-center-template-table-row">
                   <div className="control-center-template-cell control-center-template-checkbox-cell">
                     <span className="template-checkbox" aria-hidden="true" />
@@ -6514,18 +12003,26 @@ const ControlCenterPage = ({
 	                  </div>
                   <div className="control-center-template-cell control-center-template-subject">{template.subject}</div>
                   <div className="control-center-template-cell control-center-template-body">{templateBodyPreview(template.body)}</div>
-                  <div className="control-center-template-cell control-center-template-folder">
-                    {template.folderId ? folderNameById.get(template.folderId) ?? "—" : "—"}
-                  </div>
                 </div>
 	              ))}
+              {visibleTemplates.length === 0 ? (
+                <div className="control-center-template-empty">
+                  <strong>No templates found.</strong>
+                  <p>{templateSearch ? "Try a different search term." : "Create an email template to use it in compose surfaces."}</p>
+                </div>
+              ) : null}
 	            </div>
 	          </section>
 	        </div>
 	      ) : null}
 
-      {activeTab === "email-templates" && selectedTemplate ? (
-        <div className="control-center-template-drawer-shell" role="dialog" aria-modal="true" aria-labelledby="template-drawer-title">
+      {visibleActiveTab === "email-templates" && selectedTemplate ? (
+        <div
+          className="control-center-template-drawer-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="template-drawer-title"
+        >
           <a
             href={buildControlCenterHref({ tab: "email-templates" })}
             className="control-center-template-drawer-backdrop"
@@ -6533,7 +12030,9 @@ const ControlCenterPage = ({
           />
           <aside className="control-center-template-drawer">
             <div className="control-center-template-drawer-head">
-              <h2 id="template-drawer-title">{selectedTemplate.name}</h2>
+              <h2 id="template-drawer-title" data-template-drawer-title>
+                {selectedTemplate.name}
+              </h2>
               <a
                 href={buildControlCenterHref({ tab: "email-templates" })}
                 className="control-center-template-drawer-close"
@@ -6544,27 +12043,29 @@ const ControlCenterPage = ({
             </div>
 
             <div className="control-center-template-drawer-content">
-              <form method="post" action="/control-center/templates/update" className="control-center-template-editor">
-                <input type="hidden" name="templateId" value={selectedTemplate.id} />
+              <form
+                method="post"
+                action={isCreatingTemplate ? "/control-center/templates/create" : "/control-center/templates/update"}
+                className="control-center-template-editor"
+                data-template-editor
+                data-template-sample-variables={JSON.stringify(templateSampleVariables)}
+              >
+                {isCreatingTemplate ? <input type="hidden" name="channelCompatibility" value="email" /> : null}
+                {!isCreatingTemplate ? <input type="hidden" name="templateId" value={selectedTemplate.id} /> : null}
                 <div className="control-center-template-editor-fields">
                   <label>
                     <span>Name</span>
-                    <input type="text" name="name" defaultValue={selectedTemplate.name} />
+                    <input type="text" name="name" defaultValue={selectedTemplate.name} data-template-name-input />
                   </label>
                   <label>
                     <span>Subject</span>
-                    <input type="text" name="subject" defaultValue={selectedTemplate.subject} />
-                  </label>
-                  <label>
-                    <span>Folder</span>
-                    <select name="folderId" defaultValue={selectedTemplate.folderId ?? ""}>
-                      <option value="">No folder</option>
-                      {controlCenter.folders.map((folder) => (
-                        <option key={folder.id} value={folder.id}>
-                          {folder.name}
-                        </option>
-                      ))}
-                    </select>
+                    <input
+                      type="text"
+                      name="subject"
+                      defaultValue={selectedTemplate.subject}
+                      data-template-subject-input
+                      data-template-variable-target
+                    />
                   </label>
                   <label>
                     <span>Cc</span>
@@ -6577,7 +12078,6 @@ const ControlCenterPage = ({
                   </label>
                   <div className="control-center-template-editor-note">
                     Set a list of email addresses to Cc when manually generating an email body using this template. Note: These will not be used in workflows.
-                    <button type="button" className="template-mini-button">Cc</button>
                   </div>
                   <div className="control-center-template-toggle-row">
                     <label className="control-center-template-switchline">
@@ -6605,17 +12105,39 @@ const ControlCenterPage = ({
                   </div>
                 </div>
 
-                <textarea name="body" defaultValue={selectedTemplate.body} className="control-center-template-editor-body" />
+                <textarea
+                  name="body"
+                  defaultValue={selectedTemplate.body}
+                  className="control-center-template-editor-body"
+                  data-template-body-input
+                  data-template-variable-target
+                />
                 <div className="control-center-template-editor-footer">
-                  <div className="control-center-template-editor-tools" aria-hidden="true">
-                    <span>B</span>
-                    <span>I</span>
-                    <span>U</span>
-                    <span>•</span>
-                    <span>1.</span>
-                    <span>🔗</span>
-                    <span>📎</span>
-                    <span>Variable</span>
+                  <div className="control-center-template-editor-tools">
+                    <div className="control-center-template-variable-picker" data-template-variable-picker>
+                      <button
+                        type="button"
+                        className="control-center-template-variable-button"
+                        data-template-variable-toggle
+                        aria-haspopup="menu"
+                        aria-expanded="false"
+                      >
+                        Variable
+                      </button>
+                      <div className="control-center-template-variable-menu" data-template-variable-menu role="menu">
+                        {templateVariableOptions.map((variableName) => (
+                          <button
+                            key={variableName}
+                            type="button"
+                            className="control-center-template-variable-item"
+                            data-template-variable-insert={`{{${variableName}}}`}
+                            role="menuitem"
+                          >
+                            {`{{${variableName}}}`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                   <div className="control-center-template-editor-actions">
                     <span className="template-save-state">Saved</span>
@@ -6626,10 +12148,6 @@ const ControlCenterPage = ({
 
               <section className="control-center-template-preview-pane">
                 <div className="control-center-template-preview-chip">Template Preview</div>
-                <div className="control-center-template-preview-block">
-                  <h3>To</h3>
-                  <p>{selectedTemplatePreview?.sampleVariables.customer_email ?? "maria.santos@example.com"}</p>
-                </div>
                 {selectedTemplate.ccEmails.length > 0 ? (
                   <div className="control-center-template-preview-block">
                     <h3>Cc</h3>
@@ -6638,170 +12156,177 @@ const ControlCenterPage = ({
                 ) : null}
                 <div className="control-center-template-preview-block">
                   <h3>Subject</h3>
-                  <p>{selectedTemplatePreview?.subject ?? selectedTemplate.subject}</p>
+                  <p data-template-preview-subject>{previewSubject}</p>
                 </div>
                 <div className="control-center-template-preview-block">
                   <h3>Body</h3>
-                  <div className="control-center-template-preview-copy">
-                    {(selectedTemplatePreview?.body ?? selectedTemplate.body)
+                  <div className="control-center-template-preview-copy" data-template-preview-body>
+                    {previewBody
                       .split("\n")
                       .map((paragraph, index) =>
                         renderPreviewParagraph(selectedTemplate.id, paragraph, index),
                       )}
                   </div>
                 </div>
-                {selectedTemplate.folderId ? (
-                  <div className="control-center-template-preview-block">
-                    <h3>Folder</h3>
-                    <p>{folderNameById.get(selectedTemplate.folderId) ?? "—"}</p>
-                  </div>
-                ) : null}
               </section>
             </div>
           </aside>
         </div>
       ) : null}
 
-      {activeTab === "call-agent" ? (
+      {visibleActiveTab === "call-agent" ? (
         <div className="control-center-main">
           <article id="cc-call-agent" className="control-center-card">
             <div className="control-center-card-head">
               <div>
                 <h2>Call Agent</h2>
-                <p>Configure voice behavior, handoff settings, and provider-ready payloads.</p>
+                <p>Configure operator-controlled Retell voice availability.</p>
               </div>
             </div>
 
-            <form method="post" action="/control-center/call-agent/update" className="control-center-grid-form">
-              <label>
-                <span>Phone number</span>
-                <input type="text" name="phoneNumber" defaultValue={controlCenter.callAgentConfig.phoneNumber} />
-              </label>
-              <label>
-                <span>Human escalation</span>
-                <input
-                  type="text"
-                  name="humanSupportNumber"
-                  defaultValue={controlCenter.callAgentConfig.humanSupportNumber ?? ""}
-                />
-              </label>
-              <label className="control-center-checkbox">
-                <input type="checkbox" name="smsEnabled" defaultChecked={controlCenter.callAgentConfig.smsEnabled} />
-                <span>Inbound/outbound SMS enabled</span>
-              </label>
-              <label className="control-center-checkbox">
-                <input
-                  type="checkbox"
-                  name="outboundCallingEnabled"
-                  defaultChecked={controlCenter.callAgentConfig.outboundCallingEnabled}
-                />
-                <span>Outbound calling enabled</span>
-              </label>
-              <label className="control-center-checkbox">
-                <input
-                  type="checkbox"
-                  name="handoffToHumanEnabled"
-                  defaultChecked={controlCenter.callAgentConfig.handoffToHumanEnabled}
-                />
-                <span>Route handoff requests to human support</span>
-              </label>
-              <label className="control-center-checkbox">
-                <input
-                  type="checkbox"
-                  name="callRecordingDisclaimerEnabled"
-                  defaultChecked={controlCenter.callAgentConfig.callRecordingDisclaimerEnabled}
-                />
-                <span>Call recording disclaimer</span>
-              </label>
-              <label className="control-center-full-row">
-                <span>Manual instructions</span>
-                <textarea name="manualAgentInstructions" defaultValue={controlCenter.callAgentConfig.manualAgentInstructions} />
-              </label>
-              <label className="control-center-full-row">
-                <span>Override opening line</span>
-                <textarea name="overrideOpeningLine" defaultValue={controlCenter.callAgentConfig.overrideOpeningLine ?? ""} />
-              </label>
-              <div className="control-center-full-row">
+            <form method="post" action="/control-center/call-agent/update" className="call-agent-settings-form">
+              <div className="call-agent-settings-grid">
+                <section className="call-agent-settings-section call-agent-number-section call-agent-wide-section">
+                  <div className="call-agent-section-head">
+                    <span className="call-agent-section-icon"><AppIcon name="phone" /></span>
+                    <div>
+                      <h3>Call Routing</h3>
+                      <p>Outbound calls use the configured Retell number and the current workflow safety checks.</p>
+                    </div>
+                  </div>
+                  <label className="call-agent-number-field">
+                    <span>Call agent number</span>
+                    <input
+                      type="text"
+                      defaultValue={controlCenter.callAgentConfig.phoneNumber}
+                      placeholder="RETELL_FROM_NUMBER is not configured"
+                      readOnly
+                      aria-readonly="true"
+                    />
+                    <span className={`control-center-field-help${controlCenter.callAgentConfig.phoneNumber ? "" : " is-unavailable"}`}>
+                      {controlCenter.callAgentConfig.phoneNumber
+                        ? "Retell owns this number; update it in environment/provider configuration."
+                        : "Set RETELL_FROM_NUMBER before enabling Retell outbound calls."}
+                    </span>
+                  </label>
+                  <div className="call-agent-toggle-list">
+                    <label className="control-center-checkbox call-agent-toggle">
+                      <input type="checkbox" name="outboundCallingEnabled" defaultChecked={controlCenter.callAgentConfig.outboundCallingEnabled} />
+                      <span>Outbound calling enabled</span>
+                    </label>
+                    <label className="control-center-checkbox call-agent-toggle is-disabled">
+                      <input type="checkbox" defaultChecked={controlCenter.callAgentConfig.smsEnabled} disabled aria-disabled="true" />
+                      <span>Inbound/outbound SMS enabled</span>
+                    </label>
+                  </div>
+                </section>
+              </div>
+              <div className="call-agent-save-row">
                 <button type="submit" className="primary-button">Save Call Agent</button>
               </div>
             </form>
-
-            <div className="control-center-preview-grid">
-              <div className="control-center-preview-panel">
-                <h3>Voice agent preview</h3>
-                <p>{voicePreview?.agentBrief}</p>
-                <ul>
-                  {voicePreview?.safeTalkingPoints.map((point: string) => <li key={point}>{point}</li>)}
-                </ul>
-              </div>
-              <div className="control-center-preview-panel">
-                <h3>Provider payload</h3>
-                <pre>{JSON.stringify(controlCenter.providerPreview.payload, null, 2)}</pre>
-              </div>
-            </div>
           </article>
         </div>
       ) : null}
 
-      {activeTab === "config" ? (
-        <div className="control-center-main">
-          <article id="cc-config" className="control-center-card">
-            <div className="control-center-card-head">
-              <div>
-                <h2>Config</h2>
-                <p>Defaults, fallback policy, and testing controls for safe outreach.</p>
+      {selectedEnrollWorkflow ? (
+        (() => {
+          const enrolledBillingAccountIds = new Set(
+            selectedEnrollWorkflow.executions.map((execution) => execution.billingAccountId),
+          );
+          const modalCustomers = data.customerIndex.filter(
+            (customer) => !enrolledBillingAccountIds.has(customer.billingAccountId ?? customer.profileId),
+          );
+          return (
+            <div className="control-center-modal-shell" role="dialog" aria-modal="true" aria-labelledby="enroll-customers-title">
+              <a
+                href={buildControlCenterHref({ tab: "workflows", workflow: selectedEnrollWorkflow.id })}
+                className="control-center-modal-backdrop"
+                aria-label="Close enroll customers"
+              />
+              <div className="control-center-modal control-center-enroll-modal">
+                <div className="control-center-modal-head">
+                  <div>
+                    <h2 id="enroll-customers-title">Enroll Customers in Workflow</h2>
+                    <p>Select customers to enroll in "{selectedEnrollWorkflow.name}"</p>
+                  </div>
+                  <a
+                    href={buildControlCenterHref({ tab: "workflows", workflow: selectedEnrollWorkflow.id })}
+                    className="control-center-modal-close"
+                    aria-label="Close"
+                  >
+                    ×
+                  </a>
+                </div>
+
+                <form method="post" action="/control-center/workflows/enroll" className="control-center-modal-form">
+                  <input type="hidden" name="workflowId" value={selectedEnrollWorkflow.id} />
+
+                  <div className="control-center-enroll-search">
+                    <AppIcon name="search" />
+                    <input
+                      type="search"
+                      placeholder="Search customers..."
+                      aria-label={`Search customers for ${selectedEnrollWorkflow.name}`}
+                      className="control-center-enroll-search-input"
+                    />
+                  </div>
+
+                  <div className="control-center-enroll-list" data-role="enroll-customer-list">
+                    <label className="control-center-enroll-select-all">
+                      <input type="checkbox" className="control-center-enroll-modal-select-all" />
+                      <span>Select All ({modalCustomers.length})</span>
+                    </label>
+                    {modalCustomers.map((customer) => {
+                      const billingAccountId = customer.billingAccountId ?? customer.profileId;
+                      const accountNumber = customer.billingAccountId ?? customer.profileId;
+                      return (
+                        <label
+                          key={customer.profileId}
+                          className="control-center-enroll-option"
+                          data-customer-search={`${customer.canonicalName} ${accountNumber} ${customer.overdueAmount} ${customer.openInvoiceCount}`.toLowerCase()}
+                        >
+                          <input
+                            type="checkbox"
+                            name="billingAccountIds"
+                            value={billingAccountId}
+                            className="control-center-enroll-option-checkbox"
+                          />
+                          <div className="control-center-enroll-option-copy">
+                            <div className="control-center-enroll-option-title">
+                              <strong>{customer.canonicalName}</strong>
+                              <span className="workflow-stage-badge">{accountNumber}</span>
+                            </div>
+                            <p>
+                              <span>Overdue: {customer.overdueAmount}</span>
+                              <span>{customer.openInvoiceCount} open invoice{customer.openInvoiceCount === 1 ? "" : "s"}</span>
+                            </p>
+                          </div>
+                        </label>
+                      );
+                    })}
+                    {modalCustomers.length === 0 ? (
+                      <div className="control-center-enrollment-empty">
+                        <p>All available customers are already enrolled in this workflow.</p>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="control-center-modal-actions">
+                    <a href={buildControlCenterHref({ tab: "workflows", workflow: selectedEnrollWorkflow.id })} className="ghost-button">Cancel</a>
+                    <button type="submit" className="primary-button" disabled={modalCustomers.length === 0}>Enroll Customers</button>
+                  </div>
+                </form>
               </div>
             </div>
-
-            <form method="post" action="/control-center/config/update" className="control-center-grid-form">
-              <label>
-                <span>Default timezone</span>
-                <input type="text" name="defaultTimezone" defaultValue={controlCenter.config.defaultTimezone} />
-              </label>
-              <label>
-                <span>Sender behavior</span>
-                <input type="text" name="defaultSenderBehavior" defaultValue={controlCenter.config.defaultSenderBehavior} />
-              </label>
-              <label>
-                <span>Allowed channels</span>
-                <input type="text" name="allowedChannels" defaultValue={controlCenter.config.allowedChannels.join(",")} />
-              </label>
-              <label>
-                <span>Fallback policy</span>
-                <input type="text" name="channelFallbackPolicy" defaultValue={controlCenter.config.channelFallbackPolicy} />
-              </label>
-              <label>
-                <span>Sandbox mode</span>
-                <input type="text" name="sandboxMode" defaultValue={controlCenter.config.sandboxMode} />
-              </label>
-              <label>
-                <span>Risk approvals</span>
-                <input type="text" name="defaultRiskApprovalMode" defaultValue={controlCenter.config.defaultRiskApprovalMode} />
-              </label>
-              <div className="control-center-full-row">
-                <button type="submit" className="primary-button">Save Config</button>
-              </div>
-            </form>
-
-            <div className="control-center-preview-grid">
-              <div className="control-center-preview-panel">
-                <h3>Shared AI email preview</h3>
-                <p>{emailPreview?.subjectSuggestions?.[0]}</p>
-                <pre>{emailPreview?.emailBody ?? "No email preview"}</pre>
-              </div>
-              <div className="control-center-preview-panel">
-                <h3>Shared AI SMS preview</h3>
-                <pre>{smsPreview?.variants?.[0] ?? "No SMS preview"}</pre>
-              </div>
-            </div>
-          </article>
-        </div>
+          );
+        })()
       ) : null}
 
       {selectedStageWorkflow ? (
         <div className="control-center-modal-shell" role="dialog" aria-modal="true" aria-labelledby="add-stage-title">
           <a href={buildControlCenterHref({ tab: "workflows", workflow: selectedStageWorkflow.id })} className="control-center-modal-backdrop" aria-label="Close add stage" />
-          <div className="control-center-modal">
+          <div className="control-center-modal control-center-stage-modal">
             <div className="control-center-modal-head">
               <div>
                 <h2 id="add-stage-title">Add Stage</h2>
@@ -6814,35 +12339,47 @@ const ControlCenterPage = ({
 
             <form method="post" action="/control-center/stages/create" className="control-center-modal-form">
               <input type="hidden" name="workflowId" value={selectedStageWorkflow.id} />
-              <input type="hidden" name="outreachType" value={stageModalChannel} />
-              <input type="hidden" name="triggerType" value={stageModalChannel === "call" ? "payment_signal_state" : "relative_due_date"} />
+              <input type="hidden" name="outreachType" value={normalizedStageModalChannel} />
+              <input type="hidden" name="triggerType" value="relative_due_date" />
 
               <div className="control-center-modal-block">
                 <span className="control-center-field-label">Outreach Type</span>
                 <div className="stage-channel-picker">
-                  <a href={stageModalBaseHref("email")} className={`stage-channel-option${stageModalChannel === "email" ? " is-email" : ""}`}>✉ Email</a>
-                  <a href={stageModalBaseHref("call")} className={`stage-channel-option${stageModalChannel === "call" ? " is-call" : ""}`}>⌕ Call</a>
-                  <a href={stageModalBaseHref("sms")} className={`stage-channel-option${stageModalChannel === "sms" ? " is-sms" : ""}`}>◫ SMS</a>
+                  <a href={stageModalBaseHref("email")} className={`stage-channel-option${normalizedStageModalChannel === "email" ? " is-email" : ""}`}><span aria-hidden="true">✉</span> Email</a>
+                  <a href={stageModalBaseHref("call")} className={`stage-channel-option${normalizedStageModalChannel === "call" ? " is-call" : ""}`}><span aria-hidden="true">⌕</span> Call</a>
                 </div>
               </div>
 
               <div className="control-center-modal-block">
-                <label className="control-center-full-row">
-                  <span className="control-center-field-label">When should this stage trigger?</span>
-                  <select name="triggerComparator" defaultValue={stageModalChannel === "call" ? "remittance_missing_after_payment" : "due_in_days"}>
-                    <option value="due_in_days">Invoice is due in X days</option>
-                    <option value="due_today">Invoice is due today</option>
-                    <option value="days_past_due">X days past due</option>
-                    <option value="promise_missed">Promise-to-pay missed</option>
-                    <option value="remittance_missing_after_payment">Remittance missing after payment detected</option>
-                    <option value="no_response_after_prior_stage">No response after prior stage</option>
-                    <option value="manual">Manual operator-triggered stage</option>
-                  </select>
-                </label>
-                <input type="hidden" name="offsetDays" value={stageModalChannel === "call" ? "1" : stageModalChannel === "sms" ? "3" : "7"} />
+                <span className="control-center-field-label control-center-modal-section-label">When should this stage trigger?</span>
+                <div className="control-center-trigger-builder" data-stage-trigger-builder>
+                  <label className="control-center-trigger-number-wrap" data-stage-offset-wrap>
+                    <input
+                      type="number"
+                      name="offsetDays"
+                      min="0"
+                      defaultValue={normalizedStageModalChannel === "call" ? "1" : "7"}
+                      className="control-center-trigger-number-input"
+                      data-stage-offset-input
+                    />
+                  </label>
+                  <span className="control-center-trigger-days-copy" data-stage-offset-copy>days</span>
+                  <label className="control-center-trigger-select-wrap">
+                    <select
+                      name="triggerComparator"
+                      defaultValue="due_in_days"
+                      className="control-center-trigger-select"
+                      data-stage-trigger-comparator
+                    >
+                      <option value="due_in_days">Before due date</option>
+                      <option value="due_today">On due date</option>
+                      <option value="days_past_due">After due date</option>
+                    </select>
+                  </label>
+                </div>
               </div>
 
-              {stageModalChannel !== "call" ? (
+              {normalizedStageModalChannel !== "call" ? (
                 <div className="control-center-modal-block">
                   <span className="control-center-field-label">Template</span>
                   <div className="template-mode-picker">
@@ -6851,7 +12388,8 @@ const ControlCenterPage = ({
                   </div>
                   {stageModalTemplateMode === "pre_saved_template" ? (
                     <>
-                      <select name="templateId" defaultValue={availableTemplates[0]?.id}>
+                      <select name="templateId" defaultValue="" data-stage-template-select className="control-center-stage-template-select">
+                        <option value="">Choose a template</option>
                         {availableTemplates.map((template) => (
                           <option key={template.id} value={template.id}>{template.name}</option>
                         ))}
@@ -6861,9 +12399,9 @@ const ControlCenterPage = ({
                   ) : (
                     <>
                       <input type="hidden" name="templateMode" value="ai_generated" />
-                      <input type="hidden" name="aiStrategyId" value={stageModalChannel === "sms" ? "strategy_sms_conservative" : "strategy_email_default"} />
+                      <input type="hidden" name="aiStrategyId" value="strategy_email_default" />
                       <div className="control-center-ai-note">
-                        Shared retrieval and policy logic will generate conservative {stageModalChannel.toUpperCase()} content using account, invoice, contact, and thread context.
+                        Shared retrieval and policy logic will generate conservative {normalizedStageModalChannel.toUpperCase()} content using account, invoice, contact, and thread context.
                       </div>
                     </>
                   )}
@@ -6879,9 +12417,9 @@ const ControlCenterPage = ({
                 type="hidden"
                 name="notes"
                 value={
-                  stageModalChannel === "email"
+                  normalizedStageModalChannel === "email"
                     ? "Email reminder stage"
-                    : stageModalChannel === "call"
+                    : normalizedStageModalChannel === "call"
                       ? "Voice follow-up stage"
                       : "SMS reminder stage"
                 }
@@ -6889,7 +12427,14 @@ const ControlCenterPage = ({
 
               <div className="control-center-modal-actions">
                 <a href={buildControlCenterHref({ tab: "workflows", workflow: selectedStageWorkflow.id })} className="ghost-button">Cancel</a>
-                <button type="submit" className="primary-button">Add Stage</button>
+                <button
+                  type="submit"
+                  className="primary-button control-center-stage-submit"
+                  data-stage-submit
+                  disabled={stageModalTemplateMode === "pre_saved_template"}
+                >
+                  Add Stage
+                </button>
               </div>
             </form>
           </div>
@@ -6929,15 +12474,16 @@ const styles = `
   svg { width: 22px; height: 22px; flex: 0 0 auto; }
 
   .dashboard-app { min-height: 100vh; display: grid; grid-template-columns: 274px minmax(0, 1fr); }
-  .dashboard-sidebar { background: #0f172a; color: #cbd5e1; border-right: 1px solid #172036; padding: 12px 10px; }
-  .sidebar-brand { display: flex; align-items: center; gap: 12px; padding: 0 8px 16px; border-bottom: 1px solid #172036; }
+  .dashboard-sidebar { background: #0f172a; color: #cbd5e1; border-right: 1px solid #172036; padding: 16px 12px; }
+  .sidebar-brand { display: flex; align-items: center; gap: 12px; padding: 0 10px 18px; border-bottom: 1px solid #172036; }
   .brand-icon { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: #10b981; color: white; font-size: .96rem; font-weight: 700; }
   .brand-title, .brand-subtitle { margin: 0; }
   .brand-title { color: white; font-size: .92rem; font-weight: 700; }
   .brand-subtitle { color: #94a3b8; font-size: .76rem; margin-top: 1px; }
-  .sidebar-divider { height: 18px; }
-  .sidebar-nav { display: grid; gap: 4px; padding-top: 12px; }
-  .sidebar-link { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 0 12px; border-radius: 12px; color: #d0d7e4; font-size: .9rem; font-weight: 600; transition: background .18s ease, color .18s ease; }
+  .sidebar-divider { height: 22px; }
+  .sidebar-section-heading { margin: 0 0 8px; padding: 0 12px; color: #94a3b8; font-size: .84rem; font-weight: 700; }
+  .sidebar-nav { display: grid; gap: 6px; }
+  .sidebar-link { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 12px; border-radius: 12px; color: #d0d7e4; font-size: .95rem; font-weight: 600; transition: background .18s ease, color .18s ease; }
   .sidebar-link:hover { background: #172036; color: white; }
   .sidebar-link.is-active { background: #059669; color: white; }
 
@@ -6957,6 +12503,459 @@ const styles = `
   .page-header p, .section-heading p, .section-source p, .table-cell p, .reason-box p, .label-copy, .inline-meta, .activity-summary-body p, .timeline-copy p, .timeline-copy span, .email-preview p, .rule-main p, .kpi-footer { color: var(--muted); line-height: 1.45; }
   .sparkle { color: var(--success); font-size: 1.2rem; }
   .page-header-actions { display: flex; align-items: center; }
+
+  .invoice-ledger-page { gap: 14px; }
+  .invoice-ledger-header,
+  .invoice-ledger-toolbar,
+  .invoice-ledger-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .invoice-ledger-title { display: grid; gap: 4px; }
+  .invoice-ledger-title h1,
+  .invoice-ledger-title p { margin: 0; }
+  .invoice-ledger-title h1 { font-size: 1.92rem; line-height: 1.05; color: #111827; }
+  .invoice-ledger-title p { color: #667085; font-size: .82rem; }
+  .invoice-ledger-button {
+    min-height: 32px;
+    border-radius: 8px;
+    border: 1px solid #d8dee6;
+    background: white;
+    color: #111827;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+    cursor: pointer;
+    font-size: .78rem;
+  }
+  .invoice-ledger-button svg { width: 14px; height: 14px; }
+  .invoice-ledger-button-filter { white-space: nowrap; }
+  .invoice-ledger-toolbar {
+    background: white;
+    border: 1px solid #dfe5ec;
+    border-radius: 12px;
+    padding: 8px 10px;
+  }
+  .invoice-ledger-search {
+    flex: 1;
+    min-height: 32px;
+    border-radius: 8px;
+    background: #f4f6f9;
+    color: #98a2b3;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 11px;
+  }
+  .invoice-ledger-search svg { width: 14px; height: 14px; }
+  .invoice-ledger-search input {
+    width: 100%;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #344054;
+    font: inherit;
+    font-size: .77rem;
+  }
+  .invoice-ledger-search input::placeholder { color: #98a2b3; }
+  .invoice-ledger-select {
+    min-width: 118px;
+    min-height: 32px;
+    border-radius: 8px;
+    border: 1px solid #eef1f4;
+    background: #f7f8fb;
+    color: #344054;
+    padding: 0 30px 0 11px;
+    font: inherit;
+    font-size: .76rem;
+  }
+  .invoice-ledger-card {
+    background: white;
+    border: 1px solid #dfe5ec;
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .invoice-ledger-table {
+    display: grid;
+    grid-template-columns: 44px 1.4fr 2.2fr 1.1fr 1.1fr .95fr 1.2fr 1.2fr;
+  }
+  .invoice-ledger-table-header {
+    min-height: 40px;
+    background: #fcfcfd;
+    border-bottom: 1px solid #e9edf2;
+  }
+  .invoice-ledger-head,
+  .invoice-ledger-cell {
+    padding: 0 15px;
+    display: flex;
+    align-items: center;
+    min-height: 39px;
+    font-size: .82rem;
+  }
+  .invoice-ledger-head {
+    color: #667085;
+    font-size: .63rem;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .invoice-ledger-head-checkbox,
+  .invoice-ledger-cell-checkbox { justify-content: center; }
+  .invoice-ledger-row {
+    position: relative;
+    border-bottom: 1px solid #eef2f6;
+    background: white;
+  }
+  .invoice-ledger-row:hover { background: #fbfcfe; }
+  .invoice-ledger-row:last-of-type { border-bottom: 1px solid #eef2f6; }
+  .invoice-ledger-empty {
+    display: grid;
+    gap: 6px;
+    padding: 26px 18px;
+    border-bottom: 1px solid #eef2f6;
+    color: #667085;
+  }
+  .invoice-ledger-empty strong { color: #344054; }
+  .invoice-ledger-head input,
+  .invoice-ledger-cell input {
+    width: 13px;
+    height: 13px;
+    margin: 0;
+    accent-color: #2563eb;
+  }
+  .invoice-ledger-link,
+  .invoice-ledger-customer-link {
+    color: #2954ff;
+    font-weight: 600;
+  }
+  .invoice-ledger-link { font-size: .8rem; }
+  .invoice-ledger-customer-link { font-size: .8rem; }
+  .invoice-ledger-customer-cell {
+    position: relative;
+    overflow: visible;
+  }
+  .invoice-ledger-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-size: .66rem;
+    white-space: nowrap;
+  }
+  .invoice-ledger-status.is-open {
+    background: #f2f4f7;
+    border-color: #e4e7ec;
+    color: #475467;
+  }
+  .invoice-ledger-status.is-partial {
+    background: #dbeafe;
+    border-color: #bfdbfe;
+    color: #2563eb;
+  }
+  .invoice-ledger-status.is-overdue {
+    background: #ffe4e4;
+    border-color: #ffc9c9;
+    color: #e11d48;
+  }
+  .invoice-ledger-status.is-paid {
+    background: #d8f7e6;
+    border-color: #b7ebd0;
+    color: #0f8b62;
+  }
+  .invoice-customer-popover {
+    position: absolute;
+    top: calc(100% - 2px);
+    left: 0;
+    z-index: 8;
+    width: 174px;
+    padding: 10px 0 12px;
+    border-radius: 10px;
+    border: 1px solid #dfe5ec;
+    background: white;
+    box-shadow: 0 12px 24px rgba(16, 24, 40, 0.12);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(8px);
+    transition: opacity .16s ease, transform .16s ease;
+  }
+  .invoice-ledger-customer-cell:hover .invoice-customer-popover,
+  .invoice-ledger-customer-cell:focus-within .invoice-customer-popover {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+  .invoice-customer-popover-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px 10px;
+    border-bottom: 1px solid #edf1f5;
+    font-size: .82rem;
+    color: #111827;
+  }
+  .invoice-customer-popover-icon {
+    width: 12px;
+    height: 12px;
+    color: #98a2b3;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .invoice-customer-popover-icon svg { width: 12px; height: 12px; }
+  .invoice-customer-popover-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 8px;
+    padding: 10px 12px 12px;
+    font-size: .72rem;
+  }
+  .invoice-customer-popover-grid span { color: #667085; }
+  .invoice-customer-popover-grid strong {
+    color: #111827;
+    font-weight: 500;
+    text-align: right;
+  }
+  .invoice-customer-popover-segment {
+    color: #2954ff;
+    font-weight: 500;
+    text-align: right;
+  }
+  .invoice-customer-popover-action {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 12px;
+    color: #2954ff;
+    font-size: .77rem;
+    font-weight: 600;
+  }
+  .invoice-customer-popover-action::after { content: "→"; margin-left: 4px; }
+  .invoice-ledger-summary {
+    align-items: stretch;
+    border-top: 1px solid #eef2f6;
+    background: #fbfcfe;
+    padding: 10px 15px 12px;
+  }
+  .invoice-ledger-summary-block {
+    flex: 1;
+    display: grid;
+    gap: 3px;
+  }
+  .invoice-ledger-summary-block span {
+    color: #667085;
+    font-size: .63rem;
+  }
+  .invoice-ledger-summary-block strong {
+    color: #111827;
+    font-size: 1.18rem;
+    line-height: 1.1;
+    font-weight: 600;
+  }
+  .invoice-ledger-summary-block strong.is-danger { color: #e11d48; }
+  .invoice-ledger-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 18px;
+    border-top: 1px solid #eef2f6;
+    color: #667085;
+    font-size: .82rem;
+  }
+  .invoice-ledger-pagination > div {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .invoice-ledger-page-link {
+    color: #111827;
+    font-weight: 700;
+    text-decoration: none;
+  }
+  .invoice-ledger-page-link.is-disabled {
+    color: #98a2b3;
+    pointer-events: none;
+  }
+
+  .invoice-detail-page { gap: 14px; }
+  .invoice-detail-header,
+  .invoice-detail-title,
+  .invoice-detail-actions,
+  .invoice-detail-activity-row { display: flex; align-items: center; gap: 8px; }
+  .invoice-detail-header { justify-content: space-between; }
+  .invoice-detail-title h1 { margin: 0; font-size: 1.9rem; line-height: 1.05; color: #111827; }
+  .invoice-detail-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid #e4e7ec;
+    background: #f2f4f7;
+    color: #475467;
+    font-size: .66rem;
+    white-space: nowrap;
+  }
+  .invoice-detail-status.is-partial { background: #dbeafe; border-color: #bfdbfe; color: #2563eb; }
+  .invoice-detail-status.is-overdue { background: #ffe4e4; border-color: #ffc9c9; color: #e11d48; }
+  .invoice-detail-status.is-paid { background: #d8f7e6; border-color: #b7ebd0; color: #0f8b62; }
+  .invoice-detail-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .invoice-detail-action-button,
+  .invoice-detail-icon-button {
+    min-height: 30px;
+    border-radius: 8px;
+    border: 1px solid #d8dee6;
+    background: white;
+    color: #111827;
+    padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .78rem;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+    cursor: pointer;
+  }
+  .invoice-detail-action-button svg,
+  .invoice-detail-icon-button svg { width: 14px; height: 14px; }
+  .invoice-detail-icon-button { width: 30px; justify-content: center; padding: 0; }
+  .invoice-detail-kebab { font-size: 1rem; line-height: 1; }
+  .invoice-detail-top-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 216px;
+    gap: 14px;
+    align-items: start;
+  }
+  .invoice-detail-card {
+    background: white;
+    border: 1px solid #dfe5ec;
+    border-radius: 14px;
+    padding: 16px 16px 17px;
+    box-shadow: 0 2px 6px rgba(16, 24, 40, 0.03);
+  }
+  .invoice-detail-card h2 {
+    margin: 0 0 16px;
+    color: #111827;
+    font-size: .96rem;
+  }
+  .invoice-detail-definition-list {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px 18px;
+    align-items: center;
+    min-height: 126px;
+  }
+  .invoice-detail-definition-list span,
+  .invoice-detail-side-block span,
+  .invoice-detail-empty,
+  .invoice-detail-activity-date { color: #667085; }
+  .invoice-detail-definition-list span,
+  .invoice-detail-side-block span {
+    font-size: .68rem;
+  }
+  .invoice-detail-definition-list strong {
+    text-align: right;
+    font-size: .82rem;
+    font-weight: 500;
+    color: #111827;
+  }
+  .invoice-detail-promise {
+    display: grid;
+    gap: 2px;
+    justify-items: end;
+  }
+  .invoice-detail-promise span {
+    font-size: .72rem;
+    color: #667085;
+  }
+  .invoice-detail-inline-link {
+    color: #2954ff;
+    font-size: .8rem;
+    font-weight: 500;
+    justify-self: end;
+  }
+  .invoice-detail-customer-card { min-height: 154px; }
+  .invoice-detail-side-block { display: grid; gap: 5px; }
+  .invoice-detail-side-block + .invoice-detail-side-block { margin-top: 14px; }
+  .invoice-detail-side-block p {
+    margin: 0;
+    color: #111827;
+    font-size: .8rem;
+    line-height: 1.5;
+  }
+  .invoice-detail-line-table {
+    display: grid;
+    grid-template-columns: minmax(0, 1.8fr) 120px 180px 180px;
+  }
+  .invoice-detail-line-table-header {
+    border-bottom: 1px solid #e9edf2;
+    padding-bottom: 9px;
+  }
+  .invoice-detail-line-table-header > div {
+    color: #667085;
+    font-size: .62rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-weight: 700;
+  }
+  .invoice-detail-line-row {
+    padding-top: 9px;
+    color: #111827;
+    font-size: .8rem;
+  }
+  .invoice-detail-line-row > div,
+  .invoice-detail-line-table-header > div { padding-right: 14px; }
+  .invoice-detail-line-row > div:nth-child(3),
+  .invoice-detail-line-row > div:nth-child(4),
+  .invoice-detail-line-table-header > div:nth-child(3),
+  .invoice-detail-line-table-header > div:nth-child(4) { text-align: right; }
+  .invoice-detail-empty {
+    margin: 0;
+    font-size: .78rem;
+    min-height: 46px;
+    display: flex;
+    align-items: center;
+  }
+  .invoice-detail-activity-list { display: grid; gap: 8px; }
+  .invoice-detail-activity-row {
+    display: grid;
+    grid-template-columns: 20px auto minmax(0, 1fr) auto auto;
+    gap: 9px;
+    align-items: center;
+    font-size: .74rem;
+  }
+  .invoice-detail-activity-icon {
+    width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+  }
+  .invoice-detail-activity-icon svg { width: 10px; height: 10px; }
+  .invoice-detail-activity-icon.is-mail { background: #dbeafe; color: #2563eb; }
+  .invoice-detail-activity-icon.is-phone { background: #f3e8ff; color: #9333ea; }
+  .invoice-detail-activity-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid #e4e7ec;
+    background: #f8fafc;
+    color: #475467;
+    font-size: .64rem;
+    white-space: nowrap;
+  }
+  .invoice-detail-activity-channel,
+  .invoice-detail-activity-reference { color: #111827; }
+  .invoice-detail-activity-reference { justify-self: end; }
+  .invoice-detail-activity-date { justify-self: end; white-space: nowrap; }
 
   .header-actions { flex-wrap: wrap; justify-content: flex-end; }
   .ghost-button, .ghost-select, .primary-button, .tab-pill, .row-button-group button, .resolve-button, .text-button {
@@ -7018,6 +13017,308 @@ const styles = `
   .filter-row { grid-template-columns: minmax(0, 1.7fr) repeat(3, minmax(180px, .8fr)); align-items: center; }
   .filter-row-tight { grid-template-columns: minmax(0, 1fr) auto; }
   .search-box { min-height: 54px; display: flex; align-items: center; padding: 0 16px; border-radius: 12px; background: #f3f5f8; color: #98a2b3; border: 1px solid #eef2f6; }
+  .users-admin-page,
+  .users-admin-page * { font-weight: 400; }
+  .users-admin-page { gap: 28px; padding-top: 8px; }
+  .users-admin-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+  .users-admin-title-block { display: grid; gap: 8px; }
+  .users-admin-title-block h1, .users-admin-title-block p { margin: 0; }
+  .users-admin-title-block h1 { font-size: 2.15rem; line-height: 1.03; letter-spacing: -.03em; }
+  .users-admin-title-block p { color: #667085; font-size: 1.02rem; }
+  .users-admin-invite-button {
+    min-height: 43px;
+    padding: 0 17px;
+    border-radius: 11px;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: #0e9f6e;
+    color: white;
+    border: 1px solid #0e9f6e;
+  }
+  .users-admin-invite-button svg { width: 16px; height: 16px; }
+  .users-admin-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+  .users-admin-stat-card {
+    min-height: 106px;
+    border-radius: 18px;
+    background: white;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.03);
+    padding: 20px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .users-admin-stat-icon {
+    width: 46px;
+    height: 46px;
+    border-radius: 12px;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+  }
+  .users-admin-stat-icon svg { width: 19px; height: 19px; }
+  .users-admin-stat-icon-neutral { background: #f3f4f6; color: #6b7280; }
+  .users-admin-stat-icon-success { background: #dcfce7; color: #10b981; }
+  .users-admin-stat-icon-info { background: #dbeafe; color: #2563eb; }
+  .users-admin-stat-copy { display: grid; gap: 8px; }
+  .users-admin-stat-copy span { color: #667085; font-size: .98rem; }
+  .users-admin-stat-copy strong { font-size: 2.1rem; line-height: .95; color: #111827; font-weight: 400; }
+  .users-admin-stat-success { color: #0e9f6e; }
+  .users-admin-stat-info { color: #2563eb; }
+  .users-admin-toolbar-card {
+    border-radius: 20px;
+    background: white;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.03);
+    padding: 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .users-admin-searchbox {
+    min-height: 42px;
+    flex: 1;
+    border-radius: 10px;
+    background: #f4f5f8;
+    border: 1px solid #eef1f4;
+    color: #98a2b3;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px;
+    font-size: .98rem;
+  }
+  .users-admin-searchbox svg { width: 17px; height: 17px; }
+  .users-admin-filters { display: flex; align-items: center; gap: 12px; }
+  .users-admin-filter {
+    min-width: 182px;
+    min-height: 42px;
+    border-radius: 10px;
+    border: 1px solid #eef1f4;
+    background: #f4f5f8;
+    color: #344054;
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    font-size: .98rem;
+  }
+  .users-admin-filter::after { content: "⌄"; color: #98a2b3; font-size: .95rem; }
+  .users-admin-table-card {
+    border-radius: 20px;
+    background: white;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.03);
+    overflow: hidden;
+  }
+  .users-admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  .users-admin-col-user { width: 20%; }
+  .users-admin-col-role { width: 14%; }
+  .users-admin-col-scope { width: 27%; }
+  .users-admin-col-status { width: 12%; }
+  .users-admin-col-last-active { width: 11%; }
+  .users-admin-col-actions { width: 6%; }
+  .users-admin-table-head th {
+    height: 48px;
+    padding: 0 26px;
+    background: #fcfcfd;
+    border-bottom: 1px solid #e9edf2;
+    color: #667085;
+    font-size: .76rem;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .users-admin-table-row td {
+    padding: 18px 26px;
+    border-bottom: 1px solid #eef2f6;
+    vertical-align: middle;
+  }
+  .users-admin-table-row:last-child td { border-bottom: 0; }
+  .users-admin-user-cell { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .users-admin-avatar {
+    width: 38px;
+    height: 38px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    background: #d8f7e6;
+    color: #0f8b62;
+    font-size: .92rem;
+    flex: 0 0 auto;
+  }
+  .users-admin-user-copy { display: grid; gap: 4px; min-width: 0; }
+  .users-admin-user-name {
+    color: #111827;
+    font-size: .98rem;
+    line-height: 1.1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .users-admin-user-email {
+    color: #667085;
+    font-size: .88rem;
+    line-height: 1.1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .users-admin-role-pill,
+  .users-admin-scope-pill,
+  .users-admin-status-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 26px;
+    padding: 0 10px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-size: .81rem;
+    white-space: nowrap;
+  }
+  .users-admin-role-pill.is-finance { background: #dbeafe; color: #2563eb; border-color: #bfdbfe; }
+  .users-admin-role-pill.is-ar { background: #d8f7e6; color: #0f8b62; border-color: #b7ebd0; }
+  .users-admin-role-pill.is-collections { background: #ffefc7; color: #c96a00; border-color: #f7d88a; }
+  .users-admin-role-pill.is-commercial { background: #f3e8ff; color: #9333ea; border-color: #e9d5ff; }
+  .users-admin-role-pill.is-admin,
+  .users-admin-role-pill.is-neutral { background: #f3f4f6; color: #475467; border-color: #e5e7eb; }
+  .users-admin-scope-cell { display: flex; flex-wrap: wrap; gap: 6px; }
+  .users-admin-scope-pill { background: #f8fafc; color: #475467; border-color: #dfe6ee; }
+  .users-admin-approval-cell {
+    color: #344054;
+    font-size: .96rem;
+    white-space: nowrap;
+  }
+  .users-admin-approval-cell.is-muted { color: #98a2b3; }
+  .users-admin-status-pill.is-active { background: #d8f7e6; color: #0f8b62; border-color: #b7ebd0; }
+  .users-admin-status-pill.is-invited { background: #dbeafe; color: #2563eb; border-color: #bfdbfe; }
+  .users-admin-status-pill.is-inactive { background: #f3f4f6; color: #667085; border-color: #e5e7eb; }
+  .users-admin-last-active {
+    color: #667085;
+    font-size: .96rem;
+    white-space: nowrap;
+  }
+  .users-admin-last-active.is-muted { color: #98a2b3; }
+  .users-admin-actions-cell {
+    color: #111827;
+    font-size: 1.2rem;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .users-admin-footnote { color: #667085; font-size: .88rem; padding-left: 4px; }
+  .users-admin-invite-modal {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 20px;
+    z-index: 50;
+  }
+  .users-admin-invite-modal:target { display: flex; }
+  .users-admin-invite-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(17, 24, 39, .44);
+  }
+  .users-admin-invite-panel {
+    position: relative;
+    width: min(610px, calc(100vw - 40px));
+    border-radius: 18px;
+    background: #ffffff;
+    border: 1px solid #d9e0ea;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, .18);
+    padding: 26px 28px 28px;
+  }
+  .users-admin-invite-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .users-admin-invite-title-block { display: grid; gap: 8px; }
+  .users-admin-invite-title-block h2,
+  .users-admin-invite-title-block p { margin: 0; }
+  .users-admin-invite-title-block h2 { font-size: 1.05rem; color: #111827; }
+  .users-admin-invite-title-block p { font-size: .98rem; color: #667085; }
+  .users-admin-invite-close {
+    color: #667085;
+    text-decoration: none;
+    font-size: 2rem;
+    line-height: .85;
+    padding: 0 4px;
+  }
+  .users-admin-invite-form {
+    display: grid;
+    gap: 20px;
+    margin-top: 34px;
+  }
+  .users-admin-invite-field {
+    display: grid;
+    gap: 10px;
+  }
+  .users-admin-invite-field span {
+    color: #344054;
+    font-size: .96rem;
+  }
+  .users-admin-invite-field input,
+  .users-admin-invite-field select {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 46px;
+    padding: 0 16px;
+    border-radius: 12px;
+    border: 1px solid #eceff3;
+    background: #f6f7fb;
+    color: #475467;
+    font: inherit;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+  }
+  .users-admin-invite-field input::placeholder { color: #98a2b3; }
+  .users-admin-invite-field select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14' fill='none'%3E%3Cpath d='M3 5.25L7 9.25L11 5.25' stroke='%2398A2B3' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 16px center;
+    padding-right: 44px;
+  }
+  .users-admin-invite-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    padding-top: 2px;
+  }
+  .users-admin-invite-cancel,
+  .users-admin-invite-submit {
+    min-height: 44px;
+    padding: 0 18px;
+    border-radius: 12px;
+    font: inherit;
+  }
+  .users-admin-invite-cancel {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #e4e7ec;
+    background: #ffffff;
+    color: #111827;
+    text-decoration: none;
+  }
+  .users-admin-invite-submit {
+    border: 1px solid #0e9f6e;
+    background: #0e9f6e;
+    color: #ffffff;
+  }
   .tab-pills { grid-auto-flow: column; grid-auto-columns: max-content; justify-content: start; overflow: auto; }
   .tab-pill { background: #f3f5f8; }
   .tab-pill.is-active { background: white; font-weight: 700; }
@@ -7325,94 +13626,187 @@ const styles = `
   .data-source-row-status svg, .data-source-file-icon svg { width: 18px; height: 18px; }
 
   .analytics-page { gap: 18px; }
+  .analytics-page .page-header { gap: 4px; }
+  .analytics-page .page-header h1 { font-size: 1.75rem; line-height: 1.04; }
+  .analytics-page .page-header p { font-size: .84rem; }
   .analytics-header-actions { align-items: center; gap: 12px; }
-  .analytics-select, .analytics-export-button { min-height: 42px; border-radius: 12px; }
-  .analytics-select { min-width: 210px; display: inline-flex; align-items: center; justify-content: space-between; gap: 12px; font-weight: 600; background: #f7f8fb; border-color: #eef2f6; }
-  .analytics-select-caret { color: #98a2b3; font-size: .85rem; }
-  .analytics-export-button { min-width: 154px; display: inline-flex; align-items: center; justify-content: center; gap: 10px; }
-  .analytics-export-button svg { width: 16px; height: 16px; }
-  .analytics-kpi-grid, .analytics-summary-grid { display: grid; gap: 18px; }
-  .analytics-kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .analytics-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .analytics-metric-card, .analytics-summary-card { background: #ffffff; border: 1px solid #e7eaef; border-radius: 22px; box-shadow: 0 10px 24px rgba(15, 23, 42, .04); }
-  .analytics-metric-card { min-height: 188px; padding: 22px 24px; display: grid; align-content: start; gap: 22px; }
-  .analytics-summary-card { min-height: 74px; padding: 14px 16px; display: grid; gap: 6px; }
-  .analytics-metric-top, .analytics-summary-top, .analytics-aging-row, .analytics-aging-name, .analytics-aging-values, .analytics-customer-row, .analytics-customer-title, .analytics-customer-metrics, .analytics-legend, .analytics-inline-stats { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .analytics-metric-top p, .analytics-summary-top p { margin: 0; color: #667085; font-size: 1rem; }
-  .analytics-metric-icon, .analytics-summary-icon { width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center; }
-  .analytics-metric-icon svg, .analytics-summary-icon svg { width: 24px; height: 24px; }
-  .analytics-metric-icon-info, .analytics-summary-icon-info { background: #dceaff; color: #2563eb; }
-  .analytics-metric-icon-danger { background: #ffe1e2; color: #ef4444; }
-  .analytics-metric-icon-success, .analytics-summary-icon-success { background: #d8f5e7; color: #0f9d67; }
-  .analytics-metric-icon-violet, .analytics-summary-icon-violet { background: #f1e7ff; color: #9333ea; }
-  .analytics-metric-value { font-size: 2.1rem; line-height: 1.05; color: #111827; }
-  .analytics-summary-value { font-size: 1.5rem; line-height: 1; color: #1f2937; }
-  .analytics-metric-footer, .analytics-summary-subtitle { font-size: 1rem; font-weight: 600; }
-  .analytics-metric-footer-info, .analytics-metric-footer-danger, .analytics-metric-footer-success, .analytics-metric-footer-violet, .analytics-summary-subtitle-success, .analytics-summary-subtitle-violet { color: #0f9d67; }
-  .analytics-summary-subtitle-info { color: #ef4444; }
-  .analytics-grid { display: grid; gap: 18px; }
-  .analytics-grid-primary, .analytics-grid-secondary { grid-template-columns: minmax(0, 1fr) minmax(0, .98fr); }
-  .analytics-panel { padding: 28px; border-radius: 22px; box-shadow: 0 10px 24px rgba(15, 23, 42, .04); border-color: #e7eaef; }
+  .analytics-export-button, .analytics-impact-export-button {
+    min-height: 38px;
+    min-width: 112px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 0 14px;
+    border-radius: 12px;
+    font-size: .92rem;
+  }
+  .analytics-export-button svg, .analytics-impact-export-button svg { width: 16px; height: 16px; }
+  .analytics-kpi-grid, .analytics-impact-grid, .analytics-grid { display: grid; gap: 14px; }
+  .analytics-kpi-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .analytics-metric-card {
+    min-height: 126px;
+    padding: 18px 20px 20px;
+    border: 1px solid #e7eaef;
+    border-radius: 18px;
+    background: #ffffff;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, .035);
+    display: grid;
+    align-content: space-between;
+    gap: 14px;
+  }
+  .analytics-metric-card p { margin: 0; color: #667085; font-size: .86rem; line-height: 1.35; }
+  .analytics-metric-value { font-size: 1.55rem; line-height: 1.02; color: #111827; letter-spacing: -.02em; }
+  .analytics-metric-value-danger { color: #dc2626; }
+  .analytics-metric-value-success { color: #0f9d67; }
+  .analytics-impact-panel {
+    padding: 24px 28px;
+    border-radius: 18px;
+    border: 0;
+    background: linear-gradient(135deg, #121a2b 0%, #1b2436 100%);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, .12);
+  }
+  .analytics-impact-panel .panel-header { align-items: flex-start; }
+  .analytics-impact-panel .panel-header h2 { font-size: 1.05rem; }
+  .analytics-impact-panel h2 { color: #ffffff; }
+  .analytics-impact-panel .label-copy { color: rgba(255, 255, 255, .68); font-size: .82rem; }
+  .analytics-impact-export-button {
+    border: 1px solid rgba(255, 255, 255, .18);
+    background: #ffffff;
+    color: #111827;
+  }
+  .analytics-impact-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); padding-top: 10px; }
+  .analytics-impact-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 72px;
+  }
+  .analytics-impact-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+  }
+  .analytics-impact-icon svg { width: 22px; height: 22px; }
+  .analytics-impact-icon-info { background: rgba(37, 99, 235, .2); color: #60a5fa; }
+  .analytics-impact-icon-violet { background: rgba(147, 51, 234, .22); color: #c084fc; }
+  .analytics-impact-icon-success { background: rgba(15, 157, 103, .2); color: #2dd4bf; }
+  .analytics-impact-copy { display: grid; gap: 4px; }
+  .analytics-impact-copy span { color: rgba(255, 255, 255, .66); font-size: .84rem; }
+  .analytics-impact-copy strong { color: #ffffff; font-size: 1.6rem; line-height: 1; letter-spacing: -.02em; }
+  .analytics-trends-header {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+  }
+  .analytics-trends-header h2 { margin: 0; font-size: 1.25rem; }
+  .analytics-trend-toggle { display: inline-flex; align-items: center; gap: 8px; }
+  .analytics-trend-pill {
+    min-height: 38px;
+    padding: 0 16px;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+    background: #ffffff;
+    color: #475467;
+    display: inline-flex;
+    align-items: center;
+    font-size: .9rem;
+    font-weight: 700;
+    text-decoration: none;
+  }
+  .analytics-trend-pill.is-active {
+    background: #111827;
+    border-color: #111827;
+    color: #ffffff;
+  }
+  .analytics-page.is-loading .analytics-grid-trends,
+  .analytics-page.is-loading .analytics-kpi-grid,
+  .analytics-page.is-loading .analytics-impact-panel {
+    opacity: .62;
+    transition: opacity .16s ease;
+  }
+  .analytics-grid-trends { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analytics-panel { padding: 20px 22px; border-radius: 18px; box-shadow: 0 6px 18px rgba(15, 23, 42, .035); border-color: #e7eaef; }
   .analytics-panel .panel-header { align-items: flex-start; }
-  .analytics-panel .panel-header h2 { font-size: 1.15rem; line-height: 1.2; }
-  .analytics-panel .label-copy { font-size: 1rem; color: #667085; }
-  .analytics-bar-chart { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px; align-items: end; min-height: 310px; padding-top: 18px; }
-  .analytics-bar-column { display: grid; gap: 12px; justify-items: center; }
-  .analytics-bar-label-top { color: #667085; font-size: .82rem; font-weight: 600; }
-  .analytics-bar-track { position: relative; width: 100%; min-height: 250px; border-radius: 12px; overflow: hidden; display: flex; align-items: flex-end; justify-content: center; }
-  .analytics-bar-grid { position: absolute; inset: 0; display: grid; align-content: stretch; }
-  .analytics-bar-grid span { border-top: 1px dashed #e5e7eb; }
-  .analytics-bar-grid span:first-child { border-top: 0; }
-  .analytics-bar-group { position: relative; z-index: 1; width: 100%; height: 100%; display: flex; align-items: flex-end; justify-content: center; gap: 8px; padding: 0 8px; }
-  .analytics-bar { flex: 1; max-width: 38px; height: 100%; display: flex; align-items: flex-end; }
-  .analytics-bar-target, .analytics-bar-collected { width: 100%; border-radius: 8px 8px 0 0; }
-  .analytics-bar-target { background: #cfd4dd; }
-  .analytics-bar-collected { background: linear-gradient(180deg, #28c38a 0%, #14a26c 100%); }
-  .analytics-axis-label, .analytics-line-label { color: #98a2b3; font-size: .72rem; }
-  .analytics-legend { justify-content: center; color: #667085; font-size: .95rem; padding-top: 16px; }
-  .analytics-legend-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; margin-right: 6px; vertical-align: middle; }
-  .analytics-legend-dot-collected { background: #0f9d67; }
-  .analytics-legend-dot-target { background: #cbd5e1; }
-  .analytics-aging-layout { display: grid; grid-template-columns: minmax(240px, .9fr) minmax(0, 1fr); gap: 20px; align-items: center; }
-  .analytics-donut-wrap { display: grid; place-items: center; padding: 8px 0; }
-  .analytics-donut-area { position: relative; width: 260px; height: 260px; display: grid; place-items: center; }
-  .analytics-donut { width: 230px; height: 230px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255,255,255,.65); }
-  .analytics-aging-percent { position: absolute; font-size: 1.05rem; font-weight: 700; line-height: 1; }
-  .analytics-aging-percent-top { top: 12px; left: 50%; transform: translateX(-50%); }
-  .analytics-aging-percent-bottom-left { bottom: 28px; left: 18px; }
-  .analytics-aging-percent-bottom-right { bottom: 40px; right: 18px; }
-  .analytics-aging-percent-right-upper { top: 104px; right: 2px; }
-  .analytics-aging-percent-right-lower { top: 144px; right: -6px; }
-  .analytics-aging-legend { display: grid; gap: 12px; }
-  .analytics-aging-row { padding: 2px 0; }
-  .analytics-aging-name span, .analytics-aging-values span { color: #667085; font-size: .95rem; }
-  .analytics-aging-values { min-width: 96px; text-align: right; }
-  .analytics-aging-values strong { font-size: 1.2rem; }
-  .analytics-line-chart svg { display: block; width: 100%; height: 218px; }
+  .analytics-panel .panel-header h2 { font-size: .98rem; line-height: 1.26; }
+  .analytics-panel .label-copy { font-size: .82rem; color: #667085; line-height: 1.45; }
+  .analytics-chart-panel { min-height: 396px; }
+  .analytics-trend-chart { padding-top: 8px; }
+  .analytics-trend-chart svg { display: block; width: 100%; height: 248px; }
+  .analytics-empty-state {
+    margin: 18px 0 0;
+    min-height: 248px;
+    border: 1px dashed #d8dee8;
+    border-radius: 14px;
+    background: #fbfcfe;
+    color: #667085;
+    display: grid;
+    place-items: center;
+    text-align: center;
+    padding: 18px;
+    font-size: .9rem;
+    line-height: 1.45;
+  }
   .analytics-line-guide, .analytics-line-vertical-guide { stroke: #e9eef5; stroke-width: 1; }
   .analytics-line-vertical-guide { stroke-dasharray: 3 5; }
-  .analytics-line-path { fill: none; stroke: #10b981; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
-  .analytics-line-point { fill: #10b981; stroke: white; stroke-width: 2; }
-  .analytics-line-label { font-size: 12px; fill: #98a2b3; }
-  .analytics-inline-stats { justify-content: flex-start; flex-wrap: wrap; padding-top: 18px; }
-  .analytics-inline-stats-compact { justify-content: flex-end; padding-top: 0; }
-  .analytics-section-stat { min-width: 132px; padding: 12px 14px; border: 1px solid #e7eaef; border-radius: 14px; background: #fbfcfe; display: grid; gap: 4px; }
-  .analytics-section-stat span { color: #667085; font-size: .8rem; }
-  .analytics-section-stat-value { font-size: 1rem; }
-  .analytics-section-stat-value-success { color: #0f9d67; }
-  .analytics-section-stat-value-info { color: #2563eb; }
-  .analytics-section-stat-value-danger { color: #ef4444; }
-  .analytics-customer-list { display: grid; gap: 18px; padding-top: 20px; }
-  .analytics-customer-row { align-items: center; padding-bottom: 14px; border-bottom: 1px solid #eef2f7; }
-  .analytics-customer-row:last-child { border-bottom: 0; padding-bottom: 0; }
-  .analytics-customer-copy { flex: 1; display: grid; gap: 8px; }
-  .analytics-customer-title { justify-content: flex-start; gap: 8px; }
-  .analytics-customer-rank { color: #98a2b3; font-size: .85rem; }
-  .analytics-customer-title strong { font-size: 1rem; font-weight: 600; }
-  .analytics-customer-bar { width: 100%; height: 8px; border-radius: 999px; background: #edf2f7; overflow: hidden; }
-  .analytics-customer-bar span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4f83f1 0%, #2f6fed 100%); }
-  .analytics-customer-metrics { align-items: flex-end; flex-direction: column; }
-  .analytics-customer-metrics strong { font-size: 1rem; }
+  .analytics-line-path { fill: none; stroke-width: 2.25; stroke-linecap: round; stroke-linejoin: round; }
+  .analytics-line-point { stroke: #ffffff; stroke-width: 2; }
+  .analytics-point-group { outline: none; cursor: default; }
+  .analytics-point-hit { fill: transparent; pointer-events: all; }
+  .analytics-point-tooltip {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .15s ease;
+  }
+  .analytics-point-group:hover .analytics-point-tooltip,
+  .analytics-point-group:focus .analytics-point-tooltip {
+    opacity: 1;
+  }
+  .analytics-tooltip-box { fill: #111827; filter: drop-shadow(0 8px 16px rgba(15, 23, 42, .18)); }
+  .analytics-tooltip-text { fill: #ffffff; font-size: 11px; font-weight: 700; }
+  .analytics-line-label, .analytics-line-value-label { font-size: 11px; fill: #98a2b3; }
+  .analytics-legend {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding-top: 8px;
+    color: #667085;
+    font-size: .82rem;
+  }
+  .analytics-legend-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; margin-right: 6px; vertical-align: middle; }
+  .analytics-customer-list { display: grid; gap: 16px; padding-top: 10px; }
+  .analytics-customer-row {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+  }
+  .analytics-customer-rank { color: #667085; font-size: .98rem; font-weight: 700; line-height: 1.5; }
+  .analytics-customer-copy { display: grid; gap: 8px; }
+  .analytics-customer-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .analytics-customer-title strong, .analytics-customer-title span { font-size: .92rem; }
+  .analytics-customer-title span { color: #111827; font-weight: 700; }
+  .analytics-customer-bar { position: relative; width: 100%; height: 8px; border-radius: 999px; background: #edf2f7; outline: none; }
+  .analytics-customer-bar > span:first-child { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #3b82f6 0%, #1d4ed8 100%); }
+  .analytics-bar-tooltip {
+    bottom: calc(100% + 10px);
+    right: 0;
+  }
+  .analytics-customer-bar:hover .analytics-bar-tooltip,
+  .analytics-customer-bar:focus .analytics-bar-tooltip {
+    opacity: 1;
+    transform: translateY(0);
+  }
 
   .home-page { gap: 18px; }
   .command-center-grid { display: grid; grid-template-columns: minmax(0, 1fr) 372px; gap: 18px; align-items: start; }
@@ -7442,14 +13836,14 @@ const styles = `
     color: #475467;
     cursor: pointer;
   }
-  .collections-channel-tab { display: inline-flex; align-items: center; gap: 10px; padding: 0 0 14px; border-bottom: 3px solid transparent; font-size: 1rem; font-weight: 600; color: #667085; }
+  .collections-channel-tab { display: inline-flex; align-items: center; gap: 10px; padding: 0 0 14px; border-bottom: 3px solid transparent; font-size: 1rem; font-weight: 600; color: #667085; text-decoration: none; }
   .collections-channel-tab.is-active { color: #111827; border-bottom-color: #111827; }
   .collections-channel-tab svg, .collections-configure-button svg, .collections-toolbar-chip svg { width: 18px; height: 18px; }
   .collections-configure { display: flex; align-items: flex-start; }
   .collections-configure-button { min-height: 44px; display: inline-flex; align-items: center; gap: 10px; padding: 0 4px; color: #111827; font-weight: 600; }
 
   .collections-filter-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 18px; }
-  .collections-filter-pill { min-height: 42px; padding: 0 16px; border-radius: 13px; border: 1px solid #d9e0ea; background: white; display: inline-flex; align-items: center; gap: 14px; font-size: .98rem; font-weight: 600; color: #111827; }
+  .collections-filter-pill { min-height: 42px; padding: 0 16px; border-radius: 13px; border: 1px solid #d9e0ea; background: white; display: inline-flex; align-items: center; gap: 14px; font-size: .98rem; font-weight: 600; color: #111827; text-decoration: none; }
   .collections-filter-pill.is-active { background: #2962f2; border-color: #2962f2; color: white; }
   .collections-filter-count { min-width: 34px; height: 28px; padding: 0 10px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,.92); color: #2962f2; font-size: .9rem; font-weight: 700; }
   .collections-filter-count.dark { background: #111827; color: white; }
@@ -7477,6 +13871,224 @@ const styles = `
   .collections-inbox-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 22px 30px; color: #475467; font-size: .96rem; }
   .collections-pager { display: flex; align-items: center; gap: 4px; }
   .collections-pager-button { width: 34px; height: 34px; border-radius: 999px; display: grid; place-items: center; color: #111827; font-size: 1.2rem; line-height: 1; }
+  .collections-email-inbox-card { background: white; border: 1px solid #e5e7eb; border-radius: 18px; box-shadow: 0 8px 24px rgba(15, 23, 42, .04); overflow: hidden; }
+  .collections-email-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 22px 24px 16px; border-bottom: 1px solid #eef2f6; }
+  .collections-email-head h2, .collections-email-head p { margin: 0; }
+  .collections-email-head h2 { font-size: 1.25rem; line-height: 1.1; }
+  .collections-email-head p { margin-top: 6px; color: #667085; font-size: .92rem; line-height: 1.45; }
+  .collections-email-tabs { margin-top: 0; justify-content: flex-end; }
+  .collections-compose-alert {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 18px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    border: 1px solid #b7ebc6;
+    background: #f0fdf4;
+    color: #166534;
+  }
+  .collections-compose-alert.is-error { border-color: #fecaca; background: #fff1f2; color: #9f1239; }
+  .collections-compose-alert strong, .collections-compose-alert span { margin: 0; line-height: 1.4; }
+  .collections-email-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) 220px auto; gap: 12px; align-items: end; padding: 16px 24px; border-bottom: 1px solid #eef2f6; }
+  .collections-searchbox input { width: 100%; border: 0; outline: 0; background: transparent; color: #111827; font: inherit; }
+  .collections-email-select, .collections-email-field { display: grid; gap: 7px; color: #344054; font-size: .82rem; font-weight: 700; }
+  .collections-email-select select, .collections-email-select input, .collections-email-field select, .collections-email-field input {
+    width: 100%;
+    min-height: 40px;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid #d0d5dd;
+    background: white;
+    color: #111827;
+    font: inherit;
+  }
+  .collections-filter-actions, .call-inbox-toolbar-actions { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .collections-email-list { min-height: 120px; }
+  .collections-email-row { color: inherit; text-decoration: none; align-items: stretch; padding: 18px 24px; }
+  .collections-email-row:hover { background: #fbfcfe; }
+  .collections-email-row.is-read { color: #667085; }
+  .collections-email-row.is-read .collections-message-heading strong,
+  .collections-email-row.is-read .collections-message-subject,
+  .collections-email-row.is-read .collections-message-preview { color: #667085; font-weight: 500; }
+  .collections-email-row.is-unread .collections-message-heading strong,
+  .collections-email-row.is-unread .collections-message-subject { font-weight: 800; }
+  .collections-email-row .collections-row-checkbox { margin-top: 2px; }
+  .collections-message-subject { margin: 0; color: #111827; font-weight: 700; font-size: .95rem; line-height: 1.35; }
+  .collections-email-row-meta { align-items: flex-end; flex-direction: column; gap: 8px; min-width: 150px; }
+  .collections-email-unread-dot {
+    min-height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: #e0f2fe;
+    color: #075985;
+    font-size: .72rem;
+    font-weight: 800;
+  }
+  .collections-unlinked-badge {
+    min-height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: #f2f4f7;
+    color: #667085;
+    font-size: .72rem;
+    font-weight: 800;
+  }
+  .collections-inbox-empty { display: grid; gap: 6px; padding: 28px 24px; color: #667085; }
+  .collections-inbox-empty strong { color: #111827; }
+  .collections-email-empty.compact { padding: 18px; border: 1px solid #eef2f6; border-radius: 12px; background: #fbfcfe; }
+  .collections-email-panel { width: min(980px, calc(100vw - 32px)); border-radius: 18px; }
+  .collections-email-modal-header { align-items: center; }
+  .collections-email-customer-header { display: flex; align-items: center; gap: 14px; }
+  .collections-email-avatar { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: #111827; color: white; font-weight: 800; }
+  .collections-email-summary-strip, .collections-email-modal-actions, .collections-email-modal-tabs, .collections-email-invoice-row, .collections-email-compose-head, .collections-email-generation-toggle, .collections-email-format-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .collections-email-summary-strip { margin-top: 12px; color: #344054; font-size: .84rem; font-weight: 700; }
+  .collections-email-summary-strip span, .collections-email-invoice-row a, .collections-email-invoice-row strong {
+    min-height: 26px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 9px;
+    border-radius: 8px;
+    background: #f7f8fa;
+    border: 1px solid #e4e7ec;
+    color: #344054;
+    text-decoration: none;
+  }
+  .collections-email-body { display: grid; gap: 16px; padding: 20px 28px 28px; }
+  .collections-email-invoice-row { justify-content: space-between; align-items: flex-start; }
+  .collections-email-invoice-row > span { color: #667085; font-size: .82rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+  .collections-email-invoice-row > div { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .collections-email-tab-control { position: absolute; opacity: 0; pointer-events: none; }
+  .collections-email-modal-tabs { border-bottom: 1px solid #e5e7eb; gap: 4px; }
+  .collections-email-modal-tab {
+    min-height: 40px;
+    padding: 0 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 2px solid transparent;
+    color: #667085;
+    font-weight: 800;
+    cursor: pointer;
+  }
+  .collections-email-modal-tab span { min-width: 22px; min-height: 22px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; background: #eef2f6; color: #344054; font-size: .75rem; }
+  .collections-email-tab-control[value="thread"]:checked ~ .collections-email-modal-tabs label[for$="thread-tab"],
+  .collections-email-tab-control[value="tasks"]:checked ~ .collections-email-modal-tabs label[for$="tasks-tab"] { color: #111827; border-bottom-color: #111827; }
+  .collections-email-tab-panel { display: none; }
+  .collections-email-tab-control[value="thread"]:checked ~ .collections-email-tab-panels .is-thread,
+  .collections-email-tab-control[value="tasks"]:checked ~ .collections-email-tab-panels .is-tasks { display: grid; gap: 16px; }
+  .collections-email-thread-list, .collections-email-task-list { display: grid; gap: 10px; }
+  .collections-email-thread-message, .collections-email-task-row {
+    display: grid;
+    gap: 8px;
+    padding: 14px 16px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fbfcfe;
+  }
+  .collections-email-thread-message summary { display: grid; gap: 6px; cursor: pointer; list-style: none; }
+  .collections-email-thread-message summary::-webkit-details-marker { display: none; }
+  .collections-email-thread-summary-main { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+  .collections-email-thread-snippet {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .collections-email-thread-full-body {
+    margin-top: 10px;
+    padding-top: 12px;
+    border-top: 1px solid #e5e7eb;
+    color: #344054;
+    font-size: .92rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+  }
+  .collections-email-thread-message span, .collections-email-task-row span { margin: 0; color: #667085; font-size: .88rem; line-height: 1.45; }
+  .collections-email-task-row { color: inherit; text-decoration: none; }
+  .collections-email-task-row div { display: grid; gap: 4px; min-width: 0; }
+  .collections-email-compose-form { padding: 0; }
+  .collections-email-template-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: end;
+    padding: 12px 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fbfcfe;
+  }
+  .collections-email-subject-field { grid-column: 1 / -1; }
+  .collections-email-generation-toggle { padding: 3px; border: 1px solid #d0d5dd; border-radius: 999px; background: #f7f8fa; }
+  .collections-email-generation-toggle label { display: inline-flex; align-items: center; cursor: pointer; }
+  .collections-email-generation-toggle input { position: absolute; opacity: 0; }
+  .collections-email-generation-toggle span { min-height: 30px; display: inline-flex; align-items: center; padding: 0 13px; border-radius: 999px; color: #667085; font-size: .82rem; font-weight: 800; }
+  .collections-email-generation-toggle input:checked + span { background: #111827; color: white; }
+  .collections-email-format-actions { justify-content: flex-end; }
+  .collections-email-format-actions button {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    border: 1px solid #d0d5dd;
+    background: white;
+    display: grid;
+    place-items: center;
+    color: #344054;
+  }
+  .collections-email-format-actions svg { width: 15px; height: 15px; }
+  .collections-email-attachment-upload {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 10px;
+    border-radius: 9px;
+    border: 1px solid #d0d5dd;
+    background: white;
+    color: #344054;
+    font-size: .82rem;
+    font-weight: 800;
+    cursor: pointer;
+  }
+  .collections-email-compose-head { justify-content: space-between; }
+  .collections-email-body-field { gap: 8px; }
+  .collections-email-field small { color: #667085; font-size: .78rem; font-weight: 600; }
+  .collections-email-attachment-panel {
+    display: grid;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fbfcfe;
+  }
+  .collections-email-attachment-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 12px;
+  }
+  .collections-email-attachment-controls select { min-height: 78px; padding: 8px 10px; }
+  .collections-email-document-buttons, .collections-email-attachment-chips {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .collections-email-file-input { max-width: 100%; color: #667085; font-size: .84rem; }
+  .collections-email-attachment-chips { color: #667085; font-size: .84rem; }
+  .collections-email-attachment-chip {
+    min-height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid #d0d5dd;
+    background: white;
+    color: #344054;
+    font-weight: 800;
+  }
+  .collections-email-attachment-chip svg { width: 14px; height: 14px; }
   .collections-compose-modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 28px 20px; z-index: 40; }
   .collections-compose-modal:target { display: flex; }
   .collections-compose-backdrop { position: absolute; inset: 0; background: rgba(17, 24, 39, .44); }
@@ -7495,6 +14107,310 @@ const styles = `
   .collections-compose-textarea { width: 100%; min-height: 220px; padding: 14px 16px; resize: vertical; border-radius: 16px; border: 1px solid #d0d5dd; background: white; color: var(--text); font: inherit; line-height: 1.55; }
   .collections-compose-footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 4px; }
   .collections-compose-footer .primary-button[disabled] { opacity: .55; cursor: not-allowed; }
+  .task-row-title-link { color: inherit; text-decoration: none; }
+  .task-row-title-link:hover { color: #059669; }
+  .task-detail-modal { z-index: 46; }
+  .task-detail-panel { width: min(920px, calc(100vw - 32px)); border-radius: 18px; }
+  .task-detail-header { align-items: center; }
+  .task-detail-kicker, .task-detail-nav, .task-detail-aging {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .task-detail-kicker { color: #667085; font-size: .86rem; font-weight: 700; }
+  .task-detail-aging {
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: #fff7ed;
+    color: #9a3412;
+  }
+  .task-detail-aging svg, .task-detail-nav-button svg, .task-compose-format-button svg { width: 15px; height: 15px; }
+  .task-detail-nav { flex: 0 0 auto; }
+  .task-detail-nav-button {
+    width: 36px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    border: 1px solid #d0d5dd;
+    color: #111827;
+    background: #fff;
+  }
+  .task-detail-nav-button.is-disabled { opacity: .35; pointer-events: none; }
+  .task-detail-body { display: grid; gap: 18px; padding: 20px 28px 28px; }
+  .task-detail-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .task-detail-context-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  .task-detail-summary-card {
+    min-height: 74px;
+    display: grid;
+    align-content: center;
+    gap: 6px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+    background: #fbfcfd;
+  }
+  .task-detail-context-card {
+    display: grid;
+    gap: 6px;
+    padding: 13px 14px;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+  }
+  .task-detail-summary-card span, .task-detail-context-card span, .task-detail-context-card p, .task-detail-brief p, .task-detail-next-action p, .task-detail-source-context p { color: #667085; }
+  .task-detail-summary-card strong { color: #111827; font-size: .95rem; overflow-wrap: anywhere; }
+  .task-detail-context-card strong,
+  .task-detail-context-card a {
+    color: #111827;
+    font-size: .9rem;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+  }
+  .task-detail-context-card a { color: #2954ff; }
+  .task-detail-context-card p { margin: 0; line-height: 1.45; }
+  .task-detail-invoice-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 8px;
+    color: #667085;
+  }
+  .task-detail-invoice-list li { line-height: 1.45; }
+  .task-detail-invoice-list strong { color: #344054; margin-right: 6px; }
+  .task-detail-invoice-list span { color: #667085; }
+  .task-detail-brief {
+    display: grid;
+    gap: 6px;
+    padding: 14px 16px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: white;
+  }
+  .task-detail-brief p { margin: 0; line-height: 1.45; }
+  .task-detail-next-action,
+  .task-detail-source-context {
+    display: grid;
+    gap: 6px;
+    padding: 13px 16px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fbfcfd;
+  }
+  .task-detail-next-action p,
+  .task-detail-source-context p {
+    margin: 0;
+    line-height: 1.45;
+  }
+  .task-detail-source-context summary {
+    cursor: pointer;
+    color: #111827;
+    font-weight: 700;
+  }
+  .task-detail-source-context summary::-webkit-details-marker { display: none; }
+  .task-detail-email-form { padding: 0; }
+  .task-detail-edit-mode {
+    display: grid;
+    gap: 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    padding: 14px;
+    background: #fff;
+  }
+  .task-detail-edit-mode summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-weight: 700;
+    color: #111827;
+  }
+  .task-detail-edit-mode summary::-webkit-details-marker { display: none; }
+  .task-detail-edit-mode summary svg { width: 16px; height: 16px; }
+  .task-detail-subject-field { display: grid; gap: 8px; align-items: initial; }
+  .task-compose-format-button {
+    width: 32px;
+    height: 32px;
+    display: inline-grid;
+    place-items: center;
+    border: 1px solid #d0d5dd;
+    border-radius: 8px;
+    background: #fff;
+    color: #111827;
+    font-weight: 800;
+    cursor: pointer;
+  }
+  .task-detail-status-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+  .call-inbox-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-top: 22px; }
+  .call-inbox-filter-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+  .call-inbox-filter { width: 180px; }
+  .call-inbox-filter.compact { width: 150px; }
+  .call-inbox-date-range {
+    min-width: 320px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .call-inbox-date-range legend {
+    grid-column: 1 / -1;
+    padding: 0;
+    color: #344054;
+    font-size: .82rem;
+    font-weight: 700;
+  }
+  .call-inbox-date-range label { display: grid; gap: 7px; color: #344054; font-size: .78rem; font-weight: 700; }
+  .call-inbox-date-range input {
+    width: 100%;
+    min-height: 40px;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid #d0d5dd;
+    background: white;
+    color: #111827;
+    font: inherit;
+  }
+  .call-inbox-date-range-label {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    color: #667085;
+    font-size: .82rem;
+    font-weight: 700;
+  }
+  .call-inbox-date-range-label a { color: #2563eb; text-decoration: none; }
+  .call-inbox-export { min-height: 46px; display: inline-flex; align-items: center; gap: 10px; text-decoration: none; border-radius: 10px; background: #111827; color: #fff; }
+  .call-inbox-export svg { width: 18px; height: 18px; }
+  .call-inbox-table-card { margin-top: 18px; overflow: hidden; background: white; border: 1px solid #e5e7eb; border-radius: 14px; box-shadow: 0 8px 20px rgba(15, 23, 42, .035); }
+  .call-inbox-table { display: grid; overflow-x: auto; }
+  .call-inbox-row { min-width: 1180px; display: grid; grid-template-columns: 42px minmax(110px, .85fr) minmax(170px, 1.25fr) minmax(130px, .9fr) 92px 92px 96px minmax(210px, 1.35fr) 96px 96px 110px; align-items: center; gap: 14px; padding: 18px 22px; color: #1f2937; }
+  .call-inbox-head { background: #fbfcfe; border-bottom: 1px solid #e5e7eb; color: #667085; font-size: .88rem; font-weight: 700; }
+  .call-inbox-data-row { min-height: 82px; text-decoration: none; border-bottom: 1px solid #eef2f6; }
+  .call-inbox-data-row:hover { background: #f8fafc; }
+  .call-inbox-data-row strong { font-size: .96rem; line-height: 1.45; }
+  .call-inbox-sort { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; background: #e8f1f8; color: #46647a; font-size: .84rem; }
+  .call-inbox-boolean { font-size: 1.25rem; color: #111827; }
+  .call-sentiment-dot { width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-weight: 800; }
+  .call-sentiment-dot.is-positive { background: #c9f7df; color: #079669; }
+  .call-sentiment-dot.is-neutral, .call-sentiment-dot.is-unknown { background: #eef2f6; color: #667085; }
+  .call-sentiment-dot.is-negative { background: #fee2e2; color: #b42318; }
+  .call-inbox-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .call-inbox-tag { max-width: 180px; padding: 4px 10px; border-radius: 999px; border: 1px solid #e5e7eb; background: white; color: #111827; font-size: .82rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .call-inbox-count { min-width: 28px; height: 28px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; border: 1px solid #cfe0ff; background: #edf4ff; color: #2563eb; font-weight: 800; }
+  .call-inbox-approver { width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: #eef0f3; color: #667085; font-weight: 700; overflow: hidden; }
+  .call-status-chip { width: fit-content; max-width: 110px; padding: 6px 12px; border-radius: 999px; font-size: .84rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .call-status-chip.is-completed { background: #c7f3d8; color: #08775b; }
+  .call-status-chip.is-processing { background: #fef3c7; color: #92400e; }
+  .call-status-chip.is-needs_review { background: #dbeafe; color: #1d4ed8; }
+  .call-status-chip.is-failed { background: #fee2e2; color: #b42318; }
+  .call-status-chip.is-archived { background: #eef2f6; color: #475467; }
+  .call-inbox-empty { min-width: 1180px; display: grid; gap: 6px; padding: 30px 22px; color: #667085; }
+  .call-inbox-empty strong { color: #111827; }
+  .call-detail-modal { z-index: 45; }
+  .call-detail-panel { position: relative; width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; border-radius: 12px; background: white; border: 1px solid #d9e0ea; box-shadow: 0 24px 60px rgba(15, 23, 42, .22); padding: 28px 32px; }
+  .call-detail-close { position: absolute; top: 18px; right: 18px; }
+  .call-detail-tabs { width: fit-content; min-height: 40px; display: inline-flex; align-items: center; gap: 2px; padding: 4px; border-radius: 18px; background: #eef0f6; }
+  .call-detail-tab { min-height: 32px; display: inline-flex; align-items: center; padding: 0 12px; border-radius: 14px; color: #111827; text-decoration: none; font-weight: 800; }
+  .call-detail-tab.is-active { background: white; box-shadow: 0 1px 2px rgba(15, 23, 42, .08); }
+  .call-detail-title-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; }
+  .call-detail-title-row h2 { margin: 0; font-size: 1.25rem; line-height: 1.2; letter-spacing: 0; }
+  .call-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 42px; margin-top: 24px; }
+  .call-detail-field { min-width: 0; display: grid; gap: 6px; }
+  .call-detail-field span { color: #7a8494; font-size: .88rem; font-weight: 700; }
+  .call-detail-field strong { color: #1f2937; font-size: .98rem; line-height: 1.42; overflow-wrap: anywhere; }
+  .call-detail-divider { height: 1px; margin: 22px 0; background: #e5e7eb; }
+  .call-detail-section { display: grid; gap: 12px; }
+  .call-detail-section h3 { margin: 0; font-size: 1.05rem; line-height: 1.2; letter-spacing: 0; }
+  .call-detail-section p { margin: 0; color: #344054; line-height: 1.55; }
+  .call-task-tabs { width: fit-content; min-height: 42px; display: inline-flex; align-items: center; gap: 2px; padding: 4px; border-radius: 18px; background: #eef0f6; }
+  .call-task-tab { min-height: 32px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 14px; color: #111827; font-weight: 800; }
+  .call-task-tab.is-active { background: white; box-shadow: 0 1px 2px rgba(15, 23, 42, .08); }
+  .call-task-tab strong { min-width: 25px; height: 25px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: #090a18; color: white; font-size: .82rem; }
+  .call-task-list { display: grid; gap: 10px; margin-top: 14px; }
+  .call-task-row { min-height: 58px; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto auto 24px; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid #e5e7eb; border-radius: 6px; color: #1f2937; }
+  .call-task-row svg { width: 18px; height: 18px; color: #079669; }
+  .call-task-row span { color: #667085; font-size: .9rem; white-space: nowrap; }
+  .call-detail-muted { color: #667085; }
+  .call-transcript-panel { width: min(620px, calc(100vw - 32px)); padding-top: 30px; }
+  .call-audio-bar { min-height: 76px; display: flex; align-items: center; gap: 14px; margin-top: 12px; margin-bottom: 22px; padding: 16px 18px; border-radius: 12px; background: #f8fafc; }
+  .call-audio-bar audio { width: 100%; }
+  .call-play-icon { font-size: 1.35rem; color: #111827; }
+  .call-waveform { height: 42px; flex: 1; display: flex; align-items: center; gap: 4px; padding: 0 10px; border-radius: 8px; background: #d8dee7; overflow: hidden; }
+  .call-waveform i { width: 3px; flex: 0 0 3px; display: block; border-radius: 999px; background: #4b5563; }
+  .call-recording-download { color: #111827; text-decoration: none; }
+  .call-recording-download svg { width: 18px; height: 18px; }
+  .call-transcript-list { display: grid; gap: 16px; }
+  .call-transcript-segment { display: grid; gap: 6px; }
+  .call-transcript-segment strong { color: #7a8494; font-size: .88rem; }
+  .call-transcript-segment p { margin: 0; color: #1f2937; line-height: 1.5; }
+  .task-compose-title-block { display: grid; gap: 10px; }
+  .task-compose-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .task-compose-badge { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid #d0d5dd; background: #f8fafc; color: #475467; font-size: .88rem; font-weight: 600; }
+  .task-compose-invoice-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: #667085; }
+  .task-compose-invoice-pill { color: #344054; font-weight: 600; }
+  .task-compose-bullet { color: #c0c7d2; }
+  .task-compose-tabs { display: flex; align-items: center; gap: 28px; border-bottom: 1px solid #eef2f6; }
+  .task-compose-tab { display: inline-flex; align-items: center; gap: 8px; padding: 0 0 14px; border-bottom: 3px solid transparent; color: #667085; font-weight: 600; text-decoration: none; }
+  .task-compose-tab.is-active { color: #111827; border-bottom-color: #111827; }
+  .task-compose-tab-count { min-width: 24px; height: 24px; padding: 0 7px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; background: #2962f2; color: white; font-size: .82rem; font-weight: 700; }
+  .task-compose-thread-list { display: grid; gap: 14px; }
+  .task-compose-thread-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px; padding: 18px 18px; border-radius: 18px; border: 1px solid #dfe4ec; background: white; }
+  .task-compose-thread-avatar { width: 38px; height: 38px; border-radius: 999px; display: grid; place-items: center; background: #eef2f6; color: #667085; font-weight: 700; }
+  .task-compose-thread-copy { display: grid; gap: 6px; min-width: 0; }
+  .task-compose-thread-copy p { margin: 0; color: #667085; }
+  .task-compose-thread-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .task-compose-thread-meta strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-compose-thread-meta span { color: #667085; font-size: .92rem; white-space: nowrap; }
+  .task-compose-generator-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .task-compose-generator-option { display: inline-flex; align-items: center; gap: 8px; color: #344054; font-weight: 600; }
+  .task-compose-generator-option input { accent-color: #2962f2; }
+  .task-compose-note { display: grid; gap: 4px; padding: 14px 16px; border-radius: 16px; background: #f8fafc; border: 1px solid #e5e7eb; }
+  .task-compose-note strong, .task-compose-note p { margin: 0; }
+  .task-compose-note p { color: #667085; }
+  .task-compose-address-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .task-compose-recipient-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; }
+  .task-compose-recipient-option { color: #667085; font-weight: 600; }
+  .task-compose-editor { min-height: 180px; background: #f8fafc; }
+  .task-compose-toolbar { display: flex; align-items: center; gap: 18px; padding: 0 10px; color: #111827; font-size: 1.2rem; }
+  .task-compose-toolbar span { font-weight: 600; }
+  .task-compose-invoice-attachment-panel {
+    display: grid;
+    grid-template-columns: minmax(220px, 1.1fr) minmax(220px, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+    padding: 0 10px;
+  }
+  .task-compose-invoice-attachment-fields { display: grid; gap: 8px; }
+  .task-compose-attach-invoice-button { min-height: 44px; }
+  .task-compose-attachment-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #111827;
+    font-size: .95rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .task-compose-attachment-trigger svg { width: 18px; height: 18px; }
+  .task-compose-attachment-row { display: grid; gap: 8px; padding: 0 10px; }
+  .task-compose-attachment-input {
+    width: fit-content;
+    max-width: 100%;
+    font-size: .9rem;
+    color: #475467;
+  }
+  .task-compose-attachment-hint {
+    margin: 0;
+    color: #667085;
+    font-size: .82rem;
+    line-height: 1.4;
+  }
 
   .home-segmented { display: flex; align-items: center; gap: 8px; padding: 14px 22px 0; flex-wrap: wrap; }
   .home-segmented-compact { padding: 0; gap: 4px; }
@@ -7625,7 +14541,7 @@ const styles = `
     gap: 16px;
   }
   .home-reference-calendar-card {
-    padding: 16px 14px 10px;
+    padding: 18px 18px 12px;
     display: grid;
     gap: 16px;
   }
@@ -7654,6 +14570,7 @@ const styles = `
     background: #ffffff;
     color: #344054;
     font: inherit;
+    text-decoration: none;
   }
   .home-reference-pill {
     display: inline-flex;
@@ -7680,15 +14597,17 @@ const styles = `
     display: grid;
     place-items: center;
     cursor: pointer;
+    text-decoration: none;
   }
   .home-reference-calendar-nav svg {
     width: 16px;
     height: 16px;
   }
   .home-reference-calendar-day {
-    min-height: 58px;
+    min-height: 64px;
     padding: 10px 12px;
-    border-radius: 8px;
+    border: 1px solid transparent;
+    border-radius: 10px;
     display: grid;
     justify-items: center;
     gap: 4px;
@@ -7697,23 +14616,72 @@ const styles = `
   }
   .home-reference-calendar-day strong {
     color: #101828;
-    font-size: .96rem;
+    font-size: 1.15rem;
+    line-height: 1;
+  }
+  .home-reference-calendar-day small {
+    max-width: 100%;
+    color: #667085;
+    font-size: .64rem;
+    line-height: 1.15;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .home-reference-calendar-day.is-active {
-    background: #1f6ff2;
-    color: #dce9ff;
+    background: #ffffff;
+    border-color: #d7e6ff;
+    box-shadow: 0 8px 18px rgba(36, 87, 245, .08);
+    color: #2457f5;
   }
   .home-reference-calendar-day.is-active strong {
-    color: #ffffff;
+    color: #2457f5;
+  }
+  .home-reference-empty,
+  .home-reference-chart-empty {
+    margin: 0;
+    color: #667085;
+    font-size: .84rem;
+    line-height: 1.45;
+  }
+  .home-reference-empty {
+    padding: 0 2px 2px;
+  }
+  .home-reference-chart-empty {
+    min-height: 142px;
+    padding: 18px;
+    display: grid;
+    place-items: center;
+    text-align: center;
+  }
+  .home-reference-empty-list-item {
+    list-style: none;
+    margin-left: -16px;
   }
   .home-reference-banner {
-    min-height: 30px;
-    padding: 0 12px;
-    border: 1px solid #b7d0ff;
-    border-radius: 10px;
-    background: #eff6ff;
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #ffffff;
     color: #344054;
     font-size: .9rem;
+  }
+  .home-reference-banner span {
+    position: relative;
+    padding-left: 16px;
+  }
+  .home-reference-banner span::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 6px;
+    height: 6px;
+    margin-top: -3px;
+    border-radius: 999px;
+    background: #111827;
   }
   .home-reference-list-section {
     display: grid;
@@ -7783,6 +14751,47 @@ const styles = `
     justify-items: center;
     color: #667085;
     font-size: .72rem;
+    position: relative;
+    outline: none;
+  }
+  .chart-tooltip {
+    position: absolute;
+    z-index: 4;
+    min-width: 132px;
+    max-width: 210px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: #111827;
+    color: #ffffff;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, .18);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition: opacity .15s ease, transform .15s ease;
+  }
+  .chart-tooltip strong {
+    display: block;
+    color: #ffffff;
+    font-size: .88rem;
+    line-height: 1.1;
+  }
+  .chart-tooltip span {
+    display: block;
+    margin-top: 3px;
+    color: rgba(255, 255, 255, .78);
+    font-size: .72rem;
+    line-height: 1.25;
+  }
+  .home-reference-chart-tooltip {
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translate(-50%, 4px);
+    text-align: center;
+  }
+  .home-reference-bar-column:hover .home-reference-chart-tooltip,
+  .home-reference-bar-column:focus .home-reference-chart-tooltip {
+    opacity: 1;
+    transform: translate(-50%, 0);
   }
   .home-reference-bar-rail {
     width: 100%;
@@ -7908,7 +14917,7 @@ const styles = `
   .deduction-mini-pill-link { background: #dbeafe; color: #2457f5; }
 
   .task-page {
-    --task-table-columns: minmax(0, 2.8fr) minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, .95fr) minmax(0, .85fr) minmax(0, 1.15fr) minmax(0, .75fr) minmax(0, .95fr) minmax(0, .5fr);
+    --task-table-columns: minmax(0, 2.8fr) minmax(0, 1.35fr) minmax(0, .95fr) minmax(0, .95fr) minmax(0, .85fr) minmax(0, 1.2fr) minmax(0, .95fr) minmax(0, .55fr);
     gap: 12px;
     align-content: start;
     min-width: 0;
@@ -7947,7 +14956,7 @@ const styles = `
   .task-table-shell { padding: 14px; display: grid; gap: 10px; border-radius: 16px; min-width: 0; overflow: hidden; }
   .task-filter-bar {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 124px 124px 132px;
+    grid-template-columns: minmax(220px, 1fr) 132px 132px 140px auto auto auto;
     gap: 10px;
     align-items: center;
     min-width: 0;
@@ -7965,6 +14974,16 @@ const styles = `
     font-size: .82rem;
   }
   .task-search svg { width: 14px; height: 14px; }
+  .task-search input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #111827;
+    font: inherit;
+  }
+  .task-search input::placeholder { color: #98a2b3; }
   .task-select {
     min-width: 0;
     min-height: 36px;
@@ -7972,14 +14991,32 @@ const styles = `
     border-radius: 10px;
     background: #f8fafc;
     border-color: #e9edf3;
-    display: inline-flex;
-    align-items: center;
-    justify-content: space-between;
+    border-style: solid;
     color: #344054;
     font-size: .82rem;
     font-weight: 600;
   }
-  .task-select::after { content: "⌄"; color: #98a2b3; margin-left: 10px; }
+  .task-filter-submit {
+    min-height: 36px;
+    padding: 0 12px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: .82rem;
+  }
+  .task-filter-submit svg { width: 14px; height: 14px; }
+  .task-filter-clear,
+  .task-search-clear-history {
+    min-height: 36px;
+    padding: 0 12px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: .82rem;
+  }
+  .task-search-clear-history { white-space: nowrap; }
   .task-table { display: grid; gap: 0; min-width: 0; width: 100%; }
   .task-table-header, .task-table-row {
     display: grid;
@@ -8019,6 +15056,19 @@ const styles = `
     font-size: .66rem;
   }
   .task-row-meta span + span::before { content: "·"; margin-right: 8px; color: #98a2b3; }
+  .task-table-empty {
+    min-height: 120px;
+    display: grid;
+    align-content: center;
+    justify-items: center;
+    gap: 6px;
+    padding: 24px;
+    border-bottom: 1px solid #eef2f6;
+    color: #667085;
+    text-align: center;
+  }
+  .task-table-empty strong { color: #111827; }
+  .task-table-empty p { margin: 0; line-height: 1.45; }
   .task-type-pill {
     display: inline-flex;
     align-items: center;
@@ -8058,6 +15108,7 @@ const styles = `
     flex: 0 0 auto;
   }
   .task-table-plain { font-weight: 500; }
+  .task-source-label { color: #475467; font-weight: 700; }
   .task-table-cell .pill { padding: 3px 9px; font-size: .68rem; }
   .task-view-link { font-weight: 700; color: #111827; font-size: .78rem; }
   .task-view-link:hover { color: #059669; }
@@ -8100,6 +15151,10 @@ const styles = `
     font-weight: 600;
   }
   .customers-export-button, .customers-dark-button { background: #111827; border-color: #111827; color: white; }
+  .customers-dark-button:disabled, .customers-outline-button:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+  }
   .customers-icon-button { width: 32px; justify-content: center; padding: 0; }
   .customers-back-link { color: #667085; font-size: 1rem; font-weight: 600; }
   .customers-breadcrumb-separator { color: #98a2b3; }
@@ -8127,6 +15182,84 @@ const styles = `
     font-size: .92rem;
   }
   .customers-tab.is-active { padding: 0 10px; border-color: #111827; }
+  .customers-call-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 12px 0 14px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: .9rem;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .customers-call-status svg { width: 16px; height: 16px; flex: 0 0 auto; }
+  .customers-call-status.is-started { background: #dcfce7; border: 1px solid #bbf7d0; color: #166534; }
+  .customers-call-status.is-failed { background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; }
+  .customer-call-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 48;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 18px;
+  }
+  .customer-call-modal:target { display: flex; }
+  .customer-call-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(17, 24, 39, .44);
+  }
+  .customer-call-panel {
+    position: relative;
+    width: min(520px, calc(100vw - 36px));
+    display: grid;
+    gap: 16px;
+    padding: 22px;
+    border-radius: 14px;
+    border: 1px solid #d9e0ea;
+    background: white;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, .22);
+  }
+  .customer-call-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .customer-call-head h2, .customer-call-head p, .customer-call-helper { margin: 0; }
+  .customer-call-head h2 { font-size: 1.15rem; line-height: 1.25; letter-spacing: 0; }
+  .customer-call-head p, .customer-call-helper { color: #667085; font-size: .9rem; line-height: 1.45; }
+  .customer-call-close {
+    color: #667085;
+    font-size: 1.8rem;
+    line-height: .9;
+    text-decoration: none;
+  }
+  .customer-call-field {
+    display: grid;
+    gap: 8px;
+    color: #344054;
+    font-size: .9rem;
+    font-weight: 700;
+  }
+  .customer-call-field input {
+    min-height: 42px;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid #d0d5dd;
+    color: #111827;
+    font: inherit;
+    font-weight: 500;
+  }
+  .customer-call-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
   .customers-table-card, .customers-activity-card { background: white; border: 1px solid #dfe5ec; border-radius: 16px; overflow: hidden; }
   .customers-table { display: grid; }
   .customers-index-table { grid-template-columns: .6fr 2fr 1fr .95fr 1.7fr .9fr .9fr 1fr 1fr; }
@@ -8150,6 +15283,8 @@ const styles = `
     text-transform: uppercase;
     background: #fbfcfd;
   }
+  .customers-empty-row { grid-column: 1 / -1; min-height: 160px; display: grid; place-content: center; gap: 8px; padding: 28px; color: #667085; text-align: center; border-bottom: 1px solid #e9edf2; }
+  .customers-empty-row strong { color: #111827; font-size: 1rem; }
   .customers-table-cell.amount, .customers-table-head.amount { justify-content: flex-end; }
   .customers-row-select { display: inline-flex; align-items: center; gap: 10px; color: #98a2b3; }
   .customer-status-dot { width: 7px; height: 7px; border-radius: 999px; display: inline-flex; }
@@ -8212,6 +15347,7 @@ const styles = `
 
   @media (max-width: 1500px) {
     .kpi-grid-5, .kpi-grid-6, .card-grid-3, .four-up, .endpoints-grid, .type-chip-grid, .cash-workspace-grid, .two-column-layout, .analytics-kpi-grid, .deduction-detail-grid, .deduction-summary-grid, .deduction-credit-summary, .deduction-credit-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .analytics-impact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .filter-row, .cash-meta-grid, .task-filter-bar, .deductions-toolbar { grid-template-columns: 1fr 1fr; }
     .cash-review-table, .residual-grid, .finalize-grid { grid-template-columns: 1fr; }
     .cash-table-payments, .cash-table-bank, .cash-table-remittances { grid-template-columns: 1fr 1fr; }
@@ -8220,17 +15356,21 @@ const styles = `
   @media (max-width: 1280px) {
     .dashboard-app { grid-template-columns: 1fr; }
     .dashboard-sidebar { border-right: 0; border-bottom: 1px solid var(--navy-border); }
-    .command-center-grid, .hero-lower-grid, .kpi-grid-4, .kpi-grid-5, .kpi-grid-6, .card-grid-2, .card-grid-3, .four-up, .detail-grid, .endpoints-grid, .type-chip-grid, .filter-row, .cash-meta-grid, .cash-workspace-grid, .residual-grid, .finalize-grid, .two-column-layout, .collections-toolbar, .collections-compose-grid, .task-filter-bar, .analytics-kpi-grid, .analytics-grid-primary, .analytics-grid-secondary, .analytics-summary-grid, .analytics-aging-layout, .deduction-detail-grid, .deduction-summary-grid, .deduction-credit-summary, .deduction-credit-meta, .deductions-toolbar, .customers-detail-grid { grid-template-columns: 1fr; }
+    .command-center-grid, .hero-lower-grid, .kpi-grid-4, .kpi-grid-5, .kpi-grid-6, .card-grid-2, .card-grid-3, .four-up, .detail-grid, .endpoints-grid, .type-chip-grid, .filter-row, .cash-meta-grid, .cash-workspace-grid, .residual-grid, .finalize-grid, .two-column-layout, .collections-toolbar, .collections-email-toolbar, .collections-compose-grid, .call-agent-settings-grid, .task-filter-bar, .task-detail-summary-grid, .task-detail-context-grid, .analytics-kpi-grid, .analytics-impact-grid, .analytics-grid-trends, .deduction-detail-grid, .deduction-summary-grid, .deduction-credit-summary, .deduction-credit-meta, .deductions-toolbar, .customers-detail-grid { grid-template-columns: 1fr; }
     .table-collections-extended, .table-invoices, .table-exceptions, .table-inventory, .cash-review-table, .cash-table-payments, .cash-table-bank, .cash-table-remittances, .deductions-table, .deduction-line-table, .deduction-credit-table, .customers-index-table, .customers-invoice-table, .customers-task-table, .customers-payment-table { grid-template-columns: 1fr; }
+    .invoice-detail-top-grid { grid-template-columns: 1fr; }
+    .invoice-ledger-toolbar { flex-wrap: wrap; }
+    .invoice-ledger-search { min-width: 100%; }
     .task-table-row { grid-template-columns: 1fr; }
     .table-head, .task-table-head, .task-table-header, .cash-table-head, .deductions-table-header, .deduction-line-table-header, .deduction-credit-table-header, .customers-table-head { display: none; }
     .table-cell, .task-table-cell, .cash-table-cell, .customers-table-cell { min-height: auto; }
     .data-source-hero { grid-template-columns: 1fr; }
-    .collections-inbox-row, .collections-hero, .collections-inbox-footer, .collections-compose-header, .collections-compose-footer, .deductions-top-row, .deduction-detail-header, .deduction-card-header, .deductions-table-footer, .customers-activity-row, .customers-detail-top, .customers-toolbar, .customers-toolbar-main, .customers-table-footer { flex-direction: column; align-items: flex-start; }
+    .collections-inbox-row, .collections-hero, .collections-email-head, .collections-inbox-footer, .collections-compose-header, .collections-compose-footer, .deductions-top-row, .deduction-detail-header, .deduction-card-header, .deductions-table-footer, .customers-activity-row, .customers-detail-top, .customers-toolbar, .customers-toolbar-main, .customers-table-footer { flex-direction: column; align-items: flex-start; }
+    .call-agent-wide-section { grid-column: auto; }
     .collections-message-meta { justify-items: start; }
     .customers-searchbox { min-width: 100%; }
     .customers-activity-meta { align-items: flex-start; }
-    .analytics-inline-stats-compact { justify-content: flex-start; padding-top: 18px; }
+    .analytics-chart-panel { min-height: auto; }
     .home-reference-chart-grid, .home-reference-donut-layout { grid-template-columns: 1fr; }
     .home-reference-calendar-grid { grid-template-columns: 32px repeat(3, minmax(0, 1fr)) 32px; }
     .home-reference-calendar-day:nth-of-type(n + 5) { display: none; }
@@ -8240,22 +15380,82 @@ const styles = `
     .topbar { height: auto; gap: 12px; padding: 16px; flex-direction: column; align-items: flex-start; }
     .page-scroll { padding: 18px 16px 28px; }
     .page-header-row, .panel-header, .header-actions, .section-heading, .detail-footer, .approval-request-header, .activity-feed-header, .integration-header, .rule-header, .cash-review-header { flex-direction: column; align-items: flex-start; }
+    .invoice-detail-header, .invoice-detail-title, .invoice-detail-actions { flex-direction: column; align-items: flex-start; }
+    .invoice-detail-actions { width: 100%; }
+    .invoice-detail-action-button, .invoice-detail-icon-button { width: 100%; justify-content: center; }
+    .invoice-detail-line-table,
+    .invoice-detail-line-table-header { grid-template-columns: 1fr; }
+    .invoice-detail-line-table-header { display: none; }
+    .invoice-detail-line-row { gap: 8px; }
+    .invoice-detail-line-row > div {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding-right: 0;
+      text-align: left;
+    }
+    .invoice-detail-line-row > div:nth-child(1)::before { content: "Description"; color: #667085; font-size: .72rem; font-weight: 700; text-transform: uppercase; }
+    .invoice-detail-line-row > div:nth-child(2)::before { content: "Qty"; color: #667085; font-size: .72rem; font-weight: 700; text-transform: uppercase; }
+    .invoice-detail-line-row > div:nth-child(3)::before { content: "Unit Price"; color: #667085; font-size: .72rem; font-weight: 700; text-transform: uppercase; }
+    .invoice-detail-line-row > div:nth-child(4)::before { content: "Total"; color: #667085; font-size: .72rem; font-weight: 700; text-transform: uppercase; }
+    .invoice-detail-activity-row {
+      grid-template-columns: 20px auto minmax(0, 1fr);
+      row-gap: 6px;
+    }
+    .invoice-detail-activity-reference,
+    .invoice-detail-activity-date { justify-self: start; }
+    .invoice-ledger-header, .invoice-ledger-toolbar, .invoice-ledger-summary { flex-direction: column; align-items: stretch; }
+    .invoice-ledger-button, .invoice-ledger-select { width: 100%; justify-content: center; }
+    .invoice-ledger-table,
+    .invoice-ledger-table-header { grid-template-columns: 1fr; }
+    .invoice-ledger-table-header { display: none; }
+    .invoice-ledger-row { padding: 10px 0; }
+    .invoice-ledger-cell {
+      min-height: auto;
+      padding: 6px 16px;
+      justify-content: space-between;
+      gap: 14px;
+      border-bottom: 0;
+    }
+    .invoice-ledger-cell::before {
+      content: attr(data-label);
+      color: #667085;
+      font-size: .72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .invoice-ledger-cell-checkbox {
+      justify-content: flex-start;
+      padding-bottom: 2px;
+    }
+    .invoice-ledger-cell-checkbox::before { display: none; }
+    .invoice-customer-popover {
+      left: 16px;
+      right: 16px;
+      width: auto;
+      max-width: 260px;
+    }
     .match-card { flex-direction: column; align-items: flex-start; }
     .data-source-row { flex-direction: column; align-items: flex-start; }
     .home-snapshot-grid, .aging-chart { grid-template-columns: 1fr 1fr; }
-    .analytics-bar-chart { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .analytics-customer-row { flex-direction: column; }
-    .analytics-customer-metrics { align-items: flex-start; }
-    .analytics-header-actions, .analytics-inline-stats { width: 100%; }
-    .analytics-select, .analytics-export-button, .analytics-section-stat { width: 100%; }
+    .analytics-header-actions, .analytics-export-button, .analytics-impact-export-button, .analytics-trend-toggle { width: 100%; }
+    .analytics-export-button, .analytics-impact-export-button { justify-content: center; }
+    .analytics-impact-panel { padding: 24px 20px; }
+    .analytics-trends-header { flex-direction: column; align-items: flex-start; }
+    .analytics-trend-pill { flex: 1; justify-content: center; }
+    .analytics-customer-row { grid-template-columns: 1fr; }
     .analytics-panel { padding: 22px 18px; }
-    .analytics-donut-area { width: 220px; height: 220px; }
-    .analytics-donut { width: 188px; height: 188px; }
+    .analytics-customer-rank { line-height: 1; }
     .cash-module-header { min-height: 0; padding: 18px 16px 16px; gap: 12px; }
     .cash-module-header h1 { font-size: 1.08rem; }
     .cash-module-tab { min-height: 34px; font-size: .84rem; }
     .cash-module-tab.is-active { padding: 0 6px; }
     .cash-summary-card, .cash-highlight-card, .cash-toolbar, .cash-toolbar-main, .cash-toolbar-actions, .cash-table-footer { flex-direction: column; align-items: flex-start; }
+    .collections-email-template-panel { grid-template-columns: 1fr; }
+    .collections-filter-actions, .call-inbox-toolbar, .call-inbox-toolbar-actions { width: 100%; }
+    .call-inbox-toolbar { flex-direction: column; align-items: stretch; }
+    .call-inbox-filter, .call-inbox-filter.compact { width: 100%; }
     .cash-summary-card, .cash-highlight-card, .cash-note-card { min-height: auto; padding: 16px; border-radius: 14px; }
     .cash-summary-main strong { font-size: 1rem; }
     .cash-search { min-width: 100%; }
@@ -8271,7 +15471,7 @@ const styles = `
 
   @media (min-width: 1281px) {
     .task-page .kpi-grid-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-    .task-page .task-filter-bar { grid-template-columns: minmax(0, 1fr) 150px 150px 150px; }
+    .task-page .task-filter-bar { grid-template-columns: minmax(0, 1fr) 150px 150px 150px auto auto auto; }
   }
 
   .control-center-page { gap: 26px; padding-top: 20px; }
@@ -8287,16 +15487,7 @@ const styles = `
   .control-center-lead { margin: 0; color: #475467; font-size: .98rem; line-height: 1.45; }
   .control-center-button-with-icon { display: inline-flex; align-items: center; gap: 10px; }
   .control-center-button-with-icon svg { width: 16px; height: 16px; }
-  .control-center-layout { display: grid; grid-template-columns: 264px minmax(0, 1fr); gap: 28px; align-items: start; }
-  .control-center-sidebar { display: grid; gap: 26px; padding-top: 4px; }
-  .control-center-category-card { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 12px; padding: 14px 18px; border: 1px solid transparent; border-radius: 14px; background: transparent; box-shadow: none; }
-  .control-center-category-card.is-active { border-color: #fdba74; background: #fff7ed; }
-  .control-center-category-card h3, .control-center-category-card p { margin: 0; }
-  .control-center-category-card h3 { font-size: .98rem; line-height: 1.2; color: #1f2937; font-weight: 600; }
-  .control-center-category-card p { margin-top: 6px; font-size: .76rem; line-height: 1.38; color: #667085; }
-  .control-center-category-icon { display: grid; place-items: center; width: 18px; height: 18px; margin-top: 2px; border-radius: 999px; color: #f97316; }
-  .control-center-category-icon svg { width: 16px; height: 16px; stroke-width: 1.8; }
-  .control-center-category-icon.payments { color: #475467; }
+  .control-center-layout { display: block; }
   .control-center-main { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
   .control-center-card { background: transparent; border: 0; border-radius: 0; padding: 0; box-shadow: none; }
   .control-center-card-head, .control-center-stage-header, .control-center-inline-row, .control-center-template-row, .control-center-preview-grid { display: flex; justify-content: space-between; gap: 16px; }
@@ -8314,13 +15505,18 @@ const styles = `
   .control-center-toggle-form { margin: 0; }
   .workflow-toggle { width: 52px; height: 28px; border: 0; padding: 4px; border-radius: 999px; background: #e8ebf1; display: inline-flex; align-items: center; transition: background .18s ease; }
   .workflow-toggle.is-active { background: #111827; }
+  .workflow-toggle.is-disabled, .workflow-toggle:disabled { opacity: .48; cursor: not-allowed; }
   .workflow-toggle-knob { width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.18); transform: translateX(0); transition: transform .18s ease; }
   .workflow-toggle.is-active .workflow-toggle-knob { transform: translateX(24px); }
   .control-center-workflow-copy h3, .control-center-workflow-copy p { margin: 0; }
-  .control-center-workflow-copy h3 { font-size: 1.02rem; line-height: 1.22; font-weight: 700; color: #111827; }
+  .control-center-workflow-copy h3 { font-size: 1.08rem; line-height: 1.22; font-weight: 700; color: #111827; }
   .control-center-workflow-copy p { margin-top: 6px; font-size: .84rem; color: #667085; }
   .control-center-workflow-actions, .control-center-stage-tags, .control-center-folder-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
   .workflow-stage-badge { display: inline-flex; align-items: center; padding: 5px 11px; border: 1px solid #e1e5ea; border-radius: 11px; background: #fff; color: #344054; font-size: .8rem; font-weight: 600; }
+  .workflow-state-badge { display: inline-flex; align-items: center; padding: 5px 11px; border-radius: 999px; border: 1px solid transparent; font-size: .78rem; font-weight: 800; }
+  .workflow-state-badge.is-active { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+  .workflow-state-badge.is-inactive { background: #f8fafc; color: #475467; border-color: #e2e8f0; }
+  .workflow-state-badge.is-unavailable { background: #fef3c7; color: #92400e; border-color: #fde68a; }
   .workflow-chevron { color: #98a2b3; font-size: .95rem; }
   .workflow-chevron-icon { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; transition: transform .18s ease; }
   .workflow-chevron-icon svg { width: 16px; height: 16px; stroke-width: 1.9; }
@@ -8328,11 +15524,79 @@ const styles = `
   .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 8px; background: transparent; color: #98a2b3; padding: 0; }
   .icon-button svg { width: 15px; height: 15px; stroke-width: 1.9; }
   .icon-button:hover { background: #f3f4f6; color: #667085; }
-  .control-center-workflow-body { padding: 0 20px 20px; display: flex; flex-direction: column; gap: 16px; border-top: 1px solid #eef2f6; background: #fff; }
-  .control-center-grid-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-  .control-center-grid-form label { display: flex; flex-direction: column; gap: 8px; color: #344054; font-size: 14px; }
-  .control-center-grid-form input, .control-center-grid-form textarea, .control-center-modal-form select { width: 100%; box-sizing: border-box; border: 1px solid #d0d5dd; border-radius: 12px; background: #fff; padding: 11px 12px; font: inherit; color: #101828; }
+  .control-center-workflow-body { padding: 0 24px 24px; display: flex; flex-direction: column; gap: 22px; border-top: 1px solid #eef2f6; background: #fff; }
+  .control-center-grid-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 22px; padding-top: 22px; }
+  .control-center-grid-form label { display: flex; flex-direction: column; gap: 8px; color: #344054; font-size: 14px; font-weight: 600; }
+  .control-center-grid-form input, .control-center-grid-form textarea, .control-center-grid-form select, .control-center-modal-form select {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #eef2f6;
+    border-radius: 12px;
+    background: #fbfbfc;
+    padding: 11px 14px;
+    font: inherit;
+    color: #101828;
+    box-shadow: inset 0 1px 1px rgba(15, 23, 42, 0.02);
+  }
+  .control-center-grid-form input[readonly], .call-agent-number-field input[readonly] { background: #f8fafc; color: #475467; }
+  .control-center-field-help { color: #667085; font-size: .78rem; line-height: 1.35; font-weight: 500; }
+  .control-center-field-help.is-unavailable { color: #b45309; }
+  .control-center-form-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .control-center-action-banner {
+    display: grid;
+    gap: 4px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    border: 1px solid #d0d5dd;
+    background: white;
+  }
+  .control-center-action-banner strong, .control-center-action-banner p { margin: 0; }
+  .control-center-action-banner p { color: #475467; line-height: 1.45; }
+  .control-center-action-banner.is-success { border-color: #bbf7d0; background: #f0fdf4; }
+  .control-center-action-banner.is-error { border-color: #fecaca; background: #fef2f2; }
   .control-center-grid-form textarea { min-height: 100px; resize: vertical; }
+  .call-agent-settings-form { display: grid; gap: 18px; padding-top: 18px; }
+  .call-agent-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+  .call-agent-settings-section {
+    display: grid;
+    gap: 16px;
+    padding: 18px;
+    border: 1px solid #e3e8ef;
+    border-radius: 16px;
+    background: #fbfcfe;
+  }
+  .call-agent-wide-section { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .call-agent-wide-section .call-agent-section-head { grid-column: 1 / -1; }
+  .call-agent-section-head { display: flex; align-items: flex-start; gap: 12px; }
+  .call-agent-section-head h3, .call-agent-section-head p { margin: 0; }
+  .call-agent-section-head h3 { font-size: 1rem; line-height: 1.2; color: #111827; }
+  .call-agent-section-head p { margin-top: 5px; color: #667085; font-size: .86rem; line-height: 1.45; }
+  .call-agent-section-icon { width: 36px; height: 36px; flex: 0 0 auto; border-radius: 11px; display: grid; place-items: center; background: white; border: 1px solid #e3e8ef; color: #2563eb; }
+  .call-agent-section-icon svg { width: 18px; height: 18px; }
+  .call-agent-number-field, .call-agent-textarea-field { display: grid; gap: 8px; color: #344054; font-size: .86rem; font-weight: 800; }
+  .call-agent-number-field input, .call-agent-textarea-field textarea {
+    width: 100%;
+    border: 1px solid #d0d5dd;
+    border-radius: 12px;
+    background: white;
+    color: #111827;
+    font: inherit;
+    box-sizing: border-box;
+  }
+  .call-agent-number-field input { min-height: 44px; padding: 0 13px; }
+  .call-agent-textarea-field textarea { min-height: 118px; padding: 12px 13px; resize: vertical; line-height: 1.5; }
+  .call-agent-toggle-list { display: grid; gap: 10px; }
+  .call-agent-toggle {
+    min-height: 44px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: white;
+    border: 1px solid #e3e8ef;
+  }
+  .call-agent-toggle.is-disabled { color: #98a2b3; background: #f8fafc; opacity: .72; }
+  .call-agent-toggle.is-disabled input { cursor: not-allowed; }
+  .call-agent-recording-section { align-content: start; }
+  .call-agent-save-row { display: flex; justify-content: flex-end; }
   .control-center-full-row { grid-column: 1 / -1; }
   .control-center-checkbox { flex-direction: row !important; align-items: center; gap: 10px; }
   .control-center-checkbox input { width: auto; }
@@ -8341,17 +15605,127 @@ const styles = `
   .primary-button { border: none; background: #111827; color: #fff; box-shadow: none; }
   .ghost-button, .pill-button { border: 1px solid #d0d5dd; background: #fff; color: #344054; }
   .pill-button.is-active { background: #eef2ff; border-color: #c7d2fe; }
-  .control-center-stage-item { padding: 14px 16px; display: flex; justify-content: space-between; gap: 16px; }
+  .control-center-stage-item {
+    padding: 16px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-radius: 18px;
+  }
   .control-center-stage-title, .control-center-preview-subject { margin: 0; font-weight: 700; color: #101828; }
-  .control-center-stage-sentence { display: flex; align-items: flex-start; gap: 12px; }
-  .control-center-stage-sentence-copy { margin: 0; color: #111827; font-size: .94rem; line-height: 1.45; }
-  .stage-channel-icon { width: 28px; height: 28px; border-radius: 10px; display: grid; place-items: center; font-size: .82rem; font-weight: 700; }
-  .stage-channel-icon.is-email { background: #eef2ff; color: #3659ff; }
-  .stage-channel-icon.is-call { background: #f3e8ff; color: #8b5cf6; }
+  .control-center-stage-sentence { display: flex; align-items: center; gap: 16px; min-width: 0; }
+  .control-center-stage-sentence-copy { margin: 0; color: #344054; font-size: .98rem; line-height: 1.45; min-width: 0; }
+  .control-center-stage-sentence-copy strong { color: #101828; font-weight: 700; }
+  .control-center-stage-sentence-copy .stage-linkish { color: #245cff; font-weight: 700; }
+  .stage-channel-icon { width: 42px; height: 42px; border-radius: 14px; display: grid; place-items: center; flex: 0 0 auto; }
+  .stage-channel-icon svg { width: 20px; height: 20px; stroke-width: 1.9; }
+  .stage-channel-icon.is-email { background: #eef4ff; color: #2f6fff; }
+  .stage-channel-icon.is-call { background: #faf0ff; color: #a020f0; }
   .stage-channel-icon.is-sms { background: #ecfdf3; color: #16a34a; }
+  .control-center-stage-actions { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+  .stage-ai-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid #e6d3ff;
+    background: #faf5ff;
+    color: #9333ea;
+    font-size: .82rem;
+    font-weight: 700;
+  }
   .control-center-stage-meta, .control-center-stage-notes, .control-center-template-row p { margin: 4px 0 0; color: #667085; }
   .stage-tag { padding: 6px 10px; border-radius: 999px; background: #f8fafc; color: #344054; font-size: 12px; border: 1px solid #e4e7ec; font-weight: 600; }
   .stage-tag.is-highlight { background: #ecfdf3; color: #17663a; border-color: #b7ebce; }
+  .control-center-enrollment-panel { display: grid; gap: 14px; padding: 0; border: 0; border-top: 1px solid #eaecf0; border-radius: 0; }
+  .control-center-enrollment-list { display: grid; gap: 12px; }
+  .control-center-enrollment-list.is-collapsed { display: none; }
+  .control-center-enrollment-item {
+    padding: 18px 18px;
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 16px;
+    border: 1px solid #eaecf0;
+    border-radius: 14px;
+    background: #fff;
+  }
+  .control-center-enrollment-check { display: flex; align-items: center; justify-content: center; }
+  .control-center-enrollment-check input {
+    width: 18px;
+    height: 18px;
+    accent-color: #111827;
+    border-radius: 6px;
+  }
+  .control-center-enrollment-copy { display: grid; gap: 6px; }
+  .control-center-enrollment-title-row, .control-center-enrollment-meta, .control-center-enrollment-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .control-center-enrollment-title-row h5, .control-center-enrollment-reason { margin: 0; }
+  .control-center-enrollment-title-row h5 { font-size: 1rem; color: #101828; font-weight: 700; }
+  .control-center-enrollment-meta, .control-center-enrollment-reason { color: #667085; font-size: .9rem; line-height: 1.45; }
+  .control-center-enrollment-title { display: inline-flex; align-items: center; gap: 10px; margin: 0; font-size: 1rem; color: #101828; }
+  .control-center-enrollment-summary-button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+  }
+  .control-center-enrollment-head { padding-top: 14px; align-items: center; }
+  .control-center-enrollment-head .panel-header { margin: 0; }
+  .control-center-enrollment-head > div,
+  .control-center-enrollment-summary-button { display: flex; align-items: center; }
+  .control-center-enrollment-head > div { flex: 1 1 auto; min-width: 0; }
+  .control-center-enrollment-head .workflow-chevron-icon { flex: 0 0 auto; transform: rotate(90deg); color: #98a2b3; }
+  .control-center-enrollment-summary-button[aria-expanded="false"] .workflow-chevron-icon { transform: rotate(0deg); }
+  .control-center-inline-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 0;
+    background: transparent;
+    border-radius: 12px;
+    padding: 6px 4px;
+    color: #111827;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .control-center-inline-action.is-danger { color: #ef4444; }
+  .control-center-inline-action-icon { font-size: .92rem; line-height: 1; }
+  .control-center-select-all-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border: 1px solid #eaecf0;
+    border-radius: 12px;
+    color: #667085;
+    background: #fff;
+    font-size: .92rem;
+    font-weight: 600;
+  }
+  .control-center-select-all-row input { width: 18px; height: 18px; }
+  .control-center-enrollment-empty {
+    padding: 16px 18px;
+    border: 1px dashed #d0d5dd;
+    border-radius: 16px;
+    background: #fff;
+    color: #667085;
+  }
   .control-center-templates-screen { display: grid; gap: 24px; margin-top: 20px; }
   .control-center-template-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 10px; }
   .control-center-template-filter-row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
@@ -8359,12 +15733,13 @@ const styles = `
   .template-filter-pill svg { width: 16px; height: 16px; stroke-width: 1.9; }
   .template-outline-pill { border: 1px solid #e2e8f0; background: #fff; color: #111827; }
   .control-center-template-toolbar .primary-button { min-height: 42px; padding-inline: 18px; }
-  .control-center-template-searchbar { display: flex; align-items: center; gap: 12px; max-width: 680px; min-height: 52px; padding: 0 18px; border-radius: 14px; background: #f7f8fb; border: 1px solid #eef1f5; }
+  .control-center-template-searchbar { display: flex; align-items: center; gap: 12px; max-width: 760px; min-height: 52px; padding: 8px 12px 8px 18px; border-radius: 14px; background: #f7f8fb; border: 1px solid #eef1f5; }
   .control-center-template-searchbar svg { width: 18px; height: 18px; color: #98a2b3; stroke-width: 1.8; }
   .control-center-template-searchbar input { width: 100%; border: 0; outline: none; background: transparent; color: #667085; font: inherit; font-size: .97rem; padding: 0; }
   .control-center-template-searchbar input::placeholder { color: #667085; opacity: 1; }
+  .control-center-search-clear { color: #667085; font-size: .86rem; font-weight: 700; white-space: nowrap; }
   .control-center-template-table-wrap { border-top: 1px solid #e8ecf2; border-left: 1px solid #e8ecf2; border-right: 1px solid #e8ecf2; margin-top: 2px; }
-  .control-center-template-table { display: grid; grid-template-columns: 76px minmax(230px, 1.1fr) minmax(320px, 1.58fr) minmax(420px, 2.2fr) 92px; }
+  .control-center-template-table { display: grid; grid-template-columns: 76px minmax(230px, 1.1fr) minmax(320px, 1.58fr) minmax(420px, 2.2fr); }
   .control-center-template-table-head { min-height: 56px; border-bottom: 1px solid #edf1f5; }
   .control-center-template-table-row { min-height: 100px; border-bottom: 1px solid #edf1f5; }
   .control-center-template-cell { display: flex; align-items: center; padding: 0 20px; color: #344054; font-size: .94rem; }
@@ -8375,18 +15750,20 @@ const styles = `
   .control-center-template-doc-icon { display: inline-flex; align-items: center; justify-content: center; color: #98a2b3; flex: 0 0 auto; }
   .control-center-template-doc-icon svg { width: 17px; height: 17px; stroke-width: 1.85; }
   .control-center-template-link { color: #2563eb; font-size: .96rem; font-weight: 500; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .control-center-template-subject, .control-center-template-body, .control-center-template-folder { color: #475467; line-height: 1.48; }
+  .control-center-template-subject, .control-center-template-body { color: #475467; line-height: 1.48; }
   .control-center-template-subject, .control-center-template-body { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
   .control-center-template-subject { -webkit-line-clamp: 2; }
   .control-center-template-body { -webkit-line-clamp: 1; color: #667085; }
-  .control-center-template-folder { justify-content: flex-start; }
+  .control-center-template-empty { display: grid; gap: 6px; padding: 28px 22px; border-bottom: 1px solid #edf1f5; color: #667085; }
+  .control-center-template-empty strong { color: #111827; }
+  .control-center-template-empty p { margin: 0; }
   .control-center-template-drawer-shell { position: fixed; inset: 64px 0 0 274px; z-index: 45; }
   .control-center-template-drawer-backdrop { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.08); }
-  .control-center-template-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(980px, calc(100vw - 310px)); background: #fff; border-left: 1px solid #e6e8ec; box-shadow: -18px 0 48px rgba(15, 23, 42, 0.12); display: grid; grid-template-rows: auto minmax(0, 1fr); }
+  .control-center-template-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(1180px, calc(100vw - 294px)); background: #fff; border-left: 1px solid #e6e8ec; box-shadow: -18px 0 48px rgba(15, 23, 42, 0.12); display: grid; grid-template-rows: auto minmax(0, 1fr); }
   .control-center-template-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; border-bottom: 1px solid #eef2f6; }
   .control-center-template-drawer-head h2 { margin: 0; font-size: 1.15rem; line-height: 1.2; color: #111827; }
   .control-center-template-drawer-close { color: #667085; font-size: 1.4rem; line-height: 1; }
-  .control-center-template-drawer-content { min-height: 0; display: grid; grid-template-columns: minmax(0, 1.1fr) 360px; }
+  .control-center-template-drawer-content { min-height: 0; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(400px, .95fr); }
   .control-center-template-editor { min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; border-right: 1px solid #eef2f6; }
   .control-center-template-editor-fields { display: grid; gap: 14px; padding: 18px 18px 0; }
   .control-center-template-editor-fields label { display: grid; gap: 8px; color: #111827; font-size: .92rem; font-weight: 600; }
@@ -8400,10 +15777,16 @@ const styles = `
   .template-mini-switch.is-active { background: #111827; justify-content: flex-end; }
   .control-center-template-editor-body { width: 100%; min-height: 0; border: 0; border-top: 1px solid #eef2f6; border-bottom: 1px solid #eef2f6; padding: 18px; font: inherit; font-size: .95rem; line-height: 1.65; color: #344054; resize: none; outline: none; }
   .control-center-template-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 18px; }
-  .control-center-template-editor-tools { display: flex; align-items: center; gap: 14px; color: #344054; font-size: .88rem; font-weight: 600; }
+  .control-center-template-editor-tools { display: flex; align-items: center; gap: 14px; color: #344054; font-size: .88rem; font-weight: 600; position: relative; }
+  .control-center-template-variable-picker { position: relative; }
+  .control-center-template-variable-button { min-height: 30px; border: 1px solid #d0d5dd; border-radius: 9px; background: #fff; color: #344054; padding: 0 11px; font: inherit; font-size: .88rem; font-weight: 700; cursor: pointer; }
+  .control-center-template-variable-menu { position: absolute; left: 0; bottom: calc(100% + 12px); min-width: 240px; max-height: 260px; overflow: auto; padding: 8px; border: 1px solid #e4e7ec; border-radius: 14px; background: #fff; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16); display: none; z-index: 3; }
+  .control-center-template-variable-picker.is-open .control-center-template-variable-menu { display: grid; }
+  .control-center-template-variable-item { min-height: 34px; border: 0; border-radius: 10px; background: transparent; color: #111827; padding: 0 10px; text-align: left; font: inherit; font-size: .86rem; cursor: pointer; }
+  .control-center-template-variable-item:hover { background: #f5f7fb; }
   .control-center-template-editor-actions { display: flex; align-items: center; gap: 14px; }
   .template-save-state { color: #667085; font-size: .84rem; font-weight: 600; }
-  .control-center-template-preview-pane { padding: 18px 18px 24px; display: grid; align-content: start; gap: 18px; background: #fff; overflow: auto; }
+  .control-center-template-preview-pane { padding: 18px 22px 24px; display: grid; align-content: start; gap: 18px; background: #fff; overflow: auto; }
   .control-center-template-preview-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 0 12px; border-radius: 10px; background: #f4f0ff; color: #7c3aed; font-size: .77rem; font-weight: 700; width: fit-content; }
   .control-center-template-preview-block { display: grid; gap: 10px; padding-top: 16px; border-top: 1px solid #eef2f6; }
   .control-center-template-preview-block h3 { margin: 0; font-size: .92rem; color: #111827; }
@@ -8416,8 +15799,9 @@ const styles = `
   .control-center-preview-panel ul { margin: 12px 0 0; padding-left: 18px; color: #31425d; }
   .control-center-field-label { display: block; margin-bottom: 8px; color: #344054; font-size: 13px; font-weight: 600; }
   .weekday-pill-row { display: flex; gap: 8px; flex-wrap: wrap; }
-  .weekday-pill { min-width: 38px; padding: 8px 10px; border-radius: 10px; border: 1px solid #d0d5dd; background: #fff; color: #667085; text-align: center; font-size: .82rem; font-weight: 600; }
-  .weekday-pill.is-active { background: #111827; border-color: #111827; color: #fff; }
+  .weekday-pill { min-width: 38px; padding: 8px 10px; border-radius: 10px; border: 1px solid #d0d5dd; background: #fff; color: #667085; text-align: center; font-size: .82rem; font-weight: 600; cursor: pointer; }
+  .weekday-pill input { position: absolute; opacity: 0; pointer-events: none; }
+  .weekday-pill.is-active, .weekday-pill:has(input:checked) { background: #111827; border-color: #111827; color: #fff; }
   .control-center-toggle-row { display: flex; align-items: center; justify-content: space-between; padding-top: 4px; }
   .control-center-inline-toggle { cursor: pointer; }
   .control-center-inline-toggle input:checked + .workflow-toggle-knob { transform: translateX(12px); }
@@ -8428,21 +15812,214 @@ const styles = `
   .control-center-modal-shell { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; }
   .control-center-modal-backdrop { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.44); }
   .control-center-modal { position: relative; z-index: 1; width: min(100%, 380px); background: #fff; border: 1px solid #d0d5dd; border-radius: 14px; box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28); padding: 16px; }
+  .control-center-enroll-modal { width: min(100% - 24px, 688px); padding: 28px 32px 24px; border-radius: 18px; }
+  .control-center-stage-modal { width: min(100% - 24px, 556px); padding: 14px 16px 12px; border-radius: 14px; }
   .control-center-modal-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
   .control-center-modal-head h2, .control-center-modal-head p { margin: 0; }
-  .control-center-modal-head p { margin-top: 8px; color: #667085; font-size: .9rem; }
-  .control-center-modal-close { color: #667085; font-size: 1.35rem; line-height: 1; }
-  .control-center-modal-form { display: grid; gap: 16px; margin-top: 18px; }
-  .control-center-modal-block { display: grid; gap: 10px; }
-  .stage-channel-picker, .template-mode-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-  .template-mode-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .stage-channel-option, .template-mode-option { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; border: 1px solid #d0d5dd; border-radius: 10px; background: #fff; color: #344054; font-size: .9rem; font-weight: 500; }
-  .stage-channel-option.is-email { border-color: #3659ff; background: #eef2ff; color: #3659ff; }
-  .stage-channel-option.is-call { border-color: #a855f7; background: #f3e8ff; color: #7c3aed; }
-  .stage-channel-option.is-sms { border-color: #22c55e; background: #ecfdf3; color: #16a34a; }
+  .control-center-modal-head h2 { font-size: 1.06rem; line-height: 1.18; color: #101828; }
+  .control-center-modal-head p { margin-top: 6px; color: #667085; font-size: .8rem; line-height: 1.38; }
+  .control-center-modal-close { color: #475467; font-size: 1.32rem; line-height: 1; }
+  .control-center-modal-form { display: grid; gap: 14px; margin-top: 12px; }
+  .control-center-modal-block { display: grid; gap: 8px; }
+  .control-center-modal-section-label { margin-bottom: 0; }
+  .control-center-enroll-search {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 54px;
+    padding: 0 16px;
+    border: 1px solid #d0d5dd;
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: inset 0 1px 1px rgba(15, 23, 42, 0.03);
+  }
+  .control-center-enroll-search svg { width: 18px; height: 18px; color: #98a2b3; flex: 0 0 auto; }
+  .control-center-enroll-search-input {
+    flex: 1;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: #101828;
+    font: inherit;
+    font-size: 1rem;
+    outline: none;
+  }
+  .control-center-enroll-list {
+    display: grid;
+    gap: 0;
+    max-height: 584px;
+    overflow: auto;
+    border: 1px solid #eaecf0;
+    border-radius: 16px;
+    background: #fff;
+  }
+  .control-center-enroll-select-all, .control-center-enroll-option {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 12px;
+    align-items: flex-start;
+    padding: 18px 20px;
+    cursor: pointer;
+  }
+  .control-center-enroll-option + .control-center-enroll-option,
+  .control-center-enroll-select-all + .control-center-enroll-option { border-top: 1px solid #eaecf0; }
+  .control-center-enroll-select-all { font-size: 1rem; font-weight: 600; color: #344054; }
+  .control-center-enroll-select-all input,
+  .control-center-enroll-option-checkbox {
+    width: 22px;
+    height: 22px;
+    margin: 0;
+    accent-color: #111827;
+    border-radius: 6px;
+  }
+  .control-center-enroll-option-copy { display: grid; gap: 8px; }
+  .control-center-enroll-option-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .control-center-enroll-option-title strong { font-size: 1rem; color: #101828; }
+  .control-center-enroll-option-copy p {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    color: #667085;
+    font-size: .92rem;
+  }
+  .control-center-enroll-option-copy p span + span::before { content: "•"; margin-right: 12px; color: #98a2b3; }
+  .control-center-enroll-option.is-hidden { display: none; }
+  .stage-channel-picker, .template-mode-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .stage-channel-option, .template-mode-option {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 44px;
+    border: 1px solid #d0d5dd;
+    border-radius: 12px;
+    background: #fff;
+    color: #344054;
+    font-size: .86rem;
+    font-weight: 600;
+  }
+  .stage-channel-option.is-email {
+    border-color: #2f6fff;
+    background: #edf4ff;
+    color: #1d4ed8;
+    box-shadow: inset 0 0 0 1px #2f6fff;
+  }
+  .stage-channel-option.is-call {
+    border-color: #d7dce4;
+    background: #fff;
+    color: #344054;
+  }
   .template-mode-option.is-active { background: #111827; border-color: #111827; color: #fff; }
+  .control-center-trigger-builder {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .control-center-trigger-number-wrap {
+    position: relative;
+    width: 96px;
+    flex: 0 0 96px;
+  }
+  .control-center-trigger-number-wrap::after {
+    content: "⌃\A⌄";
+    white-space: pre;
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    transform: translateY(-50%);
+    color: #98a2b3;
+    font-size: 10px;
+    line-height: .8;
+    opacity: 0;
+    transition: opacity .16s ease;
+    pointer-events: none;
+  }
+  .control-center-trigger-number-wrap:hover::after,
+  .control-center-trigger-number-wrap:focus-within::after { opacity: 1; }
+  .control-center-trigger-number-input {
+    width: 100%;
+    min-height: 34px;
+    border: 1px solid #eef2f6;
+    border-radius: 9px;
+    background: #f5f7fb;
+    padding: 0 10px;
+    color: #101828;
+    font: inherit;
+    font-size: .88rem;
+    font-weight: 600;
+    outline: none;
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+  .control-center-trigger-number-input::-webkit-outer-spin-button,
+  .control-center-trigger-number-input::-webkit-inner-spin-button {
+    -webkit-appearance: inner-spin-button;
+    opacity: 0;
+    transition: opacity .16s ease;
+  }
+  .control-center-trigger-number-input:hover::-webkit-outer-spin-button,
+  .control-center-trigger-number-input:hover::-webkit-inner-spin-button,
+  .control-center-trigger-number-input:focus::-webkit-outer-spin-button,
+  .control-center-trigger-number-input:focus::-webkit-inner-spin-button {
+    opacity: 1;
+  }
+  .control-center-trigger-days-copy {
+    color: #475467;
+    font-size: .84rem;
+    font-weight: 500;
+  }
+  .control-center-trigger-select-wrap {
+    position: relative;
+    min-width: 188px;
+  }
+  .control-center-trigger-select-wrap::after {
+    content: "⌄";
+    position: absolute;
+    top: 50%;
+    right: 14px;
+    transform: translateY(-50%);
+    color: #98a2b3;
+    font-size: 14px;
+    pointer-events: none;
+  }
+  .control-center-trigger-select {
+    width: 100%;
+    min-height: 34px;
+    border: 1px solid #eef2f6;
+    border-radius: 9px;
+    background: #f5f7fb;
+    padding: 0 30px 0 10px;
+    color: #101828;
+    font: inherit;
+    font-size: .86rem;
+    font-weight: 600;
+    appearance: none;
+  }
+  .control-center-trigger-builder.is-on-due-date .control-center-trigger-number-wrap,
+  .control-center-trigger-builder.is-on-due-date .control-center-trigger-days-copy { display: none; }
+  .control-center-stage-template-select {
+    min-height: 34px;
+    border-radius: 9px;
+    background: #f5f7fb;
+    padding-right: 30px;
+    color: #667085;
+  }
   .control-center-ai-note { padding: 10px 12px; border-radius: 12px; background: #f8fafc; border: 1px solid #e4e7ec; color: #475467; font-size: .86rem; line-height: 1.45; }
-  .control-center-modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 14px; border-top: 1px solid #eaecf0; }
+  .control-center-ai-note { padding: 8px 10px; border-radius: 9px; font-size: .8rem; }
+  .control-center-stage-submit[disabled] {
+    background: #98a2b3;
+    color: #fff;
+    cursor: not-allowed;
+  }
+  .control-center-modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid #eaecf0; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
   @media (max-width: 980px) {
@@ -8451,9 +16028,11 @@ const styles = `
     .control-center-tabbar { gap: 16px; overflow-x: auto; }
     .control-center-workflow-row summary, .control-center-card-head, .control-center-stage-header { flex-direction: column; align-items: flex-start; }
     .control-center-template-toolbar { flex-direction: column; align-items: flex-start; }
+    .control-center-enrollment-item, .control-center-enrollment-form, .control-center-enrollment-actions { flex-direction: column; align-items: flex-start; }
+    .control-center-enrollment-form select { min-width: 100%; }
     .control-center-template-searchbar { max-width: none; width: 100%; }
-    .control-center-template-table, .control-center-template-table-head { grid-template-columns: 56px minmax(180px, 1fr) minmax(180px, 1fr); }
-    .control-center-template-table-head .control-center-template-cell:nth-child(4), .control-center-template-table-head .control-center-template-cell:nth-child(5), .control-center-template-table-row .control-center-template-cell:nth-child(4), .control-center-template-table-row .control-center-template-cell:nth-child(5) { display: none; }
+     .control-center-template-table, .control-center-template-table-head { grid-template-columns: 56px minmax(180px, 1fr) minmax(180px, 1fr); }
+     .control-center-template-table-head .control-center-template-cell:nth-child(4), .control-center-template-table-row .control-center-template-cell:nth-child(4) { display: none; }
     .control-center-template-drawer-shell { inset: 0; }
     .control-center-template-drawer { width: min(100vw, 100%); }
     .control-center-template-drawer-content { grid-template-columns: 1fr; }

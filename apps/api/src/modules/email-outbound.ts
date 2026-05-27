@@ -2,6 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { BillingAccount, Contact, Invoice } from "@o2c/domain";
 import { getEmailOutboundService, getGmailConnectionService } from "../bootstrap/email-integration-service.js";
+import type { EmailAttachmentInput } from "@o2c/workflows";
+import { createStatementOfAccountPdfAttachment } from "./retell/statement-of-account-pdf.js";
 
 const roleSchema = z.enum(["ar_collector", "ar_manager", "controller", "admin"]);
 
@@ -55,6 +57,12 @@ const contactSchema = z.object({
   allowAutoSend: z.boolean(),
   recentSuccessfulResponses: z.number().int(),
   metadata: z.record(z.string(), z.unknown()),
+});
+
+const attachmentSchema = z.object({
+  fileName: z.string().min(1),
+  mimeType: z.string().optional(),
+  contentBase64: z.string().min(1),
 });
 
 const invoiceSchema = z.object({
@@ -136,12 +144,23 @@ const sendRequestSchema = z.object({
   bodyPreview: z.string().optional(),
   contentTemplateKey: z.string().optional(),
   documentIds: z.array(z.string()).optional(),
+  attachments: z.array(attachmentSchema).optional(),
+  ccEmails: z.array(z.string().email()).optional(),
   sendWindow: z.object({
     timezone: z.string(),
     startHour: z.number().int().min(0).max(23),
     endHour: z.number().int().min(1).max(24),
     allowedWeekdays: z.array(z.number().int().min(1).max(7)),
   }).optional(),
+});
+
+const statementAttachmentRequestSchema = z.object({
+  principal: principalSchema.optional(),
+  account: accountSchema,
+  contact: contactSchema,
+  invoices: z.array(invoiceSchema),
+  asOf: z.string().optional(),
+  statementSnapshotId: z.string().optional(),
 });
 
 const inboxQuerySchema = z.object({
@@ -167,6 +186,7 @@ const inboxReplySchema = z.object({
   invoices: z.array(invoiceSchema).optional(),
   subjectLine: z.string().min(1),
   bodyPreview: z.string().min(1),
+  attachments: z.array(attachmentSchema).optional(),
 });
 
 export const registerEmailOutboundRoutes = (app: FastifyInstance): void => {
@@ -333,7 +353,39 @@ export const registerEmailOutboundRoutes = (app: FastifyInstance): void => {
       ...(parsed.data.contentTemplateKey
         ? { contentTemplateKey: parsed.data.contentTemplateKey }
         : {}),
+      ...(parsed.data.attachments?.length
+        ? { attachments: parsed.data.attachments as EmailAttachmentInput[] }
+        : {}),
+      ...(parsed.data.ccEmails?.length ? { ccEmails: parsed.data.ccEmails } : {}),
     });
+  });
+
+  app.post("/v1/email/outbound/attachments/statement-of-account", async (request, reply) => {
+    const parsed = statementAttachmentRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        message: "Invalid statement-of-account attachment request.",
+        issues: parsed.error.issues,
+      });
+    }
+
+    try {
+      const attachment = await createStatementOfAccountPdfAttachment({
+        account: toBillingAccount(parsed.data.account),
+        contact: toContact(parsed.data.contact),
+        invoices: parsed.data.invoices.map(toInvoice),
+        asOf: parsed.data.asOf ?? new Date().toISOString(),
+        ...(parsed.data.statementSnapshotId ? { statementSnapshotId: parsed.data.statementSnapshotId } : {}),
+      });
+      return reply.send({ attachment });
+    } catch (error) {
+      return reply.status(503).send({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Statement-of-account PDF could not be generated.",
+      });
+    }
   });
 
   app.get("/v1/email/conversations/:communicationAttemptId", async (request, reply) => {
@@ -425,6 +477,9 @@ export const registerEmailOutboundRoutes = (app: FastifyInstance): void => {
       ...(parsed.data.invoices ? { invoices: parsed.data.invoices.map(toInvoice) } : {}),
       subjectLine: parsed.data.subjectLine,
       bodyPreview: parsed.data.bodyPreview,
+      ...(parsed.data.attachments?.length
+        ? { attachments: parsed.data.attachments as EmailAttachmentInput[] }
+        : {}),
     });
   });
 };

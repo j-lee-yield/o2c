@@ -3,6 +3,16 @@ export type InvoiceIndexProvider = IntegrationProvider | "business_central" | "s
 export type InvoiceIndexSourceKind = ConnectorKind | "seed";
 export type InvoiceIndexImportMode = "live_connection" | "seed_fallback" | "manual_upload";
 export type InvoiceIndexStatus = "open" | "partial" | "paid" | "disputed" | "voided";
+export type InvoiceIndexTypeFilter = "all" | "live_connection" | "manual_upload" | "seed_fallback" | "installment_plan" | "standard_invoice";
+export type InvoiceIndexMoreFilter = "all" | "overdue" | "due_today" | "due_soon" | "with_promise" | "with_balance" | "with_branch" | "missing_branch";
+export interface InvoiceIndexFilters {
+    q?: string;
+    status?: InvoiceIndexStatus | "all";
+    type?: InvoiceIndexTypeFilter;
+    more?: InvoiceIndexMoreFilter;
+    page?: number;
+    pageSize?: number;
+}
 export interface InvoiceIndexEntry {
     id: string;
     sourceProvider: InvoiceIndexProvider;
@@ -23,6 +33,9 @@ export interface InvoiceIndexEntry {
     currency: string;
     totalAmountCents: number;
     openAmountCents: number;
+    overdueAmountCents?: number;
+    dueNowAmountCents?: number;
+    futureAmountCents?: number;
     collectibleAmountCents?: number;
     paidAmountCents: number;
     status: InvoiceIndexStatus;
@@ -31,6 +44,11 @@ export interface InvoiceIndexEntry {
     dueDate?: string;
     lastImportedAt?: string;
     daysPastDue?: number;
+    installmentPlanId?: string;
+    oldestOverdueInstallmentDaysPastDue?: number;
+    missedInstallmentCount?: number;
+    nextInstallmentDueDate?: string;
+    nextInstallmentAmountCents?: number;
     tags: string[];
     metadata: Record<string, unknown>;
 }
@@ -71,5 +89,14 @@ export interface InvoiceIndexResponse {
     providers: InvoiceIndexProviderSummary[];
     statuses: InvoiceIndexStatusSummary[];
     invoices: InvoiceIndexEntry[];
+    filters?: InvoiceIndexFilters;
+    pagination?: {
+        page: number;
+        pageSize: number;
+        totalItems: number;
+        totalPages: number;
+        hasPreviousPage: boolean;
+        hasNextPage: boolean;
+    };
 }
 //# sourceMappingURL=index.d.ts.map

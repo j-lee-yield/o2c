@@ -89,6 +89,7 @@ type BusinessCentralConnectionRow = {
 type BusinessCentralConnectionStore = {
   save(connection: BusinessCentralTenantConnection): void;
   get(tenantSlug: string): BusinessCentralTenantConnection | undefined;
+  delete(tenantSlug: string): BusinessCentralTenantConnection | undefined;
 };
 
 type CompleteConnectResult = {
@@ -124,6 +125,15 @@ class InMemoryBusinessCentralConnectionStore implements BusinessCentralConnectio
 
   get(tenantSlug: string) {
     return this.connections.get(tenantSlug);
+  }
+
+  delete(tenantSlug: string) {
+    const existing = this.connections.get(tenantSlug);
+    if (!existing) {
+      return undefined;
+    }
+    this.connections.delete(tenantSlug);
+    return existing;
   }
 }
 
@@ -208,6 +218,23 @@ class PostgresBusinessCentralConnectionStore implements BusinessCentralConnectio
       `,
     );
     return rows[0];
+  }
+
+  delete(tenantSlug: string) {
+    const existing = this.get(tenantSlug);
+    if (!existing) {
+      return undefined;
+    }
+
+    executeSqlCommand(
+      this.databaseUrl,
+      `
+        DELETE FROM business_central_oauth_connection
+        WHERE tenant_slug = '${quoteLiteral(tenantSlug)}'
+      `,
+    );
+
+    return existing;
   }
 }
 
@@ -338,7 +365,7 @@ class BusinessCentralConnectionService {
         ...(session.domainHint ? { domainHint: session.domainHint } : {}),
         companies: companies.map((company) => ({
           id: company.id,
-          name: company.displayName ?? company.name ?? company.id,
+          name: getBusinessCentralCompanyLabel(company),
         })),
         accessToken: tokenPayload.access_token,
         ...(tokenPayload.refresh_token ? { refreshToken: tokenPayload.refresh_token } : {}),
@@ -372,8 +399,8 @@ class BusinessCentralConnectionService {
           ? { tenantLabel: claims.email }
           : {}),
       companyId: selectedCompany.id,
-      ...(selectedCompany.displayName ?? selectedCompany.name
-        ? { companyName: selectedCompany.displayName ?? selectedCompany.name }
+      ...(getBusinessCentralCompanyLabel(selectedCompany)
+        ? { companyName: getBusinessCentralCompanyLabel(selectedCompany) }
         : {}),
       environment: session.environment,
       accessToken: tokenPayload.access_token,
@@ -431,7 +458,7 @@ class BusinessCentralConnectionService {
       ...(pending.tenantId ? { tenantId: pending.tenantId } : {}),
       ...(pending.tenantLabel ? { tenantLabel: pending.tenantLabel } : {}),
       companyId: company.id,
-      ...(company.name ? { companyName: company.name } : {}),
+      ...(company.name.trim() ? { companyName: company.name.trim() } : {}),
       environment: pending.environment,
       accessToken: pending.accessToken,
       ...(pending.refreshToken ? { refreshToken: pending.refreshToken } : {}),
@@ -460,6 +487,26 @@ class BusinessCentralConnectionService {
 
   getConnection(tenantSlug: string) {
     return this.store.get(tenantSlug);
+  }
+
+  async disconnect(tenantSlug: string) {
+    const existing = this.store.delete(tenantSlug);
+    if (!existing) {
+      return undefined;
+    }
+
+    await this.auditLogger.log(buildAuditContext("bc_disconnect"), {
+      action: "integration.business_central_disconnected",
+      entityType: "integration_connection",
+      entityId: existing.id,
+      metadata: {
+        tenantSlug: existing.tenantSlug,
+        companyId: existing.companyId,
+        environment: existing.environment,
+      },
+    });
+
+    return existing;
   }
 
   async getAccessToken(tenantSlug: string) {
@@ -664,6 +711,20 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
 
 function readEnv(value: string | number | undefined) {
   return typeof value === "number" ? String(value) : value?.trim();
+}
+
+function getBusinessCentralCompanyLabel(company: BusinessCentralCompany) {
+  const displayName = company.displayName?.trim();
+  if (displayName) {
+    return displayName;
+  }
+
+  const name = company.name?.trim();
+  if (name) {
+    return name;
+  }
+
+  return company.id;
 }
 
 function runtimeFetch() {

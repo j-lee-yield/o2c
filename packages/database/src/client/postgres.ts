@@ -6,18 +6,19 @@ export interface PostgresCommandResult {
   stderr: string;
 }
 
-export function runPsqlCommand(
-  databaseUrl: string,
-  args: string[],
-): PostgresCommandResult {
+const postgresCommandMaxBufferBytes = 32 * 1024 * 1024;
+
+export function runPsqlCommand(databaseUrl: string, args: string[]): PostgresCommandResult {
   const result = spawnSync("psql", [databaseUrl, ...args], {
     encoding: "utf8",
+    maxBuffer: postgresCommandMaxBufferBytes
   });
+  const spawnError = result.error instanceof Error ? result.error.message : "";
 
   return {
-    status: result.status,
+    status: result.status ?? (spawnError ? 1 : null),
     stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
+    stderr: spawnError || result.stderr || ""
   };
 }
 

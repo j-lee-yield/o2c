@@ -53,7 +53,7 @@ import type {
   CreditFacilityListItem,
 } from "@o2c/contracts";
 import type { Principal } from "@o2c/auth";
-import type { Invoice } from "@o2c/domain";
+import type { Invoice, Task } from "@o2c/domain";
 import type { FastifyInstance } from "fastify";
 import { getApprovalQueueService } from "../bootstrap/approval-queue-service.js";
 import { getCashApplicationService } from "../bootstrap/cash-application-service.js";
@@ -76,10 +76,144 @@ import {
   loadSapBusinessOneInvoices,
 } from "../integrations/sap-business-one.js";
 
+interface OperatorConsoleTaskComposeAccount {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  parentAccountId: string;
+  branchId?: string;
+  accountNumber: string;
+  displayName: string;
+  currency: string;
+  accountTier: "standard" | "strategic";
+  status: "active" | "inactive";
+  centrallyPaid: boolean;
+  metadata: Record<string, unknown>;
+}
+
+interface OperatorConsoleTaskComposeContact {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  parentAccountId: string;
+  billingAccountId?: string;
+  branchId?: string;
+  invoiceId?: string;
+  scope: "parent_account" | "billing_account" | "branch" | "invoice";
+  scopeId: string;
+  fullName: string;
+  email?: string;
+  phone?: string;
+  role:
+    | "customer"
+    | "collector"
+    | "approver"
+    | "internal"
+    | "ap"
+    | "shared_finance"
+    | "treasury"
+    | "branch"
+    | "invoice";
+  isPrimary: boolean;
+  isVerified: boolean;
+  allowAutoSend: boolean;
+  recentSuccessfulResponses: number;
+  metadata: Record<string, unknown>;
+}
+
+interface OperatorConsoleTaskComposeInvoice {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  state:
+    | "uploaded_unmatched"
+    | "synced_open"
+    | "matched_to_erp"
+    | "partially_paid"
+    | "paid"
+    | "disputed_partial"
+    | "disputed_full"
+    | "credit_pending"
+    | "writeback_pending"
+    | "writeback_failed"
+    | "voided";
+  parentAccountId: string;
+  billingAccountId: string;
+  branchId?: string;
+  invoiceContactId?: string;
+  uploadedDocumentId?: string;
+  invoiceDate?: string;
+  invoiceNumber: string;
+  currency: string;
+  amountCents: number;
+  dueDate?: string;
+  disputedAmountCents?: number;
+  metadata: Record<string, unknown>;
+}
+
+interface OperatorConsoleTaskComposePayload {
+  scenario?: string;
+  account: OperatorConsoleTaskComposeAccount;
+  contact: OperatorConsoleTaskComposeContact;
+  invoices: OperatorConsoleTaskComposeInvoice[];
+}
+
+interface OperatorConsoleTaskEmailDraft {
+  subjectLine: string;
+  body: string;
+  generatedBy: "llm" | "fallback";
+  note: string;
+}
+
+interface OperatorConsoleTaskQueueItem {
+  id: string;
+  taskCode: string;
+  title: string;
+  relatedRecord?: string;
+  amountLabel: string;
+  type: "collection" | "cash_app" | "deduction" | "integration" | "credit_line";
+  customerName: string;
+  status: "open" | "in_progress" | "pending_approval" | "completed" | "closed";
+  priority: "high" | "medium" | "low";
+  assigneeName: string;
+  assigneeInitials: string;
+  createdAt?: string;
+  createdLabel: string;
+  dueDateLabel: string;
+  actionPath: string;
+  sourceLabel?: string;
+  brief?: string;
+  recommendedNextAction?: string;
+  transcriptSnippet?: string;
+  ownerTeam?: string;
+  openInvoiceCount?: number;
+  balanceLabel?: string;
+  overdueLabel?: string;
+  invoiceContextLabel?: string;
+  invoiceContextDetail?: string;
+  invoiceContextItems?: TaskInvoiceContextItem[];
+  callContextLabel?: string;
+  callContextHref?: string;
+  callContextDetail?: string;
+  replyAgingLabel?: string;
+  composeEmail?: {
+    account: OperatorConsoleTaskComposeAccount;
+    contact: OperatorConsoleTaskComposeContact;
+    invoices: OperatorConsoleTaskComposeInvoice[];
+    draft: OperatorConsoleTaskEmailDraft;
+  };
+}
+
+interface LlmDraftFetchResponse {
+  ok: boolean;
+  json(): Promise<unknown>;
+}
+
 export const registerOperatorConsoleRoutes = (app: FastifyInstance): void => {
   const runtime = getPilotReadinessRuntime();
   const reviewer: Principal = { id: "web_console", roles: ["controller", "ar_manager"] };
   const env = loadEnv();
+  const demoDataEnabled = resolveDemoDataEnabled(env.ENABLE_DEMO_DATA, env.NODE_ENV);
 
   app.get("/v1/operator-console", async () => {
     const snapshot = await runtime.getSnapshot();
@@ -123,68 +257,7 @@ export const registerOperatorConsoleRoutes = (app: FastifyInstance): void => {
       | { kind: "error"; message: string }
       | { kind: "not_configured" } = { kind: "not_configured" };
 
-    let collectionsQueue: OperatorConsoleResponse["collectionsQueue"] = [
-      {
-        id: "queue-makati",
-        accountReference: "billing_seed_1",
-        accountName: "Metro Retail Group - Makati",
-        accountTier: "Standard",
-        overdueAmount: formatCurrency(1_500_000),
-        promiseDue: "Today, 3:00 PM",
-        nextAction: "Confirm receipt and close promise if remittance arrives.",
-        rationale: "Invoice matched cleanly and the branch context is already preserved.",
-        contactName: "Maria Santos",
-        contactEmail: "maria.santos@sm.com.ph",
-        outstandingAmount: formatCurrency(3_245_000),
-        oldestInvoiceAge: "67 days",
-        averageAge: "Avg: 45d",
-        assignee: "Juan Cruz",
-        dueLabel: "Mar 29",
-        ...(learningScenarios["billing_seed_1"]?.collections
-          ? { learning: learningScenarios["billing_seed_1"].collections }
-          : {}),
-      },
-      {
-        id: "queue-strategic",
-        accountReference: "billing_seed_1",
-        accountName: "Metro Retail Group - Strategic Procurement",
-        accountTier: "Strategic",
-        overdueAmount: formatCurrency(2_450_000),
-        promiseDue: "Today, 5:30 PM",
-        nextAction: "Hold outreach until controller approves the strategic cash application.",
-        rationale: "Central payer behavior is active, but routing still stays on the billing account.",
-        contactName: "Roberto Lim",
-        contactEmail: "roberto.lim@puregold.com.ph",
-        outstandingAmount: formatCurrency(2_156_000),
-        oldestInvoiceAge: "52 days",
-        averageAge: "Avg: 38d",
-        assignee: "Ana Reyes",
-        dueLabel: "Mar 29",
-        ...(learningScenarios["billing_seed_1"]?.collections
-          ? { learning: learningScenarios["billing_seed_1"].collections }
-          : {}),
-      },
-      {
-        id: "queue-northpoint",
-        accountReference: "billing_sparse_demo",
-        accountName: "Northpoint Wholesale - Manila",
-        accountTier: "Standard",
-        overdueAmount: formatCurrency(875_000),
-        promiseDue: "No promise logged",
-        nextAction: "Call treasury contact to identify the payer before any application attempt.",
-        rationale: "Unknown payer remains unapplied by policy.",
-        contactName: "Catherine Tan",
-        contactEmail: "c.tan@robinsons.com.ph",
-        outstandingAmount: formatCurrency(1_876_000),
-        oldestInvoiceAge: "38 days",
-        averageAge: "Avg: 35d",
-        assignee: "Juan Cruz",
-        dueLabel: "Mar 29",
-        ...(learningScenarios["billing_sparse_demo"]?.collections
-          ? { learning: learningScenarios["billing_sparse_demo"].collections }
-          : {}),
-      },
-    ];
+    let collectionsQueue: OperatorConsoleResponse["collectionsQueue"] = [];
 
     collectionsQueue = hydrateCollectionsQueueWithPersistedLearning({
       collectionsQueue,
@@ -686,8 +759,9 @@ export const registerOperatorConsoleRoutes = (app: FastifyInstance): void => {
     const loanRepaymentHistory = buildLoanRepaymentHistory();
     const loanAlerts = buildLoanAlerts();
     const loanTasks = buildLoanTasks();
+    const taskQueue = await buildTaskQueue(firstClassTasks);
 
-    const response: OperatorConsoleResponse = {
+    const response: OperatorConsoleResponse & { taskQueue: OperatorConsoleTaskQueueItem[] } = {
       generatedAt: snapshot.generatedAt,
       commandCenterSource: {
         kind: "live",
@@ -731,6 +805,7 @@ export const registerOperatorConsoleRoutes = (app: FastifyInstance): void => {
       loanRepaymentHistory,
       loanAlerts,
       loanTasks,
+      taskQueue,
       exceptionsQueue,
       approvalsQueue,
       aiFeed,
@@ -802,9 +877,130 @@ export const registerOperatorConsoleRoutes = (app: FastifyInstance): void => {
       },
     };
 
-    return response;
+    return demoDataEnabled ? response : suppressDemoOperationalResponse(response);
   });
 };
+
+function suppressDemoOperationalResponse(
+  response: OperatorConsoleResponse & { taskQueue: OperatorConsoleTaskQueueItem[] },
+): OperatorConsoleResponse & { taskQueue: OperatorConsoleTaskQueueItem[] } {
+  const invoiceIndex =
+    response.invoiceIndex.source.kind === "seeded"
+      ? {
+          ...response.invoiceIndex,
+          source: {
+            kind: "live" as const,
+            label: "No live invoice data",
+            detail: "Demo invoice data is disabled for normal runtime.",
+          },
+          summary: {
+            totalInvoices: 0,
+            totalAmountCents: 0,
+            openAmountCents: 0,
+            openInvoiceCount: 0,
+            overdueInvoiceCount: 0,
+            disputedInvoiceCount: 0,
+            paidInvoiceCount: 0,
+            connectedProviderCount: 0,
+          },
+          providers: [],
+          statuses: [],
+          invoices: [],
+        }
+      : response.invoiceIndex;
+  const hasLiveInvoiceRows =
+    response.invoiceIndex.source.kind !== "seeded" && invoiceIndex.invoices.length > 0;
+
+  return {
+    ...response,
+    commandCenterSource: hasLiveInvoiceRows
+      ? response.commandCenterSource
+      : {
+          kind: "stub",
+          label: "No operational data loaded",
+          detail: "Demo data is disabled. Connect ERP, email, and task integrations to populate the console.",
+        },
+    approvalsFallbackActive: false,
+    invoiceIndex,
+    metrics: hasLiveInvoiceRows
+      ? response.metrics
+      : response.metrics.map((metric) => ({
+          ...metric,
+          value: "0",
+          detail: "No live operational data loaded.",
+        })),
+    actionSummaries: hasLiveInvoiceRows ? response.actionSummaries : [],
+    dashboardSummaryCards: hasLiveInvoiceRows ? response.dashboardSummaryCards : [],
+    homeTaskSummary: hasLiveInvoiceRows
+      ? response.homeTaskSummary
+      : {
+          ...response.homeTaskSummary,
+          views: response.homeTaskSummary.views.map((view) => ({ ...view, totalCount: 0, items: [] })),
+        },
+    homeCollectionsMetrics: hasLiveInvoiceRows
+      ? response.homeCollectionsMetrics
+      : {
+          ...response.homeCollectionsMetrics,
+          outreachActivityCount: 0,
+          collectedAmountCents: 0,
+          automatedTaskCount: 0,
+          totalCollectedAmountCents: 0,
+        },
+    homeSnapshotMetrics: hasLiveInvoiceRows
+      ? response.homeSnapshotMetrics
+      : {
+          ...response.homeSnapshotMetrics,
+          openInvoiceCount: 0,
+          outstandingBalanceCents: 0,
+          overdueInvoiceCount: 0,
+          overdueBalanceCents: 0,
+        },
+    homeAgingBalance: hasLiveInvoiceRows
+      ? response.homeAgingBalance
+      : {
+          ...response.homeAgingBalance,
+          buckets: response.homeAgingBalance.buckets.map((bucket) => ({
+            ...bucket,
+            openAmountCents: 0,
+            invoiceCount: 0,
+          })),
+        },
+    customerIndex: hasLiveInvoiceRows ? response.customerIndex : [],
+    accountProfileSummaries: hasLiveInvoiceRows ? response.accountProfileSummaries : [],
+    nextActionSummaryCards: hasLiveInvoiceRows ? response.nextActionSummaryCards : [],
+    collectionsQueue: hasLiveInvoiceRows ? response.collectionsQueue : [],
+    paymentsQueue: [],
+    loanDashboard: {
+      ...response.loanDashboard,
+      totalCommittedLimitCents: 0,
+      totalOutstandingCents: 0,
+      totalAvailableCents: 0,
+      dueThisWeekCents: 0,
+      overdueCents: 0,
+      facilityCount: 0,
+      facilitiesInArrearsCount: 0,
+      alertCount: 0,
+      taskCount: 0,
+    },
+    creditFacilities: [],
+    loanRepaymentHistory: [],
+    loanAlerts: [],
+    loanTasks: [],
+    taskQueue: response.taskQueue,
+    exceptionsQueue: [],
+    approvalsQueue: [],
+    aiFeed: [],
+    exceptionBreakdown: [],
+    screenStates: {
+      ...response.screenStates,
+      approvalsEmpty: {
+        kind: "empty",
+        title: "No live approvals",
+        message: "Demo approvals are hidden in normal runtime.",
+      },
+    },
+  };
+}
 
 type PersistedLinkedStatusRow = {
   invoicesWithLinkedPaymentsCount: number;
@@ -828,6 +1024,976 @@ function buildDashboardSummaryCards(metrics: MetricTile[]): DashboardSummaryCard
     metricToCard(metrics, "Unapplied cash", "unapplied_cash", "info", "Review payments", "/cash-app"),
     metricToCard(metrics, "Approvals pending", "approvals_pending", "violet", "Review approvals", "/approvals"),
   ];
+}
+
+async function buildTaskQueue(
+  tasks: Awaited<ReturnType<Awaited<ReturnType<typeof getTaskService>>["list"]>>,
+): Promise<OperatorConsoleTaskQueueItem[]> {
+  const env = loadEnv();
+  const accountNameById = loadTaskBillingAccountNames(
+    env.DATABASE_URL,
+    env.DEFAULT_TENANT_SLUG,
+    tasks,
+  );
+  const invoiceContextByTaskId = loadTaskInvoiceContexts(
+    env.DATABASE_URL,
+    env.DEFAULT_TENANT_SLUG,
+    tasks,
+  );
+  const callContextByProviderId = loadTaskCallContexts(
+    env.DATABASE_URL,
+    env.DEFAULT_TENANT_SLUG,
+    tasks,
+  );
+  const queueItems = await Promise.all(
+    tasks
+      .filter((task) => task.status !== "dismissed" && task.status !== "deleted")
+      .map(async (task) => {
+        const rawComposeEmail = readComposeEmailPayload(task.metadata);
+        const composeEmail = rawComposeEmail
+          ? {
+              ...rawComposeEmail,
+              invoices: hydrateTaskComposeInvoices(
+                env.DATABASE_URL,
+                env.DEFAULT_TENANT_SLUG,
+                rawComposeEmail.invoices,
+              ),
+            }
+          : undefined;
+        const providerCallId = readString(task.metadata, "providerCallId") ?? task.callId;
+        const callContext = providerCallId
+          ? callContextByProviderId.get(providerCallId) ?? buildFallbackTaskCallContext(providerCallId)
+          : undefined;
+        const invoiceContext = composeEmail
+          ? buildTaskInvoiceContextFromComposeInvoices(composeEmail.invoices)
+          : invoiceContextByTaskId.get(task.id) ?? callContext?.invoiceContext;
+        const amountCents = composeEmail
+          ? composeEmail.invoices.reduce((sum, invoice) => sum + invoice.amountCents, 0)
+          : invoiceContext?.balanceCents ?? readNumber(task.metadata, "amountCents");
+        const overdueAmountCents = composeEmail
+          ? composeEmail.invoices
+              .filter((invoice) => isPastDueInvoice(invoice.dueDate))
+              .reduce((sum, invoice) => sum + invoice.amountCents, 0)
+          : invoiceContext?.overdueCents ?? readNumber(task.metadata, "overdueAmountCents");
+        const priority = readPriority(task);
+        const assigneeName =
+          task.ownerId === "web_console"
+            ? "You"
+            : task.ownerId
+              ? humanizeIdentifier(task.ownerId)
+              : task.origin === "workflow_generated"
+                ? "Automation"
+                : "Unassigned";
+        const relatedRecord =
+          readString(task.metadata, "relatedRecord") ??
+          invoiceContext?.label ??
+          composeEmail?.invoices.map((invoice) => invoice.invoiceNumber).join(", ");
+        const replyAgingLabel = readReplyAgingLabel(task.metadata);
+        const draft = composeEmail
+          ? await generateTaskEmailDraft({
+              taskTitle: task.title,
+              account: composeEmail.account,
+              contact: composeEmail.contact,
+              invoices: composeEmail.invoices,
+            })
+          : undefined;
+        const brief = buildOperatorTaskBrief(task);
+
+        return {
+          id: task.id,
+          taskCode: toTaskCode(task.id),
+          title: task.title,
+          ...(relatedRecord ? { relatedRecord } : {}),
+          amountLabel:
+            amountCents !== undefined && amountCents > 0 ? formatCurrency(amountCents) : "—",
+          type: mapTaskType(task),
+          customerName:
+            composeEmail?.account.displayName ??
+            readString(task.metadata, "customerName") ??
+            (task.billingAccountId ? accountNameById.get(task.billingAccountId) : undefined) ??
+            task.billingAccountId ??
+            "—",
+          status: mapOperatorTaskStatus(task.status),
+          priority,
+          assigneeName,
+          assigneeInitials: buildInitials(assigneeName),
+          createdAt: task.createdAt,
+          createdLabel: formatDateTimeLabel(task.createdAt),
+          dueDateLabel: task.dueAt ? formatDateTimeLabel(task.dueAt) : "—",
+          actionPath: composeEmail ? `/tasks#task-detail-${task.id}` : "/tasks",
+          sourceLabel: buildTaskSourceLabel(task, composeEmail, callContext),
+          ...(brief ? { brief } : {}),
+          ...(task.recommendedNextAction ? { recommendedNextAction: task.recommendedNextAction } : {}),
+          ...(task.transcriptSnippet ? { transcriptSnippet: task.transcriptSnippet } : {}),
+          ...(task.ownerTeam ? { ownerTeam: humanizeIdentifier(task.ownerTeam) } : {}),
+          ...(invoiceContext ? { openInvoiceCount: invoiceContext.invoiceCount } : {}),
+          ...(amountCents !== undefined && amountCents > 0
+            ? { balanceLabel: formatCurrency(amountCents) }
+            : {}),
+          ...(overdueAmountCents !== undefined && overdueAmountCents > 0
+            ? { overdueLabel: formatCurrency(overdueAmountCents) }
+            : {}),
+          ...(invoiceContext ? { invoiceContextLabel: invoiceContext.label } : {}),
+          ...(invoiceContext?.detail ? { invoiceContextDetail: invoiceContext.detail } : {}),
+          ...(invoiceContext?.items ? { invoiceContextItems: invoiceContext.items } : {}),
+          ...(callContext ? { callContextLabel: callContext.label } : {}),
+          ...(callContext?.href ? { callContextHref: callContext.href } : {}),
+          ...(callContext?.detail ? { callContextDetail: callContext.detail } : {}),
+          ...(replyAgingLabel ? { replyAgingLabel } : {}),
+          ...(composeEmail && draft
+            ? {
+                composeEmail: {
+                  account: composeEmail.account,
+                  contact: composeEmail.contact,
+                  invoices: composeEmail.invoices,
+                  draft,
+                },
+              }
+            : {}),
+        } satisfies OperatorConsoleTaskQueueItem;
+      }),
+  );
+
+  return queueItems.sort(compareTaskQueueItems);
+}
+
+interface TaskInvoiceContext {
+  invoiceCount: number;
+  label: string;
+  detail?: string;
+  items?: TaskInvoiceContextItem[];
+  balanceCents?: number;
+  overdueCents?: number;
+}
+
+interface TaskInvoiceContextItem {
+  invoiceNumber: string;
+  amountLabel?: string;
+  dueDateLabel?: string;
+  statusLabel?: string;
+}
+
+interface TaskCallContext {
+  providerCallId: string;
+  label: string;
+  href?: string;
+  detail?: string;
+  invoiceContext?: TaskInvoiceContext;
+}
+
+interface TaskCallInvoiceRef {
+  invoiceId?: string;
+  invoiceNumber?: string;
+  amountCents?: number;
+  currency?: string;
+}
+
+function loadTaskBillingAccountNames(
+  databaseUrl: string,
+  tenantId: string,
+  tasks: Array<{ billingAccountId?: string; metadata: Record<string, unknown> }>,
+): Map<string, string> {
+  const billingAccountIds = uniqueStrings(
+    tasks
+      .map((task) => task.billingAccountId)
+      .filter((value): value is string => typeof value === "string" && isUuid(value)),
+  );
+  if (billingAccountIds.length === 0) {
+    return new Map();
+  }
+
+  try {
+    const rows = queryJsonRows<{ id: string; displayName: string }>(
+      databaseUrl,
+      `
+        SELECT row_to_json(q)
+        FROM (
+          SELECT id::text AS id, display_name AS "displayName"
+          FROM billing_account
+          WHERE tenant_id = '${quoteLiteral(tenantId)}'
+            AND deleted_at IS NULL
+            AND id IN (${billingAccountIds.map((id) => `'${quoteLiteral(id)}'::uuid`).join(", ")})
+        ) q;
+      `,
+    );
+    return new Map(rows.map((row) => [row.id, row.displayName]));
+  } catch {
+    return new Map();
+  }
+}
+
+function loadTaskInvoiceContexts(
+  databaseUrl: string,
+  tenantId: string,
+  tasks: Array<{
+    id: string;
+    linkedInvoiceIds?: string[];
+    metadata: Record<string, unknown>;
+  }>,
+): Map<string, TaskInvoiceContext> {
+  const invoiceIds = uniqueStrings(
+    tasks
+      .flatMap((task) => task.linkedInvoiceIds ?? readStringArray(task.metadata.linkedInvoiceIds))
+      .filter((value) => isUuid(value)),
+  );
+  if (invoiceIds.length === 0) {
+    return new Map();
+  }
+
+  try {
+    const rows = queryJsonRows<{
+      id: string;
+      invoiceNumber: string;
+      dueDate?: string;
+      currency: string;
+      amountCents: number;
+      collectibleAmountCents?: number;
+      metadata?: Record<string, unknown>;
+    }>(
+      databaseUrl,
+      `
+        SELECT row_to_json(q)
+        FROM (
+          SELECT
+            id::text AS id,
+            invoice_number AS "invoiceNumber",
+            due_date::text AS "dueDate",
+            currency,
+            amount_cents::integer AS "amountCents",
+            collectible_amount_cents::integer AS "collectibleAmountCents",
+            COALESCE(metadata, '{}'::jsonb) AS metadata
+          FROM invoice
+          WHERE tenant_id = '${quoteLiteral(tenantId)}'
+            AND deleted_at IS NULL
+            AND id IN (${invoiceIds.map((id) => `'${quoteLiteral(id)}'::uuid`).join(", ")})
+        ) q;
+      `,
+    );
+    const invoiceById = new Map(rows.map((row) => [row.id, row]));
+    const contexts = new Map<string, TaskInvoiceContext>();
+    for (const task of tasks) {
+      const taskInvoiceIds = uniqueStrings(
+        [
+          ...(task.linkedInvoiceIds ?? []),
+          ...readStringArray(task.metadata.linkedInvoiceIds),
+        ].filter((value) => isUuid(value)),
+      );
+      const invoices = taskInvoiceIds
+        .map((invoiceId) => invoiceById.get(invoiceId))
+        .filter((invoice): invoice is NonNullable<typeof invoice> => Boolean(invoice));
+      if (invoices.length === 0) {
+        continue;
+      }
+      contexts.set(task.id, buildTaskInvoiceContextFromRows(invoices));
+    }
+    return contexts;
+  } catch {
+    return new Map();
+  }
+}
+
+function loadTaskCallContexts(
+  databaseUrl: string,
+  tenantId: string,
+  tasks: Array<{ callId?: string; metadata: Record<string, unknown> }>,
+): Map<string, TaskCallContext> {
+  const providerCallIds = uniqueStrings(
+    tasks
+      .map((task) => readString(task.metadata, "providerCallId") ?? task.callId)
+      .filter((value): value is string => Boolean(value)),
+  );
+  if (providerCallIds.length === 0) {
+    return new Map();
+  }
+
+  try {
+    const rows = queryJsonRows<{
+      id: string;
+      providerCallId: string;
+      customerName: string;
+      startedAt?: string;
+      summary?: string;
+      invoiceRefs?: TaskCallInvoiceRef[];
+    }>(
+      databaseUrl,
+      `
+        SELECT row_to_json(q)
+        FROM (
+          SELECT
+            id::text AS id,
+            provider_call_id AS "providerCallId",
+            customer_name AS "customerName",
+            started_at::text AS "startedAt",
+            summary,
+            invoice_refs AS "invoiceRefs"
+          FROM call_inbox_record
+          WHERE tenant_id = '${quoteLiteral(tenantId)}'
+            AND deleted_at IS NULL
+            AND provider_call_id IN (${providerCallIds.map((id) => `'${quoteLiteral(id)}'`).join(", ")})
+        ) q;
+      `,
+    );
+    return new Map(
+      rows.map((row) => {
+        const invoiceContext = buildTaskInvoiceContextFromCallRefs(row.invoiceRefs ?? []);
+        return [
+          row.providerCallId,
+          {
+            providerCallId: row.providerCallId,
+            label: `Retell call ${shortIdentifier(row.providerCallId)}`,
+            href: `/collections?tab=call-inbox#call-detail-${row.id}`,
+            detail: [
+              row.customerName,
+              row.startedAt ? formatDateTimeLabel(row.startedAt) : undefined,
+              row.summary ? truncateText(row.summary, 160) : undefined,
+            ].filter(Boolean).join(" · "),
+            ...(invoiceContext ? { invoiceContext } : {}),
+          },
+        ] as const;
+      }),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function buildFallbackTaskCallContext(providerCallId: string): TaskCallContext {
+  return {
+    providerCallId,
+    label: `Retell call ${shortIdentifier(providerCallId)}`,
+    href: "/collections?tab=call-inbox",
+    detail: providerCallId,
+  };
+}
+
+function buildTaskInvoiceContextFromComposeInvoices(
+  invoices: OperatorConsoleTaskComposeInvoice[],
+): TaskInvoiceContext | undefined {
+  if (invoices.length === 0) {
+    return undefined;
+  }
+
+  return {
+    invoiceCount: invoices.length,
+    label: formatInvoiceNumberList(invoices.map((invoice) => invoice.invoiceNumber)),
+    items: invoices.map((invoice) => ({
+      invoiceNumber: invoice.invoiceNumber,
+      amountLabel: formatCurrency(invoice.amountCents),
+      ...(invoice.dueDate ? { dueDateLabel: formatDateLabel(invoice.dueDate) } : {}),
+      statusLabel: humanizeIdentifier(invoice.state),
+    })),
+    detail: invoices
+      .map((invoice) => `${invoice.invoiceNumber}: ${formatCurrency(invoice.amountCents)}${invoice.dueDate ? ` due ${formatDateLabel(invoice.dueDate)}` : ""}`)
+      .join("; "),
+    balanceCents: invoices.reduce((sum, invoice) => sum + invoice.amountCents, 0),
+    overdueCents: invoices
+      .filter((invoice) => isPastDueInvoice(invoice.dueDate))
+      .reduce((sum, invoice) => sum + invoice.amountCents, 0),
+  };
+}
+
+function buildTaskInvoiceContextFromCallRefs(
+  invoiceRefs: TaskCallInvoiceRef[],
+): TaskInvoiceContext | undefined {
+  const normalizedRefs: Array<{ invoiceNumber: string; amountCents?: number }> = [];
+  for (const invoiceRef of invoiceRefs) {
+    const invoiceNumber = invoiceRef.invoiceNumber?.trim();
+    if (!invoiceNumber) {
+      continue;
+    }
+    const amountCents = typeof invoiceRef.amountCents === "number" ? invoiceRef.amountCents : undefined;
+    normalizedRefs.push({
+      invoiceNumber,
+      ...(amountCents !== undefined ? { amountCents } : {}),
+    });
+  }
+  if (normalizedRefs.length === 0) {
+    return undefined;
+  }
+
+  const balanceCents = normalizedRefs.reduce(
+    (sum, invoiceRef) => sum + (invoiceRef.amountCents ?? 0),
+    0,
+  );
+
+  return {
+    invoiceCount: normalizedRefs.length,
+    label: formatInvoiceNumberList(normalizedRefs.map((invoiceRef) => invoiceRef.invoiceNumber)),
+    items: normalizedRefs.map((invoiceRef) => ({
+      invoiceNumber: invoiceRef.invoiceNumber,
+      ...(invoiceRef.amountCents !== undefined
+        ? { amountLabel: formatCurrency(invoiceRef.amountCents) }
+        : {}),
+    })),
+    detail: normalizedRefs
+      .map((invoiceRef) =>
+        invoiceRef.amountCents !== undefined
+          ? `${invoiceRef.invoiceNumber}: ${formatCurrency(invoiceRef.amountCents)}`
+          : invoiceRef.invoiceNumber,
+      )
+      .join("; "),
+    ...(balanceCents > 0 ? { balanceCents } : {}),
+  };
+}
+
+function buildTaskInvoiceContextFromRows(
+  invoices: Array<{
+    invoiceNumber: string;
+    dueDate?: string;
+    amountCents: number;
+    collectibleAmountCents?: number;
+    metadata?: Record<string, unknown>;
+  }>,
+): TaskInvoiceContext {
+  const balanceCents = invoices.reduce(
+    (sum, invoice) => sum + readTaskInvoiceOpenAmountCents(invoice),
+    0,
+  );
+  const overdueCents = invoices
+    .filter((invoice) => isPastDueInvoice(invoice.dueDate))
+    .reduce((sum, invoice) => sum + readTaskInvoiceOpenAmountCents(invoice), 0);
+
+  return {
+    invoiceCount: invoices.length,
+    label: formatInvoiceNumberList(invoices.map((invoice) => invoice.invoiceNumber)),
+    items: invoices.map((invoice) => ({
+      invoiceNumber: invoice.invoiceNumber,
+      amountLabel: formatCurrency(readTaskInvoiceOpenAmountCents(invoice)),
+      ...(invoice.dueDate ? { dueDateLabel: formatDateLabel(invoice.dueDate) } : {}),
+    })),
+    detail: invoices
+      .map((invoice) => `${invoice.invoiceNumber}: ${formatCurrency(readTaskInvoiceOpenAmountCents(invoice))}${invoice.dueDate ? ` due ${formatDateLabel(invoice.dueDate)}` : ""}`)
+      .join("; "),
+    balanceCents,
+    overdueCents,
+  };
+}
+
+function readTaskInvoiceOpenAmountCents(invoice: {
+  amountCents: number;
+  collectibleAmountCents?: number;
+  metadata?: Record<string, unknown>;
+}) {
+  const metadataOpenAmount = readNumber(invoice.metadata ?? {}, "openAmountCents");
+  if (metadataOpenAmount !== undefined) {
+    return metadataOpenAmount;
+  }
+  return invoice.collectibleAmountCents ?? invoice.amountCents;
+}
+
+function formatInvoiceNumberList(invoiceNumbers: string[]) {
+  const uniqueInvoiceNumbers = uniqueStrings(invoiceNumbers);
+  if (uniqueInvoiceNumbers.length <= 3) {
+    return uniqueInvoiceNumbers.join(", ");
+  }
+  return `${uniqueInvoiceNumbers.slice(0, 3).join(", ")} + ${uniqueInvoiceNumbers.length - 3} more`;
+}
+
+function hydrateTaskComposeInvoices(
+  databaseUrl: string,
+  tenantId: string,
+  invoices: OperatorConsoleTaskComposeInvoice[],
+): OperatorConsoleTaskComposeInvoice[] {
+  if (invoices.length === 0) {
+    return invoices;
+  }
+
+  try {
+    const queryableInvoices = invoices.filter((invoice) => isUuid(invoice.id));
+    if (queryableInvoices.length === 0) {
+      return invoices;
+    }
+
+    const rows = queryJsonRows<{
+      id: string;
+      uploadedDocumentId?: string;
+      uploadedDocumentFileName?: string;
+      uploadedDocumentMimeType?: string;
+      metadata?: Record<string, unknown>;
+    }>(
+      databaseUrl,
+      `
+        SELECT row_to_json(q)
+        FROM (
+          SELECT
+            invoice.id::text AS id,
+            invoice.uploaded_document_id::text AS "uploadedDocumentId",
+            uploaded_document.metadata->>'fileName' AS "uploadedDocumentFileName",
+            uploaded_document.metadata->>'mimeType' AS "uploadedDocumentMimeType",
+            COALESCE(invoice.metadata, '{}'::jsonb) AS metadata
+          FROM invoice
+          LEFT JOIN uploaded_document
+            ON uploaded_document.id = invoice.uploaded_document_id
+           AND uploaded_document.deleted_at IS NULL
+          WHERE invoice.tenant_id = '${quoteLiteral(tenantId)}'
+            AND invoice.deleted_at IS NULL
+            AND invoice.id IN (${queryableInvoices.map((invoice) => `'${quoteLiteral(invoice.id)}'::uuid`).join(", ")})
+        ) q;
+      `,
+    );
+    const rowById = new Map(rows.map((row) => [row.id, row]));
+
+    return invoices.map((invoice) => {
+      const persisted = rowById.get(invoice.id);
+      if (!persisted) {
+        return invoice;
+      }
+
+      return {
+        ...invoice,
+        ...(persisted.uploadedDocumentId
+          ? { uploadedDocumentId: persisted.uploadedDocumentId }
+          : {}),
+        metadata: {
+          ...invoice.metadata,
+          ...(persisted.metadata ?? {}),
+          ...(persisted.uploadedDocumentFileName
+            ? { physicalInvoiceFileName: persisted.uploadedDocumentFileName }
+            : {}),
+          ...(persisted.uploadedDocumentMimeType
+            ? { physicalInvoiceMimeType: persisted.uploadedDocumentMimeType }
+            : {}),
+        },
+      };
+    });
+  } catch {
+    return invoices;
+  }
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+async function generateTaskEmailDraft(input: {
+  taskTitle: string;
+  account: OperatorConsoleTaskComposeAccount;
+  contact: OperatorConsoleTaskComposeContact;
+  invoices: OperatorConsoleTaskComposeInvoice[];
+}): Promise<OperatorConsoleTaskEmailDraft> {
+  const fallback = buildFallbackTaskEmailDraft(input);
+  const env = loadEnv() as ReturnType<typeof loadEnv> & {
+    OPENAI_API_KEY?: string;
+    OUTREACH_EMAIL_DRAFT_MODEL?: string;
+  };
+  const apiKey = env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    return {
+      ...fallback,
+      generatedBy: "fallback",
+      note: "OpenAI API key is not configured, so this draft is using the local safe fallback.",
+    };
+  }
+
+  try {
+    const response = (await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: env.OUTREACH_EMAIL_DRAFT_MODEL?.trim() || "gpt-4.1-mini",
+        input: [
+          {
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  "Draft one concise B2B collections follow-up email. Keep it polite, specific, and safe. Do not threaten, do not claim payment has not happened with certainty, and do not mention discounts or settlements. Return JSON with keys subjectLine and body.",
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: JSON.stringify({
+                  taskTitle: input.taskTitle,
+                  customerName: input.account.displayName,
+                  contactName: input.contact.fullName,
+                  currency: input.account.currency,
+                  invoices: input.invoices.map((invoice) => ({
+                    invoiceNumber: invoice.invoiceNumber,
+                    amountCents: invoice.amountCents,
+                    dueDate: invoice.dueDate,
+                  })),
+                }),
+              },
+            ],
+          },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "task_follow_up_email",
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["subjectLine", "body"],
+              properties: {
+                subjectLine: { type: "string" },
+                body: { type: "string" },
+              },
+            },
+          },
+        },
+      }),
+    })) as LlmDraftFetchResponse;
+
+    if (!response.ok) {
+      return {
+        ...fallback,
+        generatedBy: "fallback",
+        note: "The LLM draft request failed, so this draft is using the local safe fallback.",
+      };
+    }
+
+    const payload = (await response.json()) as {
+      output_text?: string;
+    };
+    const parsed = payload.output_text ? safeParseJson(payload.output_text) : undefined;
+    const subjectLine =
+      parsed && typeof parsed.subjectLine === "string" && parsed.subjectLine.trim().length > 0
+        ? parsed.subjectLine.trim()
+        : fallback.subjectLine;
+    const body =
+      parsed && typeof parsed.body === "string" && parsed.body.trim().length > 0
+        ? parsed.body.trim()
+        : fallback.body;
+
+    return {
+      subjectLine,
+      body,
+      generatedBy: "llm",
+      note: "Draft generated with the configured LLM.",
+    };
+  } catch {
+    return {
+      ...fallback,
+      generatedBy: "fallback",
+      note: "The LLM draft request failed, so this draft is using the local safe fallback.",
+    };
+  }
+}
+
+function buildFallbackTaskEmailDraft(input: {
+  taskTitle: string;
+  account: OperatorConsoleTaskComposeAccount;
+  contact: OperatorConsoleTaskComposeContact;
+  invoices: OperatorConsoleTaskComposeInvoice[];
+}): Omit<OperatorConsoleTaskEmailDraft, "generatedBy" | "note"> {
+  const totalAmountCents = input.invoices.reduce((sum, invoice) => sum + invoice.amountCents, 0);
+  const invoiceList = input.invoices
+    .map(
+      (invoice) =>
+        `- ${invoice.invoiceNumber}: ${formatCurrency(invoice.amountCents)} due ${invoice.dueDate ?? "soon"}`,
+    )
+    .join("\n");
+
+  return {
+    subjectLine: `Follow-up on overdue invoices for ${input.account.displayName}`,
+    body: [
+      `Hi ${input.contact.fullName},`,
+      "",
+      `I wanted to follow up on the overdue invoices currently outstanding on your account with us. As of today, we have ${formatCurrency(totalAmountCents)} across the items below:`,
+      "",
+      invoiceList,
+      "",
+      "Could you please let us know the expected payment timing for these invoices? If payment has already been arranged, feel free to share the remittance reference so we can review it on our side.",
+      "",
+      "Thank you,",
+      "Yield AROS Collections",
+    ].join("\n"),
+  };
+}
+
+function readComposeEmailPayload(
+  metadata: Record<string, unknown>,
+): OperatorConsoleTaskComposePayload | undefined {
+  const raw = metadata.composeEmail;
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+
+  const payload = raw as Record<string, unknown>;
+  const account = payload.account;
+  const contact = payload.contact;
+  const invoices = payload.invoices;
+  if (!account || typeof account !== "object" || !contact || typeof contact !== "object") {
+    return undefined;
+  }
+  if (!Array.isArray(invoices) || invoices.length === 0) {
+    return undefined;
+  }
+
+  return {
+    ...(typeof payload.scenario === "string" ? { scenario: payload.scenario } : {}),
+    account: account as OperatorConsoleTaskComposeAccount,
+    contact: contact as OperatorConsoleTaskComposeContact,
+    invoices: invoices as OperatorConsoleTaskComposeInvoice[],
+  };
+}
+
+function mapTaskType(task: {
+  surfaces: string[];
+  kind: string;
+}): OperatorConsoleTaskQueueItem["type"] {
+  if (task.surfaces.includes("cash_app")) {
+    return "cash_app";
+  }
+  if (task.surfaces.includes("deductions")) {
+    return "deduction";
+  }
+  if (task.surfaces.includes("org_credit_line")) {
+    return "credit_line";
+  }
+  if (task.kind.includes("integration")) {
+    return "integration";
+  }
+  return "collection";
+}
+
+function mapOperatorTaskStatus(taskStatus: Task["status"]): OperatorConsoleTaskQueueItem["status"] {
+  if (taskStatus === "completed" || taskStatus === "closed") {
+    return taskStatus;
+  }
+  return "open";
+}
+
+function buildOperatorTaskBrief(task: Task): string | undefined {
+  return (
+    normalizeOperatorTaskBrief(task.summary, task.kind) ??
+    normalizeOperatorTaskBrief(task.description, task.kind) ??
+    normalizeOperatorTaskBrief(task.recommendedNextAction, task.kind)
+  );
+}
+
+function normalizeOperatorTaskBrief(value: string | undefined, taskKind?: string): string | undefined {
+  const normalized = value
+    ?.replace(/\s+/g, " ")
+    .replace(/before changing receivable state/gi, "before changing invoice status")
+    .trim();
+  if (!normalized || startsWithSourceContext(normalized)) {
+    return undefined;
+  }
+
+  const lower = normalized.toLowerCase();
+  if (
+    taskKind === "payment_collection_follow_up" &&
+    (lower.includes("payment was already made") || lower.includes("already paid") || lower.includes("paid already"))
+  ) {
+    return "Customer said payment was already made; verify remittance or payment evidence before changing invoice status.";
+  }
+
+  const withoutSourceSections = stripSourceContextSections(normalized);
+  if (!withoutSourceSections || startsWithSourceContext(withoutSourceSections)) {
+    return undefined;
+  }
+
+  return ensureSentence(withoutSourceSections);
+}
+
+function stripSourceContextSections(value: string) {
+  const markers = [
+    " Scope:",
+    " Recommended next action:",
+    " Created from ",
+    " Created from:",
+    " Call note:",
+    " Call summary:",
+    " Transcript:",
+    " Raw transcript:",
+    " Source context:",
+    " Internal source details:",
+  ];
+  const searchable = ` ${value.toLowerCase()}`;
+  let end = value.length;
+  for (const marker of markers) {
+    const index = searchable.indexOf(marker.toLowerCase());
+    if (index >= 0) {
+      end = Math.min(end, Math.max(0, index - 1));
+    }
+  }
+  return value.slice(0, end).trim();
+}
+
+function startsWithSourceContext(value: string) {
+  return /^(?:scope|recommended next action|created from|call note|call summary|transcript|raw transcript|source context|internal source details):/i.test(value);
+}
+
+function ensureSentence(value: string) {
+  return /[.!?]$/.test(value) ? value : `${value}.`;
+}
+
+function buildTaskSourceLabel(
+  task: Task,
+  composeEmail: OperatorConsoleTaskComposePayload | undefined,
+  callContext: TaskCallContext | undefined,
+) {
+  const source = task.source ?? readString(task.metadata, "source");
+  if (callContext || source?.includes("retell")) {
+    return "Retell call";
+  }
+  if (composeEmail) {
+    return "Collections email";
+  }
+  if (task.origin === "manual") {
+    return "Manual";
+  }
+  if (task.origin === "workflow_generated") {
+    return "Workflow";
+  }
+  if (task.origin === "ai_generated") {
+    return "AI";
+  }
+  return "System";
+}
+
+function readPriority(task: Task): OperatorConsoleTaskQueueItem["priority"] {
+  const raw = task.priority ?? readString(task.metadata, "priority");
+  if (raw === "critical") {
+    return "high";
+  }
+  return raw === "low" || raw === "medium" || raw === "high" ? raw : "medium";
+}
+
+function toTaskCode(taskId: string): string {
+  const cleaned = taskId.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  return `TSK-${cleaned.slice(-6).padStart(6, "0")}`;
+}
+
+function buildInitials(value: string): string {
+  const initials = value
+    .split(/\s+/)
+    .filter((part) => part.length > 0)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+  return initials || "O";
+}
+
+function formatDateLabel(value: string): string {
+  return new Intl.DateTimeFormat("en-PH", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "Asia/Manila",
+  }).format(new Date(value));
+}
+
+function formatDateTimeLabel(value: string): string {
+  return new Intl.DateTimeFormat("en-PH", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Asia/Manila",
+  }).format(new Date(value));
+}
+
+function humanizeIdentifier(value: string): string {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function readString(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readNumber(metadata: Record<string, unknown>, key: string): number | undefined {
+  const value = metadata[key];
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return uniqueStrings(value.filter((entry): entry is string => typeof entry === "string"));
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    return uniqueStrings(value.split(","));
+  }
+  return [];
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function shortIdentifier(value: string) {
+  if (value.length <= 12) {
+    return value;
+  }
+  return value.slice(-8).toUpperCase();
+}
+
+function truncateText(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1).trimEnd()}…` : normalized;
+}
+
+function readReplyAgingLabel(metadata: Record<string, unknown>): string | undefined {
+  const explicit =
+    readString(metadata, "replyAgingLabel") ??
+    readString(metadata, "daysWithoutReplyLabel");
+  if (explicit) {
+    return explicit;
+  }
+
+  const days = readNumber(metadata, "daysWithoutReply") ?? readNumber(metadata, "replyAgingDays");
+  if (days === undefined || days < 1) {
+    return undefined;
+  }
+  return `${days} day${days === 1 ? "" : "s"} without reply`;
+}
+
+function isPastDueInvoice(dueDate: string | undefined) {
+  if (!dueDate) {
+    return false;
+  }
+  const due = new Date(`${dueDate}T00:00:00.000Z`);
+  if (Number.isNaN(due.getTime())) {
+    return false;
+  }
+  return due.getTime() < Date.now();
+}
+
+function safeParseJson(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function compareTaskQueueItems(
+  left: OperatorConsoleTaskQueueItem,
+  right: OperatorConsoleTaskQueueItem,
+): number {
+  const priorityRank = { high: 0, medium: 1, low: 2 };
+  const priorityDiff = priorityRank[left.priority] - priorityRank[right.priority];
+  if (priorityDiff !== 0) {
+    return priorityDiff;
+  }
+
+  const leftCreated = left.createdAt ?? "";
+  const rightCreated = right.createdAt ?? "";
+  return rightCreated.localeCompare(leftCreated);
 }
 
 function metricToCard(
@@ -990,16 +2156,18 @@ function buildHomeTaskSummary(input: {
       },
     ].filter((item) => item.count > 0);
 
-  const allTasks = [
-    ...tasksByType,
-    {
-      id: "all_customer_work",
-      label: "All customer work",
-      detail: "Combined operational workload across customers and task types.",
-      count: tasksByCustomer.reduce((sum, item) => sum + item.count, 0),
-      actionPath: "/inbox",
-    },
-  ].filter((item) => item.count > 0);
+  const canonicalOpenTaskCount = input.firstClassTasks.filter((task) => task.status === "open").length;
+  const allTasks = canonicalOpenTaskCount > 0
+    ? [
+        {
+          id: "open_tasks",
+          label: "Open tasks",
+          detail: "Canonical task queue count; completed, archived, closed, dismissed, and deleted tasks are excluded.",
+          count: canonicalOpenTaskCount,
+          actionPath: "/inbox",
+        },
+      ]
+    : [];
 
   return {
     title: "Tasks",
@@ -1314,23 +2482,44 @@ function buildInvoiceAgingAnalytics(
     if (invoice.openAmountCents <= 0) {
       continue;
     }
-    const bucketId = bucketIdForDaysPastDue(invoice.daysPastDue ?? 0);
-    const bucket = buckets.find((item) => item.id === bucketId);
-    if (!bucket) {
-      continue;
+    const overdueAmountCents = getOverdueOpenAmountCents(invoice);
+    const currentAmountCents = Math.max(invoice.openAmountCents - overdueAmountCents, 0);
+
+    if (currentAmountCents > 0) {
+      const currentBucket = buckets.find((item) => item.id === "current");
+      if (currentBucket) {
+        currentBucket.invoiceCount += 1;
+        currentBucket.openAmountCents += currentAmountCents;
+        currentBucket.collectibleAmountCents += Math.min(getCollectibleOpenAmountCents(invoice), currentAmountCents);
+        currentBucket.disputedAmountCents += Math.max(
+          currentAmountCents - Math.min(getCollectibleOpenAmountCents(invoice), currentAmountCents),
+          0,
+        );
+      }
     }
-    const collectibleAmountCents = getCollectibleOpenAmountCents(invoice);
-    const disputedAmountCents = getDisputedOpenAmountCents(invoice);
-    bucket.invoiceCount += 1;
-    bucket.openAmountCents += invoice.openAmountCents;
-    bucket.collectibleAmountCents += collectibleAmountCents;
-    bucket.disputedAmountCents += disputedAmountCents;
+
+    if (overdueAmountCents > 0) {
+      const bucketId = bucketIdForDaysPastDue(
+        invoice.oldestOverdueInstallmentDaysPastDue ?? invoice.daysPastDue ?? 0,
+      );
+      const bucket = buckets.find((item) => item.id === bucketId);
+      if (!bucket) {
+        continue;
+      }
+      bucket.invoiceCount += 1;
+      bucket.openAmountCents += overdueAmountCents;
+      bucket.collectibleAmountCents += Math.min(getCollectibleOpenAmountCents(invoice), overdueAmountCents);
+      bucket.disputedAmountCents += Math.max(
+        overdueAmountCents - Math.min(getCollectibleOpenAmountCents(invoice), overdueAmountCents),
+        0,
+      );
+    }
   }
 
   return {
     asOf,
     buckets,
-    overdueInvoiceCount: invoices.filter((invoice) => (invoice.daysPastDue ?? 0) > 0 && invoice.openAmountCents > 0).length,
+    overdueInvoiceCount: invoices.filter((invoice) => getOverdueOpenAmountCents(invoice) > 0).length,
     overdueOpenAmountCents: buckets.slice(1).reduce((sum, bucket) => sum + bucket.openAmountCents, 0),
     overdueCollectibleAmountCents: buckets.slice(1).reduce((sum, bucket) => sum + bucket.collectibleAmountCents, 0),
   };
@@ -1339,15 +2528,20 @@ function buildInvoiceAgingAnalytics(
 function buildOverdueExposure(
   invoices: OperatorConsoleResponse["invoiceIndex"]["invoices"],
 ): OverdueExposureSummary {
-  const overdue = invoices.filter((invoice) => (invoice.daysPastDue ?? 0) > 0 && invoice.openAmountCents > 0);
-  const severe = overdue.filter((invoice) => (invoice.daysPastDue ?? 0) > 60);
+  const overdue = invoices.filter((invoice) => getOverdueOpenAmountCents(invoice) > 0);
+  const severe = overdue.filter(
+    (invoice) => (invoice.oldestOverdueInstallmentDaysPastDue ?? invoice.daysPastDue ?? 0) > 60,
+  );
   return {
     overdueInvoiceCount: overdue.length,
-    overdueOpenAmountCents: overdue.reduce((sum, invoice) => sum + invoice.openAmountCents, 0),
-    overdueCollectibleAmountCents: overdue.reduce((sum, invoice) => sum + getCollectibleOpenAmountCents(invoice), 0),
+    overdueOpenAmountCents: overdue.reduce((sum, invoice) => sum + getOverdueOpenAmountCents(invoice), 0),
+    overdueCollectibleAmountCents: overdue.reduce(
+      (sum, invoice) => sum + Math.min(getCollectibleOpenAmountCents(invoice), getOverdueOpenAmountCents(invoice)),
+      0,
+    ),
     blockedDisputedAmountCents: overdue.reduce((sum, invoice) => sum + getDisputedOpenAmountCents(invoice), 0),
     severeOverdueInvoiceCount: severe.length,
-    severeOverdueAmountCents: severe.reduce((sum, invoice) => sum + invoice.openAmountCents, 0),
+    severeOverdueAmountCents: severe.reduce((sum, invoice) => sum + getOverdueOpenAmountCents(invoice), 0),
   };
 }
 
@@ -1504,8 +2698,8 @@ function buildAccountProfileSummaries(input: {
       existing.collectibleAmountCents += getCollectibleOpenAmountCents(invoice);
       existing.disputedAmountCents += getDisputedOpenAmountCents(invoice);
       existing.openInvoiceCount += 1;
-      if ((invoice.daysPastDue ?? 0) > 0) {
-        existing.overdueAmountCents += invoice.openAmountCents;
+      if (getOverdueOpenAmountCents(invoice) > 0) {
+        existing.overdueAmountCents += getOverdueOpenAmountCents(invoice);
       }
     }
     grouped.set(key, existing);
@@ -1823,11 +3017,19 @@ function getCollectibleOpenAmountCents(invoice: OperatorConsoleResponse["invoice
   return invoice.openAmountCents;
 }
 
+function getOverdueOpenAmountCents(invoice: OperatorConsoleResponse["invoiceIndex"]["invoices"][number]) {
+  if (typeof invoice.overdueAmountCents === "number") {
+    return invoice.overdueAmountCents;
+  }
+  return (invoice.daysPastDue ?? 0) > 0 ? invoice.openAmountCents : 0;
+}
+
 function getDisputedOpenAmountCents(invoice: OperatorConsoleResponse["invoiceIndex"]["invoices"][number]) {
   if (invoice.status !== "disputed") {
     return 0;
   }
-  return Math.max(invoice.openAmountCents - getCollectibleOpenAmountCents(invoice), 0);
+  const disputedBase = typeof invoice.overdueAmountCents === "number" ? invoice.overdueAmountCents : invoice.openAmountCents;
+  return Math.max(disputedBase - Math.min(getCollectibleOpenAmountCents(invoice), disputedBase), 0);
 }
 
 function databaseIsUsable(databaseUrl: string) {
@@ -2267,7 +3469,6 @@ function buildOutreachIntelligencePreview(input: {
   invoiceDetail: InvoiceDetailData;
   paymentsQueue: PaymentQueueItem[];
 }): OperatorConsoleResponse["outreachIntelligence"] {
-  const service = getOutreachIntelligenceService();
   const principal: Principal = { id: "web_console", roles: ["ar_manager"] };
   const selectedCustomer =
     input.customerIndex.find(
@@ -2363,109 +3564,177 @@ function buildOutreachIntelligencePreview(input: {
     promiseStatus: input.accountWorkspace.promiseStatus,
   });
 
-  const email = service.generateEmailDraft({
-    principal,
-    tenantId: "default",
-    channel: "email",
-    intent,
-    account,
-    invoices,
-    contact,
-    operatorIntent: input.accountWorkspace.nextBestAction,
-    ...(accountMemorySignals.length ? { accountMemorySignals } : {}),
-    ...(linkedPayments.length ? { recentPayments: linkedPayments } : {}),
-    ...(linkedRemittances.length ? { remittances: linkedRemittances } : {}),
-    ...(promiseToPay ? { promiseToPay } : {}),
-  });
-  const previewThread = email.bundle.recentCommunications[0];
+  try {
+    const service = getOutreachIntelligenceService();
+    const email = service.generateEmailDraft({
+      principal,
+      tenantId: "default",
+      channel: "email",
+      intent,
+      account,
+      invoices,
+      contact,
+      operatorIntent: input.accountWorkspace.nextBestAction,
+      ...(accountMemorySignals.length ? { accountMemorySignals } : {}),
+      ...(linkedPayments.length ? { recentPayments: linkedPayments } : {}),
+      ...(linkedRemittances.length ? { remittances: linkedRemittances } : {}),
+      ...(promiseToPay ? { promiseToPay } : {}),
+    });
+    const previewThread = email.bundle.recentCommunications[0];
 
-  const voice = service.generateVoiceAgentPayload({
-    principal,
-    tenantId: "default",
-    channel: "voice_agent",
-    intent,
-    account,
-    invoices,
-    contact,
-    ...(previewThread ? { currentThread: previewThread } : {}),
-    accountMemorySignals: email.bundle.accountMemory.signals,
-    recentPayments: email.bundle.paymentState.recentPayments,
-    remittances: email.bundle.paymentState.remittances,
-  });
+    const voice = service.generateVoiceAgentPayload({
+      principal,
+      tenantId: "default",
+      channel: "voice_agent",
+      intent,
+      account,
+      invoices,
+      contact,
+      ...(previewThread ? { currentThread: previewThread } : {}),
+      accountMemorySignals: email.bundle.accountMemory.signals,
+      recentPayments: email.bundle.paymentState.recentPayments,
+      remittances: email.bundle.paymentState.remittances,
+    });
 
-  const sms = service.generateSmsDraft({
-    principal,
-    tenantId: "default",
-    channel: "sms",
-    intent,
-    account,
-    invoices,
-    contact,
-    ...(previewThread ? { currentThread: previewThread } : {}),
-    accountMemorySignals: email.bundle.accountMemory.signals,
-    recentPayments: email.bundle.paymentState.recentPayments,
-    remittances: email.bundle.paymentState.remittances,
-  });
+    const sms = service.generateSmsDraft({
+      principal,
+      tenantId: "default",
+      channel: "sms",
+      intent,
+      account,
+      invoices,
+      contact,
+      ...(previewThread ? { currentThread: previewThread } : {}),
+      accountMemorySignals: email.bundle.accountMemory.signals,
+      recentPayments: email.bundle.paymentState.recentPayments,
+      remittances: email.bundle.paymentState.remittances,
+    });
 
-  const retellHandoff = service.prepareExecutionHandoff({
-    principal,
-    tenantId: "default",
-    bundleId: voice.bundle.id,
-    channel: "voice_agent",
-    provider: "retell",
-    output: voice.payload,
-    policy: voice.policy,
-    metadata: {
-      mode: "preview_only",
-    },
-  });
+    const retellHandoff = service.prepareExecutionHandoff({
+      principal,
+      tenantId: "default",
+      bundleId: voice.bundle.id,
+      channel: "voice_agent",
+      provider: "retell",
+      output: voice.payload,
+      policy: voice.policy,
+      metadata: {
+        mode: "preview_only",
+      },
+    });
 
-  return {
-    contextSummary: {
-      accountName: email.bundle.customerAccount.billingAccountName,
-      billingAccountId: email.bundle.customerAccount.billingAccountId,
-      branchLabels: email.bundle.customerAccount.branchIds,
-      invoiceNumbers: email.bundle.receivables.invoices.map((invoice: { invoiceNumber: string }) => invoice.invoiceNumber),
-      collectibleAmountLabel: formatCurrency(email.bundle.receivables.collectibleAmountCents),
-      ...(email.bundle.receivables.disputedAmountCents > 0
-        ? { disputedAmountLabel: formatCurrency(email.bundle.receivables.disputedAmountCents) }
-        : {}),
-      confidenceLabel: `${email.bundle.confidence.label} (${Math.round(email.bundle.confidence.score * 100)}%)`,
-      contextSources: email.bundle.explanation.sourcesUsed,
-    },
-    warnings: email.policy.warnings.map((warning: string) => ({
-      code: warning,
-      label: warning.replaceAll("_", " "),
-      detail: explainOutreachWarning(warning),
-    })),
-    emailDraft: {
-      subjectSuggestions: email.draft.subjectSuggestions,
-      body: email.draft.emailBody,
-      toneLabel: email.draft.toneLabel,
-      personalizationSummary: email.draft.personalizationSummary,
-    },
-    voiceAgent: {
-      agentBrief: voice.payload.agentBrief,
-      conversationGoal: voice.payload.conversationGoal,
-      safeTalkingPoints: voice.payload.safeTalkingPoints,
-      disallowedStatements: voice.payload.disallowedStatements,
-      handoffConditions: voice.payload.handoffConditions,
-      toneGuidance: voice.payload.toneGuidance,
-      readiness: retellHandoff.handoff.readiness,
-    },
-    smsDraft: {
-      variants: sms.draft.variants,
-      toneLabel: sms.draft.toneLabel,
-      purposeLabel: sms.draft.messagePurposeLabel,
-      personalizationSummary: sms.draft.personalizationSummary,
-    },
-    previewMode:
-      email.policy.outreachAllowed &&
-      email.policy.channelRestrictions.autoSendAllowed &&
-      !email.policy.approvalRequired
-        ? "email_execution_ready"
-        : "preview_only",
-  };
+    return {
+      contextSummary: {
+        accountName: email.bundle.customerAccount.billingAccountName,
+        billingAccountId: email.bundle.customerAccount.billingAccountId,
+        branchLabels: email.bundle.customerAccount.branchIds,
+        invoiceNumbers: email.bundle.receivables.invoices.map((invoice: { invoiceNumber: string }) => invoice.invoiceNumber),
+        collectibleAmountLabel: formatCurrency(email.bundle.receivables.collectibleAmountCents),
+        ...(email.bundle.receivables.disputedAmountCents > 0
+          ? { disputedAmountLabel: formatCurrency(email.bundle.receivables.disputedAmountCents) }
+          : {}),
+        confidenceLabel: `${email.bundle.confidence.label} (${Math.round(email.bundle.confidence.score * 100)}%)`,
+        contextSources: email.bundle.explanation.sourcesUsed,
+      },
+      warnings: email.policy.warnings.map((warning: string) => ({
+        code: warning,
+        label: warning.replaceAll("_", " "),
+        detail: explainOutreachWarning(warning),
+      })),
+      emailDraft: {
+        subjectSuggestions: email.draft.subjectSuggestions,
+        body: email.draft.emailBody,
+        toneLabel: email.draft.toneLabel,
+        personalizationSummary: email.draft.personalizationSummary,
+      },
+      voiceAgent: {
+        agentBrief: voice.payload.agentBrief,
+        conversationGoal: voice.payload.conversationGoal,
+        safeTalkingPoints: voice.payload.safeTalkingPoints,
+        disallowedStatements: voice.payload.disallowedStatements,
+        handoffConditions: voice.payload.handoffConditions,
+        toneGuidance: voice.payload.toneGuidance,
+        readiness: retellHandoff.handoff.readiness,
+      },
+      smsDraft: {
+        variants: sms.draft.variants,
+        toneLabel: sms.draft.toneLabel,
+        purposeLabel: sms.draft.messagePurposeLabel,
+        personalizationSummary: sms.draft.personalizationSummary,
+      },
+      previewMode:
+        email.policy.outreachAllowed &&
+        email.policy.channelRestrictions.autoSendAllowed &&
+        !email.policy.approvalRequired
+          ? "email_execution_ready"
+          : "preview_only",
+    };
+  } catch (error) {
+    console.warn("Outreach intelligence preview fell back to a local-safe preview.", error);
+    const totalAmount = invoices.reduce((sum, invoice) => sum + invoice.amountCents, 0);
+    const invoiceNumbers = invoices.map((invoice) => invoice.invoiceNumber);
+    const body = [
+      `Hi ${contact.fullName},`,
+      "",
+      `We are following up on ${invoiceNumbers.length} overdue invoice${invoiceNumbers.length === 1 ? "" : "s"} on your account with us.`,
+      "",
+      `The current collectible balance is ${formatCurrency(totalAmount)} across ${invoiceNumbers.join(", ")}.`,
+      "",
+      "If payment has already been scheduled, please share the remittance reference so our team can review it safely.",
+      "",
+      "Thank you,",
+      "Yield AROS Collections",
+    ].join("\n");
+
+    return {
+      contextSummary: {
+        accountName: account.displayName,
+        billingAccountId: account.id,
+        branchLabels: account.branchId ? [account.branchId] : [],
+        invoiceNumbers,
+        collectibleAmountLabel: formatCurrency(totalAmount),
+        confidenceLabel: "medium (fallback)",
+        contextSources: ["current receivable context", "operator-console fallback"],
+      },
+      warnings: [],
+      emailDraft: {
+        subjectSuggestions: [
+          `Follow-up on overdue invoices for ${account.displayName}`,
+          `Payment status check for ${account.displayName}`,
+        ],
+        body,
+        toneLabel: "conservative",
+        personalizationSummary: `Used ${invoiceNumbers.length} invoice facts for ${account.displayName}.`,
+      },
+      voiceAgent: {
+        agentBrief: `Follow up on open receivables for ${account.displayName} without over-claiming payment status.`,
+        conversationGoal: "Confirm payment timing or remittance status while preserving billing-account context.",
+        safeTalkingPoints: [
+          `Follow up on overdue invoices ${invoiceNumbers.join(", ")}.`,
+          `Current collectible balance is ${formatCurrency(totalAmount)}.`,
+          "Ask for payment timing or a remittance reference.",
+        ],
+        disallowedStatements: [
+          "Do not say payment has not been received with certainty.",
+        ],
+        handoffConditions: [
+          "Escalate if the contact disputes the balance.",
+          "Escalate if payment allocation is unclear.",
+        ],
+        toneGuidance: "Keep the tone calm, concise, and fact-based.",
+        readiness: "preview_only",
+      },
+      smsDraft: {
+        variants: [
+          `Hi ${contact.fullName}, following up on overdue invoices for ${account.displayName}. Please share payment timing or a remittance reference when convenient.`,
+        ],
+        toneLabel: "conservative",
+        purposeLabel: "payment_follow_up",
+        personalizationSummary: `Used ${invoiceNumbers.length} invoice facts for ${account.displayName}.`,
+      },
+      previewMode: "preview_only",
+    };
+  }
 }
 
 function readHighestMetricRate(
@@ -2784,6 +4053,18 @@ function slugifyLabel(value: string) {
 
 function formatExceptionBreakdown(items: Array<{ type: string; count: number }>) {
   return items.map((item) => `${item.count} ${item.type.replace(/_/g, " ")}`).join(" • ");
+}
+
+function resolveDemoDataEnabled(envValue: boolean, nodeEnv: string) {
+  const demoDataOverride = process.env.ENABLE_DEMO_DATA?.trim().toLowerCase();
+  if (demoDataOverride !== undefined && ["false", "0", "no", "off"].includes(demoDataOverride)) {
+    return false;
+  }
+  if (demoDataOverride !== undefined && ["true", "1", "yes", "on"].includes(demoDataOverride)) {
+    return true;
+  }
+
+  return envValue === true || nodeEnv === "test" || process.env.VITEST === "true";
 }
 
 function scenarioActions(

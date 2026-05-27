@@ -5,6 +5,9 @@ import {
   deductionCaseStates,
   deductionLineItemStatuses,
   exceptionStates,
+  installmentCadences,
+  installmentLineStatuses,
+  installmentPlanStatuses,
   invoiceStates,
   paymentApplicationStates,
   paymentStates,
@@ -46,6 +49,9 @@ function withCommonColumns(
 
 export const enumDefinitions = {
   invoice_state: [...invoiceStates],
+  installment_plan_status: [...installmentPlanStatuses],
+  installment_cadence: [...installmentCadences],
+  installment_line_status: [...installmentLineStatuses],
   payment_state: [...paymentStates],
   payment_application_state: [...paymentApplicationStates],
   remittance_state: [...remittanceStates],
@@ -148,6 +154,41 @@ export const coreTables: TableDefinition[] = [
       currency: { type: "text" },
       due_date: { type: "date", nullable: true },
       state: { type: "invoice_state" },
+      metadata: { type: "jsonb" }
+    })
+  },
+  {
+    name: "installment_plan",
+    columns: withCommonColumns({
+      billing_account_id: { type: "uuid", references: "billing_account(id)" },
+      branch_id: { type: "uuid", nullable: true, references: "branch(id)" },
+      parent_invoice_id: { type: "uuid", nullable: true, references: "invoice(id)" },
+      erp_reference: { type: "text", nullable: true },
+      currency: { type: "text" },
+      total_contract_amount_cents: { type: "bigint" },
+      number_of_installments: { type: "integer" },
+      cadence: { type: "installment_cadence" },
+      plan_start_date: { type: "date" },
+      state: { type: "installment_plan_status" },
+      metadata: { type: "jsonb" }
+    })
+  },
+  {
+    name: "installment_line",
+    columns: withCommonColumns({
+      installment_plan_id: { type: "uuid", references: "installment_plan(id)" },
+      parent_invoice_id: { type: "uuid", nullable: true, references: "invoice(id)" },
+      billing_account_id: { type: "uuid", references: "billing_account(id)" },
+      branch_id: { type: "uuid", nullable: true, references: "branch(id)" },
+      currency: { type: "text" },
+      sequence_number: { type: "integer" },
+      due_date: { type: "date" },
+      scheduled_amount_cents: { type: "bigint" },
+      paid_amount_cents: { type: "bigint" },
+      remaining_amount_cents: { type: "bigint" },
+      state: { type: "installment_line_status" },
+      days_past_due: { type: "integer" },
+      last_promise_to_pay_date: { type: "date", nullable: true },
       metadata: { type: "jsonb" }
     })
   },
@@ -394,6 +435,8 @@ export const coreTables: TableDefinition[] = [
     columns: withCommonColumns({
       payment_id: { type: "uuid", references: "payment(id)" },
       invoice_id: { type: "uuid", references: "invoice(id)" },
+      installment_plan_id: { type: "uuid", nullable: true, references: "installment_plan(id)" },
+      installment_line_id: { type: "uuid", nullable: true, references: "installment_line(id)" },
       parent_account_id: { type: "uuid", references: "parent_account(id)" },
       billing_account_id: { type: "uuid", references: "billing_account(id)" },
       branch_id: { type: "uuid", nullable: true, references: "branch(id)" },
@@ -423,6 +466,7 @@ export const coreTables: TableDefinition[] = [
       parent_account_id: { type: "uuid", references: "parent_account(id)" },
       billing_account_id: { type: "uuid", references: "billing_account(id)" },
       contact_id: { type: "uuid", nullable: true, references: "contact(id)" },
+      installment_line_ids: { type: "jsonb", nullable: true },
       promised_amount_cents: { type: "bigint" },
       currency: { type: "text" },
       promise_date: { type: "date" },
@@ -1130,6 +1174,34 @@ export const coreTables: TableDefinition[] = [
       enabled: { type: "boolean" },
       requires_approval: { type: "boolean" },
       risk_hints: { type: "jsonb" }
+    }
+  },
+  {
+    name: "control_center_workflow_execution",
+    columns: {
+      id: { type: "text", primaryKey: true },
+      tenant_id: { type: "text" },
+      version: { type: "integer" },
+      created_at: { type: "timestamptz" },
+      updated_at: { type: "timestamptz" },
+      deleted_at: { type: "timestamptz", nullable: true },
+      created_by_actor_id: { type: "text", nullable: true },
+      created_by_actor_role: { type: "text", nullable: true },
+      updated_by_actor_id: { type: "text", nullable: true },
+      updated_by_actor_role: { type: "text", nullable: true },
+      workflow_id: { type: "text", references: "control_center_workflow(id)" },
+      billing_account_id: { type: "uuid", references: "billing_account(id)" },
+      parent_account_id: { type: "uuid", references: "parent_account(id)" },
+      status: { type: "text" },
+      current_track: { type: "text" },
+      last_decision_action: { type: "text", nullable: true },
+      last_decision_reason: { type: "text", nullable: true },
+      last_decision_confidence: { type: "double precision", nullable: true },
+      requires_human_review: { type: "boolean" },
+      effective_until: { type: "timestamptz", nullable: true },
+      rationale_summary: { type: "text", nullable: true },
+      reasoning_metadata: { type: "jsonb" },
+      metadata: { type: "jsonb" }
     }
   },
   {

@@ -100,15 +100,29 @@ describe("email outbound API", () => {
             currency: "PHP",
             amountCents: 10000,
             metadata: {},
-            dueDate: "2026-03-20",
           },
         ],
       },
     });
 
     expect(send.statusCode).toBe(200);
-    expect(send.json().deliveryState).toBe("sent");
-    expect(send.json().communicationAttempt.senderIdentityId).toBe(identity.id);
+    const sendBody = send.json();
+    expect(sendBody.deliveryState).toBe("sent");
+    expect(sendBody.communicationAttempt.senderIdentityId).toBe(identity.id);
+    expect(sendBody.activityEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "email.outbound.sent",
+          actorId: principal.id,
+          entityType: "communication_attempt",
+          metadata: expect.objectContaining({
+            workflowKind: "grouped_reminder",
+            senderIdentityId: identity.id,
+            billingAccountId: account.id,
+          }),
+        }),
+      ]),
+    );
   });
 
   it("returns conversation metadata for a sent email attempt", async () => {
@@ -136,6 +150,7 @@ describe("email outbound API", () => {
         workflowKind: "request_remittance",
         subjectLine: "Please send remittance advice",
         bodyPreview: "Following up on remittance.",
+        ccEmails: ["finance@example.com"],
         invoices: [
           {
             id: "inv_2",
@@ -154,6 +169,7 @@ describe("email outbound API", () => {
     });
 
     const attemptId = send.json().communicationAttempt.id;
+    expect(send.json().communicationAttempt.metadata.ccEmails).toEqual(["finance@example.com"]);
     const conversation = await app.inject({
       method: "GET",
       url: `/v1/email/conversations/${attemptId}`,

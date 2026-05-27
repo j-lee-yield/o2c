@@ -10,6 +10,8 @@ describe("database client generation", () => {
 
     expect(snapshot.version).toBe("v1");
     expect(snapshot.tables.payment_application).toBeDefined();
+    expect(snapshot.tables.installment_plan).toBeDefined();
+    expect(snapshot.tables.installment_line).toBeDefined();
     expect(snapshot.tables.invoice).toEqual(
       expect.arrayContaining([
         "branch_id",
@@ -25,6 +27,7 @@ describe("database client generation", () => {
     expect(snapshot.tables.learning_event).toBeDefined();
     expect(snapshot.tables.communication_attempt).toBeDefined();
     expect(snapshot.enums.payment_application_state).toEqual(["proposed", "applied", "reversed"]);
+    expect(snapshot.enums.installment_line_status).toContain("overdue");
   });
 
   it("renders a deterministic TypeScript module", () => {

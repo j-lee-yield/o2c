@@ -4,6 +4,7 @@ export * from "./client/postgres.js";
 export * from "./client/runtime-store.js";
 export * from "./client/email-runtime-store.js";
 export * from "./client/control-center-store.js";
+export * from "./client/call-inbox-store.js";
 export * from "./client/learning-layer-read-model.js";
 export * from "./client/learning-layer-recompute.js";
 export * from "./client/learning-layer-runtime-store.js";
@@ -14,6 +15,7 @@ export * from "./query/hierarchy-queries.js";
 export * from "./schema/core.js";
 export * from "./schema/customer-hierarchy.js";
 export * from "./schema/approval-request.js";
+export * from "./schema/access-control.js";
 export * from "./tenancy/strategy.js";
 export {
   coreTables as coreDomainTables,

@@ -35,6 +35,15 @@ export interface ImportedInvoiceSourceRecord {
   status: string;
   companyId?: string;
   companyName?: string;
+  paymentTermsCode?: string;
+  paymentTermsLabel?: string;
+  customerPurchaseOrderNumber?: string;
+  salesOrderNumber?: string;
+  externalDocumentNumber?: string;
+  issuerCompanyName?: string;
+  issuerAddressSummary?: string;
+  issuerPhone?: string;
+  issuerFax?: string;
   parentAccountName?: string;
   parentAccountReference?: string;
   branchName?: string;
@@ -140,6 +149,26 @@ export function createImportedInvoiceSyncService(input?: {
   const idGenerator = input?.idGenerator ?? (() => randomUUID());
 
   return {
+    async syncImportedInvoiceRecords(params: {
+      tenantId: string;
+      provider: ImportedInvoiceSourceProvider;
+      sourceKind: ImportedInvoiceSourceKind;
+      invoices: ImportedInvoiceSourceRecord[];
+      auditContext?: AuditContext;
+    }): Promise<ImportedInvoiceSyncResult> {
+      return syncImportedInvoices({
+        provider: params.provider,
+        sourceKind: params.sourceKind,
+        tenantId: params.tenantId,
+        invoices: params.invoices,
+        store,
+        auditLogger,
+        now,
+        idGenerator,
+        ...(params.auditContext ? { auditContext: params.auditContext } : {}),
+      });
+    },
+
     async syncBusinessCentralInvoices(params: {
       tenantId: string;
       invoices: BusinessCentralInvoiceRecord[];
@@ -557,6 +586,29 @@ function buildSnapshotRecord(input: {
     metadata: {
       companyId: input.importedInvoice.companyId,
       ...(input.importedInvoice.companyName ? { companyName: input.importedInvoice.companyName } : {}),
+      ...(input.importedInvoice.paymentTermsCode
+        ? { paymentTermsCode: input.importedInvoice.paymentTermsCode }
+        : {}),
+      ...(input.importedInvoice.paymentTermsLabel
+        ? { paymentTermsLabel: input.importedInvoice.paymentTermsLabel }
+        : {}),
+      ...(input.importedInvoice.customerPurchaseOrderNumber
+        ? { customerPurchaseOrderNumber: input.importedInvoice.customerPurchaseOrderNumber }
+        : {}),
+      ...(input.importedInvoice.salesOrderNumber
+        ? { salesOrderNumber: input.importedInvoice.salesOrderNumber }
+        : {}),
+      ...(input.importedInvoice.externalDocumentNumber
+        ? { externalDocumentNumber: input.importedInvoice.externalDocumentNumber }
+        : {}),
+      ...(input.importedInvoice.issuerCompanyName
+        ? { issuerCompanyName: input.importedInvoice.issuerCompanyName }
+        : {}),
+      ...(input.importedInvoice.issuerAddressSummary
+        ? { issuerAddressSummary: input.importedInvoice.issuerAddressSummary }
+        : {}),
+      ...(input.importedInvoice.issuerPhone ? { issuerPhone: input.importedInvoice.issuerPhone } : {}),
+      ...(input.importedInvoice.issuerFax ? { issuerFax: input.importedInvoice.issuerFax } : {}),
       ...(input.importedInvoice.parentAccountName
         ? { parentAccountName: input.importedInvoice.parentAccountName }
         : {}),

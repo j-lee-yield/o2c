@@ -17,7 +17,10 @@ import {
   InternalEmailStubAdapter,
   createCommunicationProviderDescriptor,
 } from "./communication-providers.js";
-import { OutboundEmailWorkflowService } from "./outbound-email.js";
+import {
+  OutboundEmailWorkflowService,
+  type CommunicationAttemptStore,
+} from "./outbound-email.js";
 
 const collector: Principal = { id: "collector_1", roles: ["ar_collector"] };
 
@@ -97,13 +100,27 @@ class FailingEmailAdapter extends InternalEmailStubAdapter implements EmailProvi
 
 function createService(options?: {
   providerRegistry?: InMemoryCommunicationProviderRegistry;
+  communicationAttemptStore?: CommunicationAttemptStore;
 }) {
   return new OutboundEmailWorkflowService({
     activityStore: new InMemoryImmutableActivityLogStore(),
     providerRegistry: options?.providerRegistry,
+    communicationAttemptStore: options?.communicationAttemptStore,
     now: () => "2026-03-26T09:00:00.000Z",
     idGenerator: (prefix) => `${prefix}_1`,
   });
+}
+
+class CapturingCommunicationAttemptStore implements CommunicationAttemptStore {
+  private readonly attempts = new Map<string, CommunicationAttempt>();
+
+  save(attempt: CommunicationAttempt): void {
+    this.attempts.set(attempt.id, attempt);
+  }
+
+  get(attemptId: string): CommunicationAttempt | undefined {
+    return this.attempts.get(attemptId);
+  }
 }
 
 describe("OutboundEmailWorkflowService", () => {
@@ -148,6 +165,43 @@ describe("OutboundEmailWorkflowService", () => {
     const conversation = service.getConversationMetadata(result.communicationAttempt!.id);
     expect(conversation?.senderIdentityId).toBe(identity.id);
     expect(conversation?.workflowIntent).toBe("grouped_reminder");
+  });
+
+  it("persists provider send details on the communication attempt store", async () => {
+    const attemptStore = new CapturingCommunicationAttemptStore();
+    const service = createService({ communicationAttemptStore: attemptStore });
+    const account = makeBillingAccount({ id: "billing-default", parentAccountId: "parent-default" });
+    const contact = createContact();
+    const identity = service.connectSendingIdentity({
+      provider: "gmail",
+      authMode: "oauth2",
+      senderEmail: "collector@example.com",
+      scopes: ["gmail.send", "gmail.modify"],
+      isDefault: true,
+      principal: collector,
+    });
+
+    const result = await service.sendResendDocuments({
+      principal: collector,
+      account,
+      contact,
+      senderIdentityId: identity.id,
+      subjectLine: "Documents",
+      bodyPreview: "Attached are the requested documents.",
+      invoices: [
+        makeInvoice({
+          id: "inv_1",
+          billingAccountId: account.id,
+          parentAccountId: account.parentAccountId,
+          state: "matched_to_erp",
+        }),
+      ],
+    });
+
+    const savedAttempt = attemptStore.get(result.communicationAttempt!.id);
+    expect(savedAttempt?.status).toBe("sent");
+    expect(savedAttempt?.providerMessageId).toContain("gmail-message");
+    expect(savedAttempt?.providerThreadId).toContain("gmail-thread");
   });
 
   it("keeps approval gating intact for unverified resend recipients", async () => {

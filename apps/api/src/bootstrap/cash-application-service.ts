@@ -806,9 +806,10 @@ async function getFinalityView(paymentId: string): Promise<CashApplicationFinali
   const record = await requireRecord(paymentId);
 
   const finality = await loadPaymentFinalityArtifacts(record);
+  const settlementStatus = readSettlementStatus(record.payment);
   return {
     paymentId,
-    settlementStatus: readSettlementStatus(record.payment),
+    ...(settlementStatus ? { settlementStatus } : {}),
     sourceBankTransactionIds: readSourceBankTransactionIds(record.payment),
     withholdingComponents: finality.withholdingComponents,
     residualActions: finality.residualActions,
@@ -1163,11 +1164,12 @@ async function overrideResidualAction(
   const record = await requireRecord(paymentId);
   const occurredAt = new Date().toISOString();
   const amountMinor = Math.max(0, getUnappliedAmount(record));
+  const invoiceId = record.applications[0]?.invoiceId ?? record.matches[0]?.invoiceId;
   const residualAction: StoredPaymentResidualAction = {
     residualActionId: deterministicUuid(`residual:${paymentId}:${input.residualType}`),
     tenantId: record.payment.tenantId ?? "default",
     paymentId,
-    invoiceId: record.applications[0]?.invoiceId ?? record.matches[0]?.invoiceId,
+    ...(invoiceId ? { invoiceId } : {}),
     residualType: input.residualType,
     amountMinor,
     reasonCode: input.reasonCode ?? defaultResidualReasonCode(input.residualType),
@@ -1657,6 +1659,8 @@ function serializeHighlightedPayment(
   const recognizedAmountCents = finality?.withholdingComponents
     .filter((component) => component.recognizedForInvoiceClosure)
     .reduce((sum, component) => sum + component.withholdingAmountMinor, 0);
+  const evidenceStatus = finality?.withholdingComponents[0]?.evidenceStatus;
+  const settlementStatus = readSettlementStatus(record.payment);
   return {
     paymentId: record.payment.id,
     paymentReference: record.payment.paymentReference,
@@ -1667,7 +1671,7 @@ function serializeHighlightedPayment(
     reviewLabel: record.reviewLabel,
     severityLabel: record.severityLabel,
     footerTag: record.footerTag,
-    ...(readSettlementStatus(record.payment) ? { settlementStatus: readSettlementStatus(record.payment) } : {}),
+    ...(settlementStatus ? { settlementStatus } : {}),
     ...(readSourceBankTransactionIds(record.payment).length > 0
       ? { sourceBankTransactionIds: readSourceBankTransactionIds(record.payment) }
       : {}),
@@ -1675,7 +1679,7 @@ function serializeHighlightedPayment(
       ? {
           withholdingSummary: {
             recognizedAmountCents,
-            evidenceStatus: finality?.withholdingComponents[0]?.evidenceStatus,
+            ...(evidenceStatus ? { evidenceStatus } : {}),
           },
         }
       : {}),
@@ -1785,6 +1789,7 @@ function buildActiveSession(
     buyerTaxProfile?: StoredBuyerTaxProfile;
   },
 ): CashApplicationSession {
+  const evidenceStatus = finality?.withholdingComponents[0]?.evidenceStatus;
   const selectedAllocation = record.matches[0];
   const selectedInvoice = selectedAllocation
     ? record.invoices.find((invoice) => invoice.id === selectedAllocation.invoiceId)
@@ -1889,7 +1894,7 @@ function buildActiveSession(
               (sum, component) => sum + component.withholdingAmountMinor,
               0,
             ),
-            evidenceStatus: finality.withholdingComponents[0]?.evidenceStatus,
+            ...(evidenceStatus ? { evidenceStatus } : {}),
             autoClosureAllowed: finality.withholdingComponents.some(
               (component) => component.recognizedForInvoiceClosure,
             ),
@@ -1995,6 +2000,7 @@ function buildWritebackPreview(
     residualActions: [],
   };
   const resolvedProvider = provider ?? resolveWritebackProvider(record);
+  const settlementStatus = readSettlementStatus(record.payment);
   switch (resolvedProvider) {
     case "odoo":
       return buildOdooAppliedCashWritebackPreview({
@@ -2004,7 +2010,7 @@ function buildWritebackPreview(
         applications: record.applications,
         withholdingComponents: resolvedFinality.withholdingComponents,
         residualActions: resolvedFinality.residualActions,
-        settlementStatus: readSettlementStatus(record.payment),
+        ...(settlementStatus ? { settlementStatus } : {}),
         sourceBankTransactionIds: readSourceBankTransactionIds(record.payment),
       });
     case "quickbooks_online":
@@ -2015,7 +2021,7 @@ function buildWritebackPreview(
         applications: record.applications,
         withholdingComponents: resolvedFinality.withholdingComponents,
         residualActions: resolvedFinality.residualActions,
-        settlementStatus: readSettlementStatus(record.payment),
+        ...(settlementStatus ? { settlementStatus } : {}),
         sourceBankTransactionIds: readSourceBankTransactionIds(record.payment),
       });
     default:
@@ -2026,7 +2032,7 @@ function buildWritebackPreview(
         applications: record.applications,
         withholdingComponents: resolvedFinality.withholdingComponents,
         residualActions: resolvedFinality.residualActions,
-        settlementStatus: readSettlementStatus(record.payment),
+        ...(settlementStatus ? { settlementStatus } : {}),
         sourceBankTransactionIds: readSourceBankTransactionIds(record.payment),
       });
   }

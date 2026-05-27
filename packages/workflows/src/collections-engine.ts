@@ -463,7 +463,7 @@ export class CollectionsWorkflowEngine {
       );
       const triaged = this.exceptionTriageService.triage(created, {
         actorId: params.principal.id,
-        actorRole: params.principal.roles[0] ?? "ar_collector",
+        actorRole: toSupportedWorkflowRole(params.principal.roles[0]),
         hasPaymentEvidence: params.hasAttachments ?? false,
         ...(params.hasAttachments
           ? {
@@ -1093,6 +1093,16 @@ function mapReminderIntent(
     default:
       return "reminder";
   }
+}
+
+function toSupportedWorkflowRole(
+  role: string | undefined,
+): "ar_collector" | "ar_manager" | "controller" | "admin" {
+  if (role === "ar_manager" || role === "controller" || role === "admin") {
+    return role;
+  }
+
+  return "ar_collector";
 }
 
 function serializeJson(value: unknown): Record<string, unknown> {

@@ -21,6 +21,67 @@ export type ControlCenterTriggerType = (typeof controlCenterTriggerTypes)[number
 export const controlCenterAiStrategyChannels = ["email", "sms", "voice_agent"] as const;
 export type ControlCenterAiStrategyChannel = (typeof controlCenterAiStrategyChannels)[number];
 
+export const controlCenterWorkflowExecutionStatuses = [
+  "active",
+  "paused",
+  "opted_out",
+  "manual_review",
+] as const;
+export type ControlCenterWorkflowExecutionStatus =
+  (typeof controlCenterWorkflowExecutionStatuses)[number];
+
+export const controlCenterWorkflowTracks = [
+  "standard_reminders",
+  "promise_to_pay",
+  "issue_resolution",
+  "email_only",
+  "call_assisted",
+  "manual_review",
+] as const;
+export type ControlCenterWorkflowTrack = (typeof controlCenterWorkflowTracks)[number];
+
+export const controlCenterWorkflowDecisionActions = [
+  "continue",
+  "pause",
+  "opt_out",
+  "switch_track",
+  "escalate_for_review",
+] as const;
+export type ControlCenterWorkflowDecisionAction =
+  (typeof controlCenterWorkflowDecisionActions)[number];
+
+export const controlCenterWorkflowExecutionControlModes = ["auto", "manual_locked"] as const;
+export type ControlCenterWorkflowExecutionControlMode =
+  (typeof controlCenterWorkflowExecutionControlModes)[number];
+
+export const controlCenterWorkflowDecisionReviewStates = [
+  "reviewed",
+  "approved",
+  "overridden",
+] as const;
+export type ControlCenterWorkflowDecisionReviewState =
+  (typeof controlCenterWorkflowDecisionReviewStates)[number];
+
+export const controlCenterStructuredOutcomeTypes = [
+  "paid",
+  "promise_to_pay",
+  "payment_in_process",
+  "resend_requested",
+  "call_back_after_date",
+  "dispute",
+  "wrong_contact",
+  "bounced_email",
+  "invalid_number",
+  "do_not_call",
+  "email_only",
+  "legal_risk",
+  "strategic_account",
+  "low_confidence",
+  "no_response",
+] as const;
+export type ControlCenterStructuredOutcomeType =
+  (typeof controlCenterStructuredOutcomeTypes)[number];
+
 export type ControlCenterWeekday =
   | "monday"
   | "tuesday"
@@ -44,6 +105,41 @@ export interface ControlCenterTriggerConfig {
   paymentSignalType?: "payment_detected" | "remittance_missing";
   promiseState?: "accepted" | "due_today" | "broken";
   metadata?: Record<string, unknown>;
+}
+
+export interface ControlCenterStructuredOutcome {
+  outcome: ControlCenterStructuredOutcomeType;
+  confidence?: number;
+  evidenceSummary?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ControlCenterWorkflowDecision {
+  action: ControlCenterWorkflowDecisionAction;
+  reason: string;
+  confidence: number;
+  effectiveUntil?: string;
+  targetTrack?: ControlCenterWorkflowTrack;
+  requiresHumanReview: boolean;
+  rationaleSummary: string;
+  reasoningMetadata: Record<string, unknown>;
+}
+
+export interface ControlCenterWorkflowExecution extends DomainEntity {
+  tenantId: string;
+  workflowId: string;
+  billingAccountId: string;
+  parentAccountId: string;
+  status: ControlCenterWorkflowExecutionStatus;
+  currentTrack: ControlCenterWorkflowTrack;
+  lastDecisionAction?: ControlCenterWorkflowDecisionAction;
+  lastDecisionReason?: string;
+  lastDecisionConfidence?: number;
+  requiresHumanReview: boolean;
+  effectiveUntil?: string;
+  rationaleSummary?: string;
+  reasoningMetadata: Record<string, unknown>;
+  metadata: Record<string, unknown>;
 }
 
 export interface ControlCenterAIContentStrategy extends DomainEntity {
@@ -146,4 +242,5 @@ export const controlCenterSchema = {
   folder: "control_center_template_folders",
   callAgentConfig: "control_center_call_agent_configs",
   config: "control_center_configs",
+  execution: "control_center_workflow_executions",
 } as const;

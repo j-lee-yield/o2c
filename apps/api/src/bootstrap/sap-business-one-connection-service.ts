@@ -473,10 +473,12 @@ class SapBusinessOneConnectionService {
     }
 
     const authentication = await authenticateWithSapBusinessOne(config);
+    const existingWithoutRoute = { ...existing };
+    delete existingWithoutRoute.routeId;
     const refreshed: SapBusinessOneTenantConnection = {
-      ...existing,
+      ...existingWithoutRoute,
       sessionId: authentication.sessionId,
-      ...(authentication.routeId ? { routeId: authentication.routeId } : { routeId: undefined }),
+      ...(authentication.routeId ? { routeId: authentication.routeId } : {}),
       ...(authentication.sessionTimeoutMinutes !== undefined
         ? { sessionTimeoutMinutes: authentication.sessionTimeoutMinutes }
         : {}),
@@ -548,15 +550,14 @@ async function authenticateWithSapBusinessOne(
   };
   const cookies = readCookieHeader(response);
   const sessionId = body.SessionId?.trim() || readCookieValue(cookies, "B1SESSION");
+  const routeId = readCookieValue(cookies, "ROUTEID");
   if (!sessionId) {
     throw new Error("SAP Business One authentication did not return a session.");
   }
 
   return {
     sessionId,
-    ...(readCookieValue(cookies, "ROUTEID")
-      ? { routeId: readCookieValue(cookies, "ROUTEID") }
-      : {}),
+    ...(routeId ? { routeId } : {}),
     ...(typeof body.SessionTimeout === "number"
       ? { sessionTimeoutMinutes: body.SessionTimeout }
       : {}),
@@ -603,11 +604,9 @@ function sanitizeConfig(input: SapBusinessOneConnectConfig): SapBusinessOneConne
 
 function buildAuditContext(action: string): AuditContext {
   return {
-    requestId: `${action}_${randomUUID()}`,
-    actor: {
-      id: "sap_business_one_connector",
-      type: "system",
-    },
+    actorId: "sap_business_one_connector",
+    actorType: "system",
+    correlationId: `${action}_${randomUUID()}`,
     occurredAt: new Date().toISOString(),
   };
 }

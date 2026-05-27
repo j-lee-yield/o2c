@@ -16,11 +16,31 @@ import {
 import {
   renderClientConnectAccessDeniedHtml,
   renderClientConnectInviteHtml,
+  renderCustomerStatementHtml,
   renderDashboardHtml,
   renderIntegrationInspectorHtml,
   renderIntegrationPortalHtml,
 } from "./server.js";
-import type { OnboardingImportStatus } from "./app/dashboard.js";
+import type {
+  CollectionsCallFilterInput,
+  CollectionsEmailFilterInput,
+  InvoiceFilterInput,
+  OnboardingImportStatus,
+} from "./app/dashboard.js";
+import { buildSeedControlCenter } from "./app/data.js";
+import {
+  addFallbackWorkflowStage,
+  assignFallbackWorkflowCustomer,
+  createFallbackTemplate,
+  createFallbackWorkflow,
+  pauseFallbackWorkflowCustomer,
+  replaceFallbackWorkflow,
+  removeFallbackWorkflowStage,
+  resumeFallbackWorkflowCustomer,
+  toggleFallbackWorkflow,
+  unenrollFallbackWorkflowCustomer,
+  updateFallbackTemplate,
+} from "./modules/control-center-fallback.js";
 
 type OnboardingLane = "accounts" | "invoices" | "payments";
 
@@ -188,6 +208,49 @@ async function main(): Promise<void> {
       }
     }
 
+    if (request.method === "POST" && pathname === "/admin/users/invite") {
+      try {
+        const form = await readFormBody(request);
+        const fullName = form.get("fullName")?.toString().trim() ?? "";
+        const email = form.get("email")?.toString().trim() ?? "";
+        const roleKey = form.get("primaryRole")?.toString().trim() ?? "";
+        const scopeType = form.get("scopeType")?.toString().trim() ?? "";
+
+        const apiResponse = await fetch(`${apiBaseUrl}/v1/admin/users`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-principal-id": "user_platform_admin",
+            ...buildPrincipalProxyHeaders(request.headers),
+          },
+          body: JSON.stringify({
+            fullName,
+            email,
+            status: "invited",
+            ...(roleKey ? { roleKey } : {}),
+            ...(scopeType ? { scopeType } : {}),
+          }),
+        });
+
+        if (!apiResponse.ok) {
+          const body = (await apiResponse.json().catch(() => ({}))) as { message?: string };
+          console.error("Failed to invite access-control user", body.message ?? "Unknown error");
+          response.writeHead(303, { location: "/admin/users#invite-user-modal" });
+          response.end();
+          return;
+        }
+
+        response.writeHead(303, { location: "/admin/users" });
+        response.end();
+        return;
+      } catch (error) {
+        console.error("Failed to submit invite user form", error);
+        response.writeHead(303, { location: "/admin/users#invite-user-modal" });
+        response.end();
+        return;
+      }
+    }
+
     if (request.method === "GET" && pathname === "/connect/accounting/quickbooks") {
       const access = await validateClientConnectAccess(
         requestUrl.searchParams.get("token") ?? undefined,
@@ -326,6 +389,115 @@ async function main(): Promise<void> {
         const target = new URL("/connect/accounting", requestBaseUrl);
         target.searchParams.set("bc", "error");
         target.searchParams.set("message", "Business Central company selection failed.");
+        response.writeHead(303, { location: target.toString() });
+        response.end();
+        return;
+      }
+    }
+
+    if (request.method === "POST" && pathname === "/connect/accounting/business-central/disconnect") {
+      try {
+        const form = await readFormBody(request);
+        const access = await validateClientConnectAccess(form.get("token")?.toString());
+        if (!access.allowed || !access.claims || !access.token) {
+          const html = await renderClientConnectAccessDeniedHtml({
+            title: access.title ?? "Access denied",
+            message: access.message ?? "A signed invite token is required.",
+          });
+          response.writeHead(403, { "content-type": "text/html; charset=utf-8" });
+          response.end(html);
+          return;
+        }
+
+        const apiResponse = await fetch(`${apiBaseUrl}/v1/integrations/business-central/disconnect`, {
+          method: "POST",
+        });
+        const target = new URL("/connect/accounting", requestBaseUrl);
+        target.searchParams.set("token", access.token);
+        if (!apiResponse.ok) {
+          const errorBody = (await apiResponse.json().catch(async () => {
+            const text = await apiResponse.text();
+            return text ? { message: text } : { message: "Business Central disconnect failed." };
+          })) as { message?: string };
+          target.searchParams.set("bc", "error");
+          target.searchParams.set("message", errorBody.message ?? "Business Central disconnect failed.");
+          response.writeHead(303, { location: target.toString() });
+          response.end();
+          return;
+        }
+
+        target.searchParams.set("bc", "info");
+        target.searchParams.set("message", "Business Central disconnected.");
+        response.writeHead(303, { location: target.toString() });
+        response.end();
+        return;
+      } catch (error) {
+        console.error("Failed to disconnect Business Central company", error);
+        const target = new URL("/connect/accounting", requestBaseUrl);
+        const token = requestUrl.searchParams.get("token");
+        if (token) {
+          target.searchParams.set("token", token);
+        }
+        target.searchParams.set("bc", "error");
+        target.searchParams.set("message", "Business Central disconnect failed.");
+        response.writeHead(303, { location: target.toString() });
+        response.end();
+        return;
+      }
+    }
+
+    if (request.method === "POST" && pathname === "/connect/accounting/business-central/sync") {
+      try {
+        const form = await readFormBody(request);
+        const access = await validateClientConnectAccess(form.get("token")?.toString());
+        if (!access.allowed || !access.claims || !access.token) {
+          const html = await renderClientConnectAccessDeniedHtml({
+            title: access.title ?? "Access denied",
+            message: access.message ?? "A signed invite token is required.",
+          });
+          response.writeHead(403, { "content-type": "text/html; charset=utf-8" });
+          response.end(html);
+          return;
+        }
+
+        const apiResponse = await fetch(`${apiBaseUrl}/v1/integrations/business-central/sync`, {
+          method: "POST",
+        });
+        const target = new URL("/connect/accounting", requestBaseUrl);
+        target.searchParams.set("token", access.token);
+        if (!apiResponse.ok) {
+          const errorBody = (await apiResponse.json().catch(async () => {
+            const text = await apiResponse.text();
+            return text ? { message: text } : { message: "Business Central sync failed." };
+          })) as { message?: string };
+          target.searchParams.set("bc", "error");
+          target.searchParams.set("message", errorBody.message ?? "Business Central sync failed.");
+          response.writeHead(303, { location: target.toString() });
+          response.end();
+          return;
+        }
+
+        const body = (await apiResponse.json()) as {
+          invoices?: { importedCount?: number };
+          customers?: { syncedProfileCount?: number; syncedPaymentHistoryCount?: number };
+        };
+        target.searchParams.set("bc", "info");
+        target.searchParams.set(
+          "message",
+          `Business Central sync complete: ${body.invoices?.importedCount ?? 0} invoices, ${body.customers?.syncedProfileCount ?? 0} customer profiles, ${body.customers?.syncedPaymentHistoryCount ?? 0} payments.`,
+        );
+        response.writeHead(303, { location: target.toString() });
+        response.end();
+        return;
+      } catch (error) {
+        console.error("Failed to sync Business Central data from client connect portal", error);
+        const target = new URL("/connect/accounting", requestBaseUrl);
+        const token = requestUrl.searchParams.get("token");
+        if (token) {
+          target.searchParams.set("token", token);
+        }
+        target.searchParams.set("bc", "error");
+        target.searchParams.set("message", "Business Central sync failed.");
         response.writeHead(303, { location: target.toString() });
         response.end();
         return;
@@ -563,6 +735,47 @@ async function main(): Promise<void> {
       response.writeHead(302, { location: target.toString() });
       response.end();
       return;
+    }
+
+    if (request.method === "POST" && pathname === "/integrations/business-central/sync") {
+      try {
+        const apiResponse = await fetch(`${apiBaseUrl}/v1/integrations/business-central/sync`, {
+          method: "POST",
+        });
+        const target = new URL("/integrations", requestBaseUrl);
+        if (!apiResponse.ok) {
+          const errorBody = (await apiResponse.json().catch(async () => {
+            const text = await apiResponse.text();
+            return text ? { message: text } : { message: "Business Central sync failed." };
+          })) as { message?: string };
+          target.searchParams.set("bc", "error");
+          target.searchParams.set("message", errorBody.message ?? "Business Central sync failed.");
+          response.writeHead(303, { location: target.toString() });
+          response.end();
+          return;
+        }
+
+        const body = (await apiResponse.json()) as {
+          invoices?: { importedCount?: number };
+          customers?: { syncedProfileCount?: number; syncedPaymentHistoryCount?: number };
+        };
+        target.searchParams.set("bc", "connected");
+        target.searchParams.set(
+          "message",
+          `Business Central sync complete: ${body.invoices?.importedCount ?? 0} invoices, ${body.customers?.syncedProfileCount ?? 0} customer profiles, ${body.customers?.syncedPaymentHistoryCount ?? 0} payments.`,
+        );
+        response.writeHead(303, { location: target.toString() });
+        response.end();
+        return;
+      } catch (error) {
+        console.error("Failed to sync Business Central data", error);
+        const target = new URL("/integrations", requestBaseUrl);
+        target.searchParams.set("bc", "error");
+        target.searchParams.set("message", "Business Central sync failed.");
+        response.writeHead(303, { location: target.toString() });
+        response.end();
+        return;
+      }
     }
 
     if (request.method === "GET" && pathname === "/integrations/quickbooks/connect") {
@@ -1342,12 +1555,543 @@ async function main(): Promise<void> {
         }
       }
 
-      if (pathname === "/collections/compose") {
+      if (pathname === "/customers/email/send") {
+        let customerId: string | undefined;
         try {
           const form = await readFormBody(request);
+          customerId = form.get("customerId")?.toString();
+          const customerName = form.get("customerName")?.toString() ?? "Customer";
+          const senderIdentityId = form.get("senderIdentityId")?.toString();
+          const subjectLine = form.get("subjectLine")?.toString().trim();
+          const bodyPreview = form.get("bodyPreview")?.toString().trim();
+          const account = parseJsonFormField<Record<string, unknown>>(form, "accountJson");
+          const contact = parseJsonFormField<Record<string, unknown>>(form, "contactJson");
+          const invoices = parseJsonFormField<Array<Record<string, unknown>>>(form, "invoicesJson");
+          const redirectTarget = buildCustomerEmailRedirect(requestBaseUrl, customerId);
+
+          if (!customerId || !senderIdentityId || !subjectLine || !bodyPreview || !account || !contact || !Array.isArray(invoices) || invoices.length === 0) {
+            redirectTarget.searchParams.set("customerEmailStatus", "failed");
+            redirectTarget.searchParams.set("customerEmailMessage", "Complete sender, subject, body, and invoice context before sending.");
+            redirectTarget.hash = "customer-email-modal";
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          if (contact.isVerified !== true || contact.allowAutoSend !== true || typeof contact.email !== "string") {
+            redirectTarget.searchParams.set("customerEmailStatus", "failed");
+            redirectTarget.searchParams.set(
+              "customerEmailMessage",
+              "A verified customer email contact is required before outbound outreach can be sent.",
+            );
+            redirectTarget.hash = "customer-email-modal";
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/email/outbound/send`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+            },
+            body: JSON.stringify({
+              principal: {
+                id: "web_console",
+                roles: ["ar_manager"],
+              },
+              senderIdentityId,
+              workflowKind: "request_remittance",
+              account,
+              contact,
+              invoices,
+              subjectLine,
+              bodyPreview,
+            }),
+          });
+
+          if (!apiResponse.ok) {
+            const message = await safeReadErrorMessage(apiResponse, "Customer email could not be sent.");
+            redirectTarget.searchParams.set("customerEmailStatus", "failed");
+            redirectTarget.searchParams.set("customerEmailMessage", message);
+            redirectTarget.hash = "customer-email-modal";
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const body = (await apiResponse.json()) as { deliveryState?: string; failureReason?: string };
+          if (body.deliveryState === "sent") {
+            redirectTarget.searchParams.set("customerEmailStatus", "sent");
+            redirectTarget.searchParams.set("customerEmailMessage", `Email sent to ${customerName}.`);
+          } else if (body.deliveryState === "approval_needed") {
+            redirectTarget.searchParams.set("customerEmailStatus", "approval_needed");
+            redirectTarget.searchParams.set("customerEmailMessage", "Email is queued for approval before sending.");
+          } else {
+            redirectTarget.searchParams.set("customerEmailStatus", "failed");
+            redirectTarget.searchParams.set("customerEmailMessage", body.failureReason ?? "Customer email could not be sent.");
+            redirectTarget.hash = "customer-email-modal";
+          }
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to send customer email", error);
+          const redirectTarget = buildCustomerEmailRedirect(requestBaseUrl, customerId);
+          redirectTarget.searchParams.set("customerEmailStatus", "failed");
+          redirectTarget.searchParams.set("customerEmailMessage", "Customer email could not be sent.");
+          redirectTarget.hash = "customer-email-modal";
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/customers/email-task/create") {
+        try {
+          const form = await readFormBody(request);
+          const customerId = form.get("customerId")?.toString();
+          const customerName = form.get("customerName")?.toString() ?? "Customer";
+          const senderIdentityId = form.get("senderIdentityId")?.toString();
+          const accountJson = form.get("accountJson")?.toString();
+          const contactJson = form.get("contactJson")?.toString();
+          const invoicesJson = form.get("invoicesJson")?.toString();
+          const redirectTarget = new URL("/customers", requestBaseUrl);
+          if (customerId) {
+            redirectTarget.searchParams.set("customer", customerId);
+          }
+
+          if (!customerId || !senderIdentityId || !accountJson || !contactJson || !invoicesJson) {
+            redirectTarget.searchParams.set("taskComposeError", "Customer email draft could not be created.");
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const account = JSON.parse(accountJson) as Record<string, unknown>;
+          const contact = JSON.parse(contactJson) as Record<string, unknown>;
+          const invoices = JSON.parse(invoicesJson) as Array<Record<string, unknown>>;
+          const sourceLinks = [
+            {
+              label: customerName,
+              objectType: "customer_profile",
+              objectId: customerId,
+              href: `/customers?customer=${encodeURIComponent(customerId)}`,
+            },
+            ...invoices.map((invoice) => ({
+              label: String(invoice.invoiceNumber ?? invoice.id ?? "Invoice"),
+              objectType: "invoice",
+              objectId: String(invoice.id ?? invoice.invoiceNumber ?? "invoice"),
+              href: invoice.invoiceNumber
+                ? `/invoices?invoice=${encodeURIComponent(String(invoice.invoiceNumber))}`
+                : undefined,
+            })),
+          ];
+
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/tasks`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "x-principal-id": "web_console",
+              "x-principal-roles": "ar_manager",
+            },
+            body: JSON.stringify({
+              title: `Email ${customerName} about imported invoices`,
+              description: `Draft a customer email from the imported accounting profile for ${customerName}.`,
+              kind: "customer_email_follow_up",
+              origin: "manual",
+              surfaces: ["customers", "collections"],
+              customerProfileId: customerId,
+              billingAccountId: typeof account.id === "string" ? account.id : customerId,
+              sourceLinks,
+              metadata: {
+                customerName,
+                composeEmail: {
+                  account,
+                  contact,
+                  invoices,
+                },
+              },
+            }),
+          });
+
+          if (!apiResponse.ok) {
+            const errorBody = (await apiResponse.json().catch(async () => ({
+              message: await apiResponse.text(),
+            }))) as { message?: string };
+            redirectTarget.searchParams.set("taskComposeError", errorBody.message ?? "Customer email draft could not be created.");
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const created = (await apiResponse.json()) as { id?: string };
+          const taskTarget = new URL("/tasks", requestBaseUrl);
+          if (created.id) {
+            taskTarget.hash = `task-detail-${created.id}`;
+          }
+          response.writeHead(303, { location: taskTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to create customer email task", error);
+          const redirectTarget = new URL("/customers", requestBaseUrl);
+          const customerId = requestUrl.searchParams.get("customer");
+          if (customerId) {
+            redirectTarget.searchParams.set("customer", customerId);
+          }
+          redirectTarget.searchParams.set("taskComposeError", "Customer email draft could not be created.");
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/customers/call/start") {
+        let customerId: string | undefined;
+        try {
+          const form = await readFormBody(request);
+          customerId = form.get("customerId")?.toString();
+          const customerName = form.get("customerName")?.toString() ?? "Customer";
+          const phoneNumber = normalizeOutboundPhoneNumber(form.get("phoneNumber")?.toString());
+          const redirectTarget = buildCustomerCallRedirect(requestBaseUrl, customerId);
+
+          const account = parseJsonFormField<Record<string, unknown>>(form, "accountJson");
+          const contact = parseJsonFormField<Record<string, unknown>>(form, "contactJson");
+          const invoices = parseJsonFormField<Array<Record<string, unknown>>>(form, "invoicesJson");
+          if (!customerId || !phoneNumber || !account || !contact || !Array.isArray(invoices) || invoices.length === 0) {
+            redirectTarget.searchParams.set("customerCallStatus", "failed");
+            redirectTarget.searchParams.set(
+              "customerCallMessage",
+              "Enter a valid phone number before starting the call.",
+            );
+            redirectTarget.hash = "customer-call-modal";
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const originalPhone = normalizeOutboundPhoneNumber(
+            typeof contact.phone === "string" ? contact.phone : undefined,
+          );
+          const phoneChanged =
+            !originalPhone || normalizePhoneDigits(originalPhone) !== normalizePhoneDigits(phoneNumber);
+          const contactForCall = {
+            ...contact,
+            phone: phoneNumber,
+            ...(phoneChanged
+              ? {
+                  // Operator-entered phone overrides must pass the existing Retell safety checks as unverified contacts.
+                  isVerified: false,
+                  allowAutoSend: false,
+                  metadata: {
+                    ...readRecord(contact.metadata),
+                    phoneOverrideRequiresVerification: true,
+                    phoneOverrideSource: "operator_console_call_modal",
+                  },
+                }
+              : {}),
+          };
+
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/retell/collections/outbound-call`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "x-principal-id": "web_console",
+              "x-principal-roles": "ar_manager",
+            },
+            body: JSON.stringify({
+              principal: {
+                id: "web_console",
+                roles: ["ar_manager"],
+              },
+              tenantId: env.DEFAULT_TENANT_SLUG,
+              account,
+              contact: contactForCall,
+              invoices,
+            }),
+          });
+
+          if (!apiResponse.ok) {
+            const message = await safeReadErrorMessage(apiResponse, "Customer call could not be started.");
+            redirectTarget.searchParams.set("customerCallStatus", "failed");
+            redirectTarget.searchParams.set("customerCallMessage", message);
+            redirectTarget.hash = "customer-call-modal";
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const payload = (await apiResponse.json()) as {
+            status?: "started" | "blocked";
+            blockedReason?: string;
+          };
+          if (payload.status !== "started") {
+            const reason = payload.blockedReason
+              ? `Call blocked by safety checks: ${humanizeCode(payload.blockedReason)}.`
+              : "Call blocked by Retell pre-call safety checks.";
+            redirectTarget.searchParams.set("customerCallStatus", "failed");
+            redirectTarget.searchParams.set("customerCallMessage", reason);
+            redirectTarget.hash = "customer-call-modal";
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          redirectTarget.searchParams.set("customerCallStatus", "started");
+          redirectTarget.searchParams.set(
+            "customerCallMessage",
+            `Call started for ${customerName}. Activity and tasks will update as Retell posts outcomes.`,
+          );
+          redirectTarget.hash = "customer-call-status";
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to start customer call", error);
+          const redirectTarget = buildCustomerCallRedirect(requestBaseUrl, customerId);
+          redirectTarget.searchParams.set("customerCallStatus", "failed");
+          redirectTarget.searchParams.set("customerCallMessage", "Customer call could not be started.");
+          redirectTarget.hash = "customer-call-modal";
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/customers/tasks/create") {
+        try {
+          const form = await readFormBody(request);
+          const customerId = form.get("customerId")?.toString();
+          const customerName = form.get("customerName")?.toString() ?? "Customer";
+          const billingAccountId = form.get("billingAccountId")?.toString() ?? customerId;
+          const redirectTarget = new URL("/customers", requestBaseUrl);
+          if (customerId) {
+            redirectTarget.searchParams.set("customer", customerId);
+            redirectTarget.searchParams.set("tab", "tasks");
+          }
+
+          if (!customerId || !billingAccountId) {
+            redirectTarget.searchParams.set("taskComposeError", "Customer task could not be created.");
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/tasks`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "x-principal-id": "web_console",
+              "x-principal-roles": "ar_manager",
+            },
+            body: JSON.stringify({
+              title: `Follow up ${customerName}`,
+              description: `Review the imported customer profile and next step for ${customerName}.`,
+              kind: "customer_follow_up",
+              origin: "manual",
+              surfaces: ["customers"],
+              customerProfileId: customerId,
+              billingAccountId,
+              sourceLinks: [
+                {
+                  label: customerName,
+                  objectType: "customer_profile",
+                  objectId: customerId,
+                  href: `/customers?customer=${encodeURIComponent(customerId)}`,
+                },
+              ],
+              metadata: {
+                customerName,
+                source: "customer_workspace",
+              },
+            }),
+          });
+
+          if (!apiResponse.ok) {
+            const errorBody = (await apiResponse.json().catch(async () => ({
+              message: await apiResponse.text(),
+            }))) as { message?: string };
+            redirectTarget.searchParams.set("taskComposeError", errorBody.message ?? "Customer task could not be created.");
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to create customer task", error);
+          const redirectTarget = new URL("/customers", requestBaseUrl);
+          const customerId = requestUrl.searchParams.get("customer");
+          if (customerId) {
+            redirectTarget.searchParams.set("customer", customerId);
+            redirectTarget.searchParams.set("tab", "tasks");
+          }
+          redirectTarget.searchParams.set("taskComposeError", "Customer task could not be created.");
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/tasks/status") {
+        try {
+          const form = await readFormBody(request);
+          const taskId = form.get("taskId")?.toString();
+          const status = form.get("status")?.toString();
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+
+          if (!taskId || (status !== "completed" && status !== "closed")) {
+            redirectTarget.searchParams.set("taskComposeError", "Task status could not be updated.");
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/status`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "x-principal-id": "web_console",
+              "x-principal-roles": "ar_manager",
+            },
+            body: JSON.stringify({
+              status,
+              summary: status === "completed" ? "Task completed and archived from the task popup." : "Task closed from the task popup.",
+            }),
+          });
+
+          if (!apiResponse.ok) {
+            const message = await safeReadErrorMessage(apiResponse, "Task status could not be updated.");
+            redirectTarget.searchParams.set("taskComposeError", message);
+          } else {
+            redirectTarget.searchParams.set(
+              "taskComposeStatus",
+              status === "completed" ? "completed" : "closed",
+            );
+          }
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to update task status", error);
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+          redirectTarget.searchParams.set("taskComposeError", "Task status could not be updated.");
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/tasks/delete") {
+        try {
+          const form = await readFormBody(request);
+          const taskId = form.get("taskId")?.toString();
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+
+          if (!taskId) {
+            redirectTarget.searchParams.set("taskComposeError", "Task could not be deleted.");
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}`, {
+            method: "DELETE",
+            headers: {
+              "x-principal-id": "web_console",
+              "x-principal-roles": "ar_manager",
+            },
+          });
+
+          if (!apiResponse.ok) {
+            const message = await safeReadErrorMessage(apiResponse, "Task could not be deleted.");
+            redirectTarget.searchParams.set("taskComposeError", message);
+          } else {
+            redirectTarget.searchParams.set("taskComposeStatus", "deleted");
+          }
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to delete task", error);
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+          redirectTarget.searchParams.set("taskComposeError", "Task could not be deleted.");
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/customers/outreach/pause" || pathname === "/customers/outreach/resume") {
+        const form = await readFormBody(request);
+        const customerId = form.get("customerId")?.toString();
+        const workflowId = form.get("workflowId")?.toString();
+        const executionId = form.get("executionId")?.toString();
+        const reason = form.get("reason")?.toString();
+        const action = pathname.endsWith("/resume") ? "resume" : "pause";
+        const redirectTarget = new URL("/customers", requestBaseUrl);
+        if (customerId) {
+          redirectTarget.searchParams.set("customer", customerId);
+        }
+
+        try {
+          if (!workflowId || !executionId) {
+            throw new Error("Customer is not enrolled in an outreach workflow.");
+          }
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}/customers/${executionId}/${action}`, {
+            method: "POST",
+            headers: { "content-type": "application/json; charset=utf-8" },
+            body: JSON.stringify({
+              principal: { id: "web_console", roles: ["controller", "ar_manager"] },
+              ...(reason ? { reason } : {}),
+            }),
+          });
+          if (!apiResponse.ok) {
+            if (action === "pause") {
+              pauseFallbackWorkflowCustomer(buildSeedControlCenter, {
+                workflowId,
+                executionId,
+                ...(reason ? { reason } : {}),
+              });
+            } else {
+              resumeFallbackWorkflowCustomer(buildSeedControlCenter, {
+                workflowId,
+                executionId,
+                ...(reason ? { reason } : {}),
+              });
+            }
+          }
+          redirectTarget.searchParams.set("customerEmailStatus", "sent");
+          redirectTarget.searchParams.set(
+            "customerEmailMessage",
+            action === "pause" ? "Outreach paused for this customer." : "Outreach resumed for this customer.",
+          );
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error(`Failed to ${action} customer outreach`, error);
+          redirectTarget.searchParams.set("customerEmailStatus", "failed");
+          redirectTarget.searchParams.set(
+            "customerEmailMessage",
+            error instanceof Error ? error.message : "Customer outreach state could not be updated.",
+          );
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/collections/compose") {
+        try {
+          const form = await readMultipartFormBody(request, requestBaseUrl);
           const composeId = form.get("composeId")?.toString() ?? "collections-compose";
           const redirectTarget = new URL("/collections", requestBaseUrl);
-          redirectTarget.hash = `collections-compose-${composeId}`;
+          redirectTarget.searchParams.set("tab", "email");
+          redirectTarget.hash = composeId;
 
           const senderIdentityId = form.get("senderIdentityId")?.toString();
           const providerThreadId = form.get("providerThreadId")?.toString();
@@ -1355,6 +2099,18 @@ async function main(): Promise<void> {
           const bodyPreview = form.get("bodyPreview")?.toString();
           const contactEmail = form.get("contactEmail")?.toString();
           const accountName = form.get("accountName")?.toString();
+          const now = new Date().toISOString();
+          const account =
+            readJsonFormField<Record<string, unknown>>(form, "accountJson") ??
+            buildCollectionsReplyAccountFromForm(form, accountName ?? "", composeId, now);
+          const contact =
+            readJsonFormField<Record<string, unknown>>(form, "contactJson") ??
+            buildCollectionsReplyContactFromForm(form, contactEmail ?? "", accountName ?? "", now);
+          const invoices = readJsonFormField<unknown[]>(form, "invoicesJson") ?? [];
+          const attachments = [
+            ...(await readEmailAttachments(form)),
+            ...(await buildCollectionsGeneratedEmailAttachments(apiBaseUrl, form)),
+          ];
 
           if (!senderIdentityId || !providerThreadId || !subjectLine || !bodyPreview || !contactEmail || !accountName) {
             redirectTarget.searchParams.set(
@@ -1374,49 +2130,12 @@ async function main(): Promise<void> {
             senderIdentityId,
             providerThreadId,
             replyToProviderMessageId: form.get("providerMessageId")?.toString(),
-            account: {
-              id: form.get("billingAccountId")?.toString(),
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              parentAccountId:
-                form.get("parentAccountId")?.toString() || form.get("billingAccountId")?.toString(),
-              accountNumber: form.get("accountNumber")?.toString() || form.get("billingAccountId")?.toString(),
-              displayName: accountName,
-              currency: form.get("currency")?.toString() || "PHP",
-              accountTier:
-                form.get("accountTier")?.toString() === "strategic" ? "strategic" : "standard",
-              status: "active",
-              centrallyPaid: false,
-              metadata: {
-                source: "collections_compose",
-                composeId,
-              },
-            },
-            contact: {
-              id: `collections-contact:${contactEmail}`,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              parentAccountId:
-                form.get("parentAccountId")?.toString() || form.get("billingAccountId")?.toString(),
-              billingAccountId: form.get("billingAccountId")?.toString(),
-              scope: "billing_account",
-              scopeId: form.get("billingAccountId")?.toString(),
-              fullName: form.get("contactName")?.toString() || accountName,
-              email: contactEmail,
-              role: "ap",
-              isPrimary: true,
-              // This compose route is limited to live Gmail inbox threads with a concrete
-              // providerThreadId, so we allow direct replies without the extra approval hop.
-              isVerified: true,
-              allowAutoSend: true,
-              recentSuccessfulResponses: 0,
-              metadata: {
-                source: "collections_compose",
-                trustedLiveThreadReply: true,
-              },
-            },
+            account,
+            contact,
+            ...(invoices.length > 0 ? { invoices } : {}),
             subjectLine,
             bodyPreview,
+            ...(attachments.length > 0 ? { attachments } : {}),
           });
 
           const apiResponse = await fetch(`${apiBaseUrl}/v1/email/inbox/reply`, {
@@ -1451,7 +2170,7 @@ async function main(): Promise<void> {
               "collectionsComposeError",
               body.failureReason ?? "Collections email could not be sent.",
             );
-            redirectTarget.hash = `collections-compose-${composeId}`;
+            redirectTarget.hash = composeId;
           }
           response.writeHead(303, { location: redirectTarget.toString() });
           response.end();
@@ -1459,6 +2178,7 @@ async function main(): Promise<void> {
         } catch (error) {
           console.error("Failed to send collections email", error);
           const redirectTarget = new URL("/collections", requestBaseUrl);
+          redirectTarget.searchParams.set("tab", "email");
           redirectTarget.searchParams.set("collectionsComposeError", "Collections email could not be sent.");
           response.writeHead(303, { location: redirectTarget.toString() });
           response.end();
@@ -1466,93 +2186,546 @@ async function main(): Promise<void> {
         }
       }
 
-      if (pathname === "/control-center/workflows/create") {
+      if (pathname === "/collections/compose/prepare-attachment") {
         try {
-          const form = await readFormBody(request);
+          const form = await readMultipartFormBody(request, requestBaseUrl);
+          const composeId = form.get("composeId")?.toString() ?? "collections-compose";
+          const providerThreadId = form.get("providerThreadId")?.toString();
+          const attachmentKind = form.get("attachmentKind")?.toString();
+          const redirectTarget = new URL("/collections", requestBaseUrl);
+          redirectTarget.searchParams.set("tab", "email");
+          if (providerThreadId) {
+            redirectTarget.searchParams.set("threadId", providerThreadId);
+          }
+          redirectTarget.hash = composeId;
+          applyCollectionsComposeDraftQueryState(redirectTarget, form);
+
+          if (attachmentKind === "invoice") {
+            const invoiceNumbers = uniqueFormValues(form.getAll("selectedInvoiceNumbers"));
+            if (invoiceNumbers.length === 0) {
+              redirectTarget.searchParams.set(
+                "collectionsComposeError",
+                "Choose at least one invoice before attaching invoice documents.",
+              );
+              response.writeHead(303, { location: redirectTarget.toString() });
+              response.end();
+              return;
+            }
+            await verifyCollectionsInvoiceAttachments(apiBaseUrl, invoiceNumbers);
+            for (const invoiceNumber of invoiceNumbers) {
+              appendCollectionsComposeDraftAttachment(
+                redirectTarget,
+                "invoice",
+                invoiceNumber,
+                `Invoice ${invoiceNumber}.pdf`,
+              );
+            }
+          } else if (attachmentKind === "soa") {
+            await verifyCollectionsSoaAttachment(apiBaseUrl, form);
+            const accountLabel =
+              form.get("accountNumber")?.toString() ||
+              form.get("billingAccountId")?.toString() ||
+              "account";
+            appendCollectionsComposeDraftAttachment(
+              redirectTarget,
+              "soa",
+              accountLabel,
+              "Statement of account.pdf",
+            );
+          } else {
+            redirectTarget.searchParams.set(
+              "collectionsComposeError",
+              "Choose an invoice or SOA attachment action.",
+            );
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          redirectTarget.searchParams.set("collectionsComposeStatus", "attachment_ready");
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to prepare collections attachment", error);
+          const redirectTarget = new URL("/collections", requestBaseUrl);
+          redirectTarget.searchParams.set("tab", "email");
+          redirectTarget.searchParams.set(
+            "collectionsComposeError",
+            error instanceof Error ? error.message : "Attachment could not be generated.",
+          );
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/tasks/compose") {
+        try {
+          const form = await readMultipartFormBody(request, requestBaseUrl);
+          const composeId = form.get("composeId")?.toString() ?? "task-compose";
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+          redirectTarget.hash = `task-detail-${composeId}`;
+
+          const senderIdentityId = form.get("senderIdentityId")?.toString();
+          const subjectLine = form.get("subjectLine")?.toString();
+          const bodyPreview = form.get("bodyPreview")?.toString();
+          const ccEmails = readEmailListField(form, "cc");
+          const accountJson = form.get("accountJson")?.toString();
+          const contactJson = form.get("contactJson")?.toString();
+          const invoicesJson = form.get("invoicesJson")?.toString();
+          const attachments = await readEmailAttachments(form);
+
+          if (
+            !senderIdentityId ||
+            !subjectLine ||
+            !bodyPreview ||
+            !accountJson ||
+            !contactJson ||
+            !invoicesJson
+          ) {
+            redirectTarget.searchParams.set(
+              "taskComposeError",
+              "The task is missing compose context or a sender identity.",
+            );
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const payload = JSON.stringify({
+            principal: {
+              id: "web_console",
+              roles: ["ar_manager"],
+            },
+            senderIdentityId,
+            workflowKind: "request_remittance",
+            account: JSON.parse(accountJson),
+            contact: JSON.parse(contactJson),
+            invoices: JSON.parse(invoicesJson),
+            subjectLine,
+            bodyPreview,
+            ...(ccEmails.length > 0 ? { ccEmails } : {}),
+            ...(attachments.length > 0 ? { attachments } : {}),
+          });
+
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/email/outbound/send`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+            },
+            body: payload,
+          });
+
+          if (!apiResponse.ok) {
+            const errorBody = (await apiResponse.json().catch(async () => ({
+              message: await apiResponse.text(),
+            }))) as { message?: string };
+            redirectTarget.searchParams.set(
+              "taskComposeError",
+              errorBody.message ?? "Task email could not be sent.",
+            );
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const body = (await apiResponse.json()) as {
+            deliveryState?: string;
+            failureReason?: string;
+          };
+          redirectTarget.hash = "";
+          if (body.deliveryState === "approval_needed") {
+            redirectTarget.searchParams.set("taskComposeStatus", "approval_needed");
+          } else if (body.deliveryState === "sent") {
+            await markTaskCompletedAfterEmailSend(apiBaseUrl, composeId);
+            redirectTarget.searchParams.set("taskComposeStatus", "sent");
+          } else {
+            redirectTarget.searchParams.set(
+              "taskComposeError",
+              body.failureReason ?? "Task email could not be sent.",
+            );
+            redirectTarget.hash = `task-detail-${composeId}`;
+          }
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to send task email", error);
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+          redirectTarget.searchParams.set("taskComposeError", "Task email could not be sent.");
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/tasks/compose/apply") {
+        try {
+          const form = await readMultipartFormBody(request, requestBaseUrl);
+          const composeId = form.get("composeId")?.toString() ?? "task-compose";
+          const generator = form.get("draftGenerator")?.toString() === "template" ? "template" : "ai";
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+          redirectTarget.hash = `task-detail-${composeId}`;
+
+          const subjectLine =
+            (generator === "template"
+              ? form.get("templateSubjectLine")?.toString()
+              : form.get("aiSubjectLine")?.toString()) ?? "";
+          const bodyPreview =
+            (generator === "template"
+              ? form.get("templateBody")?.toString()
+              : form.get("aiBody")?.toString()) ?? "";
+          const note =
+            (generator === "template"
+              ? form.get("templateNote")?.toString()
+              : form.get("aiNote")?.toString()) ?? "";
+
+          if (!subjectLine.trim() || !bodyPreview.trim()) {
+            redirectTarget.searchParams.set(
+              "taskComposeError",
+              "The selected draft could not be applied.",
+            );
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          redirectTarget.searchParams.set("taskComposeDraftComposeId", composeId);
+          redirectTarget.searchParams.set("taskComposeDraftGenerator", generator);
+          redirectTarget.searchParams.set("taskComposeDraftSubject", subjectLine);
+          redirectTarget.searchParams.set("taskComposeDraftBody", bodyPreview);
+          if (note.trim()) {
+            redirectTarget.searchParams.set("taskComposeDraftNote", note.trim());
+          }
+
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to apply task draft", error);
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+          redirectTarget.searchParams.set("taskComposeError", "The selected draft could not be applied.");
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/tasks/compose/attach-invoice") {
+        try {
+          const form = await readMultipartFormBody(request, requestBaseUrl);
+          const composeId = form.get("composeId")?.toString() ?? "task-compose";
+          const invoiceIds = form
+            .getAll("selectedInvoiceIds")
+            .map((value) => value.toString())
+            .filter((value, index, array) => value.trim().length > 0 && array.indexOf(value) === index);
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+          redirectTarget.hash = `task-detail-${composeId}`;
+          applyTaskComposeDraftQueryState(redirectTarget, form);
+
+          if (invoiceIds.length === 0) {
+            redirectTarget.searchParams.set(
+              "taskInvoiceAttachmentError",
+              "Choose at least one invoice before uploading a physical invoice file.",
+            );
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const file = await readSingleAttachment(form, "invoiceAttachment");
+          if (!file) {
+            redirectTarget.searchParams.set(
+              "taskInvoiceAttachmentError",
+              "Choose a PDF or image file before attaching it to the invoice.",
+            );
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          const normalizedMimeType = file.mimeType?.toLowerCase() ?? "";
+          const isSupportedType =
+            normalizedMimeType === "application/pdf" || normalizedMimeType.startsWith("image/");
+          if (!isSupportedType) {
+            redirectTarget.searchParams.set(
+              "taskInvoiceAttachmentError",
+              "Only PDF and image invoice attachments are supported right now.",
+            );
+            response.writeHead(303, { location: redirectTarget.toString() });
+            response.end();
+            return;
+          }
+
+          for (const invoiceId of invoiceIds) {
+            const apiResponse = await fetch(
+              `${apiBaseUrl}/v1/invoices/${encodeURIComponent(invoiceId)}/attachment`,
+              {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json; charset=utf-8",
+                },
+                body: JSON.stringify({
+                  fileName: file.fileName,
+                  ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+                  contentBase64: file.contentBase64,
+                  uploadedBy: "web_console",
+                }),
+              },
+            );
+
+            if (!apiResponse.ok) {
+              const errorBody = (await apiResponse.json().catch(async () => ({
+                message: await apiResponse.text(),
+              }))) as { message?: string };
+              redirectTarget.searchParams.set(
+                "taskInvoiceAttachmentError",
+                errorBody.message ?? "Invoice attachment could not be stored.",
+              );
+              response.writeHead(303, { location: redirectTarget.toString() });
+              response.end();
+              return;
+            }
+          }
+
+          redirectTarget.searchParams.set(
+            "taskInvoiceAttachmentStatus",
+            `Attached ${file.fileName} to ${invoiceIds.length} invoice record${invoiceIds.length === 1 ? "" : "s"}.`,
+          );
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to attach invoice document", error);
+          const redirectTarget = new URL("/tasks", requestBaseUrl);
+          redirectTarget.searchParams.set(
+            "taskInvoiceAttachmentError",
+            "Invoice attachment could not be stored.",
+          );
+          response.writeHead(303, { location: redirectTarget.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/control-center/workflows/create") {
+        let form: URLSearchParams | undefined;
+        try {
+          form = await readFormBody(request);
           const payload = {
             principal: { id: "web_console", roles: ["controller", "ar_manager"] },
             tenantId: "default",
             category: form.get("category")?.toString() || "collections",
             name: form.get("name")?.toString() || "New workflow",
+            senderIdentityId: form.get("senderIdentityId")?.toString() || undefined,
             senderEmail: form.get("senderEmail")?.toString() || undefined,
             testEmailRecipient: form.get("testEmailRecipient")?.toString() || undefined,
             testCallRecipient: form.get("testCallRecipient")?.toString() || undefined,
             timezone: form.get("timezone")?.toString() || "Asia/Manila",
             outreachWindowStart: form.get("outreachWindowStart")?.toString() || "08:00",
             outreachWindowEnd: form.get("outreachWindowEnd")?.toString() || "17:00",
-            outreachDays: (form.get("outreachDays")?.toString() || "monday,tuesday,wednesday,thursday,friday")
-              .split(",")
-              .map((value) => value.trim())
-              .filter(Boolean),
-            weekendCallingEnabled: form.get("weekendCallingEnabled")?.toString() === "on",
+            outreachDays: readWorkflowOutreachDays(form),
+            weekendCallingEnabled: workflowDaysIncludeWeekend(readWorkflowOutreachDays(form)),
           };
-          await fetch(`${apiBaseUrl}/v1/control-center/workflows`, {
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/workflows`, {
             method: "POST",
             headers: { "content-type": "application/json; charset=utf-8" },
             body: JSON.stringify(payload),
           });
-          response.writeHead(303, { location: "/control-center" });
+          if (!apiResponse.ok) {
+            const message = await safeReadErrorMessage(apiResponse, "Workflow creation failed.");
+            throw new Error(message);
+          }
+          const body = (await apiResponse.json()) as { workflow?: { id?: string } };
+          const location = body.workflow?.id
+            ? `/control-center?workflow=${encodeURIComponent(body.workflow.id)}`
+            : "/control-center";
+          response.writeHead(303, { location });
           response.end();
           return;
         } catch (error) {
           console.error("Failed to create control-center workflow", error);
-          response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-          response.end(JSON.stringify({ message: "Workflow creation failed." }));
+          const fallbackInput = buildFallbackWorkflowInput(form);
+          const fallbackWorkflow = createFallbackWorkflow(buildSeedControlCenter, fallbackInput);
+          response.writeHead(303, {
+            location: `/control-center?workflow=${encodeURIComponent(fallbackWorkflow.id)}`,
+          });
+          response.end();
           return;
         }
       }
 
       if (pathname === "/control-center/workflows/update") {
+        let form: URLSearchParams | undefined;
+        let workflowId: string | undefined;
         try {
-          const form = await readFormBody(request);
-          const workflowId = form.get("workflowId")?.toString();
+          form = await readFormBody(request);
+          workflowId = form.get("workflowId")?.toString();
           const payload = {
             principal: { id: "web_console", roles: ["controller", "ar_manager"] },
             name: form.get("name")?.toString() || undefined,
+            senderIdentityId: form.get("senderIdentityId")?.toString() || undefined,
             senderEmail: form.get("senderEmail")?.toString() || undefined,
             testEmailRecipient: form.get("testEmailRecipient")?.toString() || undefined,
             testCallRecipient: form.get("testCallRecipient")?.toString() || undefined,
             timezone: form.get("timezone")?.toString() || undefined,
             outreachWindowStart: form.get("outreachWindowStart")?.toString() || undefined,
             outreachWindowEnd: form.get("outreachWindowEnd")?.toString() || undefined,
-            outreachDays: form.get("outreachDays")?.toString()
-              ? form.get("outreachDays")!.toString().split(",").map((value) => value.trim()).filter(Boolean)
-              : undefined,
-            weekendCallingEnabled: form.get("weekendCallingEnabled")?.toString() === "on",
+            outreachDays: readWorkflowOutreachDays(form),
+            weekendCallingEnabled: workflowDaysIncludeWeekend(readWorkflowOutreachDays(form)),
           };
-          await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}`, {
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}`, {
             method: "PUT",
             headers: { "content-type": "application/json; charset=utf-8" },
             body: JSON.stringify(payload),
           });
+          if (!apiResponse.ok) {
+            const message = await safeReadErrorMessage(apiResponse, "Workflow update failed.");
+            throw new Error(message);
+          }
           response.writeHead(303, { location: workflowId ? `/control-center?workflow=${encodeURIComponent(workflowId)}` : "/control-center" });
           response.end();
           return;
         } catch (error) {
           console.error("Failed to update control-center workflow", error);
+          if (workflowId && form) {
+            updateFallbackWorkflowFromForm(form, workflowId);
+            response.writeHead(303, {
+              location: `/control-center?workflow=${encodeURIComponent(workflowId)}&controlCenterActionStatus=success&controlCenterActionMessage=${encodeURIComponent("Workflow settings saved locally because the API was unavailable.")}`,
+            });
+            response.end();
+            return;
+          }
           response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
           response.end(JSON.stringify({ message: "Workflow update failed." }));
           return;
         }
       }
 
-      if (pathname === "/control-center/workflows/toggle") {
+      if (pathname === "/control-center/workflows/test-email") {
+        const form = await readFormBody(request);
+        const workflowId = form.get("workflowId")?.toString();
+        const target = buildControlCenterWorkflowRedirect(requestBaseUrl, workflowId);
         try {
-          const form = await readFormBody(request);
-          const workflowId = form.get("workflowId")?.toString();
-          await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}/toggle`, {
+          const recipientEmail = form.get("testEmailRecipient")?.toString().trim();
+          if (!recipientEmail) {
+            throw new Error("Enter a test email recipient first.");
+          }
+          await persistControlCenterWorkflowForm(apiBaseUrl, form);
+          const senderIdentity = await resolveDefaultSenderIdentity(apiBaseUrl, form.get("senderIdentityId")?.toString());
+          if (!senderIdentity?.id) {
+            throw new Error("No connected outbound email sender is configured.");
+          }
+          const sendResponse = await fetch(`${apiBaseUrl}/v1/control-center/test-email`, {
             method: "POST",
             headers: { "content-type": "application/json; charset=utf-8" },
             body: JSON.stringify({
               principal: { id: "web_console", roles: ["controller", "ar_manager"] },
-              enabled: form.get("enabled")?.toString() === "true",
+              senderIdentityId: senderIdentity.id,
+              recipientEmail,
+              workflowId: form.get("workflowId")?.toString() || "control-center-test",
+              workflowName: form.get("name")?.toString() || "Control Center workflow",
             }),
           });
+          if (!sendResponse.ok) {
+            throw new Error(await safeReadErrorMessage(sendResponse, "Test email could not be sent."));
+          }
+          const result = (await sendResponse.json().catch(() => ({}))) as { deliveryState?: string; failureReason?: string };
+          if (result.deliveryState && result.deliveryState !== "sent") {
+            throw new Error(result.failureReason ?? `Test email ended in ${result.deliveryState}.`);
+          }
+          target.searchParams.set("controlCenterActionStatus", "success");
+          target.searchParams.set("controlCenterActionMessage", `Test email sent to ${recipientEmail}.`);
+          response.writeHead(303, { location: target.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to send control-center test email", error);
+          target.searchParams.set("controlCenterActionStatus", "error");
+          target.searchParams.set(
+            "controlCenterActionMessage",
+            error instanceof Error ? error.message : "Test email could not be sent.",
+          );
+          response.writeHead(303, { location: target.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/control-center/workflows/test-call") {
+        const form = await readFormBody(request);
+        const workflowId = form.get("workflowId")?.toString();
+        const target = buildControlCenterWorkflowRedirect(requestBaseUrl, workflowId);
+        try {
+          const phoneNumber = normalizeOutboundPhoneNumber(form.get("testCallRecipient")?.toString());
+          if (!phoneNumber) {
+            throw new Error("Enter a valid test call recipient first.");
+          }
+          await persistControlCenterWorkflowForm(apiBaseUrl, form);
+          const callResponse = await fetch(`${apiBaseUrl}/v1/retell/collections/outbound-call`, {
+            method: "POST",
+            headers: { "content-type": "application/json; charset=utf-8" },
+            body: JSON.stringify(buildControlCenterTestCallPayload(form, phoneNumber)),
+          });
+          if (!callResponse.ok) {
+            throw new Error(await safeReadErrorMessage(callResponse, "Test call could not be started."));
+          }
+          const result = (await callResponse.json().catch(() => ({}))) as { status?: string; blockedReason?: string };
+          if (result.status !== "started") {
+            throw new Error(result.blockedReason ?? "Test call was blocked by call-window or safety checks.");
+          }
+          target.searchParams.set("controlCenterActionStatus", "success");
+          target.searchParams.set("controlCenterActionMessage", `Test call started to ${phoneNumber}.`);
+          response.writeHead(303, { location: target.toString() });
+          response.end();
+          return;
+        } catch (error) {
+          console.error("Failed to start control-center test call", error);
+          target.searchParams.set("controlCenterActionStatus", "error");
+          target.searchParams.set(
+            "controlCenterActionMessage",
+            error instanceof Error ? error.message : "Test call could not be started.",
+          );
+          response.writeHead(303, { location: target.toString() });
+          response.end();
+          return;
+        }
+      }
+
+      if (pathname === "/control-center/workflows/toggle") {
+        let workflowId: string | undefined;
+        let enabled = false;
+        try {
+          const form = await readFormBody(request);
+          workflowId = form.get("workflowId")?.toString();
+          enabled = form.get("enabled")?.toString() === "true";
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}/toggle`, {
+            method: "POST",
+            headers: { "content-type": "application/json; charset=utf-8" },
+            body: JSON.stringify({
+              principal: { id: "web_console", roles: ["controller", "ar_manager"] },
+              enabled,
+            }),
+          });
+          if (!apiResponse.ok) {
+            if (workflowId) {
+              toggleFallbackWorkflow(buildSeedControlCenter, { workflowId, enabled });
+            }
+          }
           response.writeHead(303, { location: workflowId ? `/control-center?workflow=${encodeURIComponent(workflowId)}` : "/control-center" });
           response.end();
           return;
         } catch (error) {
           console.error("Failed to toggle control-center workflow", error);
+          if (workflowId) {
+            toggleFallbackWorkflow(buildSeedControlCenter, { workflowId, enabled });
+            response.writeHead(303, {
+              location: `/control-center?workflow=${encodeURIComponent(workflowId)}`,
+            });
+            response.end();
+            return;
+          }
           response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
           response.end(JSON.stringify({ message: "Workflow toggle failed." }));
           return;
@@ -1579,67 +2752,372 @@ async function main(): Promise<void> {
         }
       }
 
-      if (pathname === "/control-center/stages/create") {
+      if (pathname === "/control-center/workflows/enroll") {
+        const form = await readFormBody(request);
+        const workflowId = form.get("workflowId")?.toString();
+        const billingAccountIds = Array.from(
+          new Set(
+            [
+              ...form.getAll("billingAccountIds").map((value) => value.toString()),
+              ...(form.get("billingAccountId")?.toString() ? [form.get("billingAccountId")!.toString()] : []),
+            ].filter((value) => value.length > 0),
+          ),
+        );
         try {
-          const form = await readFormBody(request);
-          const workflowId = form.get("workflowId")?.toString();
-          await fetch(`${apiBaseUrl}/v1/control-center/stages`, {
+          if (!workflowId || billingAccountIds.length === 0) {
+            response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Workflow enrollment requires a workflow and at least one billing account." }));
+            return;
+          }
+          for (const billingAccountId of billingAccountIds) {
+            const parentAccountId = await resolveWorkflowEnrollmentParentAccountId(
+              apiBaseUrl,
+              billingAccountId,
+              form.get("parentAccountId")?.toString() || undefined,
+            );
+            const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}/customers`, {
+              method: "POST",
+              headers: { "content-type": "application/json; charset=utf-8" },
+              body: JSON.stringify({
+                principal: { id: "web_console", roles: ["controller", "ar_manager"] },
+                tenantId: "default",
+                billingAccountId,
+                parentAccountId,
+              }),
+            });
+            if (!apiResponse.ok) {
+              assignFallbackWorkflowCustomer(buildSeedControlCenter, {
+                workflowId,
+                billingAccountId,
+                parentAccountId,
+              });
+            }
+          }
+          response.writeHead(303, {
+            location: `/control-center?workflow=${encodeURIComponent(workflowId)}`,
+          });
+          response.end();
+          return;
+        } catch (error) {
+          try {
+            if (!workflowId || billingAccountIds.length === 0) {
+              throw error;
+            }
+            for (const billingAccountId of billingAccountIds) {
+              const parentAccountId =
+                form.get("parentAccountId")?.toString() || billingAccountId;
+              assignFallbackWorkflowCustomer(buildSeedControlCenter, {
+                workflowId,
+                billingAccountId,
+                parentAccountId,
+              });
+            }
+            response.writeHead(303, {
+              location: `/control-center?workflow=${encodeURIComponent(workflowId)}`,
+            });
+            response.end();
+            return;
+          } catch (fallbackError) {
+            console.error("Failed to enroll control-center workflow customer", error, fallbackError);
+            response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Workflow enrollment failed." }));
+            return;
+          }
+        }
+      }
+
+      if (pathname === "/control-center/workflows/customer/pause") {
+        const form = await readFormBody(request);
+        const workflowId = form.get("workflowId")?.toString();
+        const executionId = form.get("executionId")?.toString();
+        const reason = form.get("reason")?.toString();
+        try {
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}/customers/${executionId}/pause`, {
+            method: "POST",
+            headers: { "content-type": "application/json; charset=utf-8" },
+            body: JSON.stringify({
+              principal: { id: "web_console", roles: ["controller", "ar_manager"] },
+              ...(reason ? { reason } : {}),
+            }),
+          });
+          if (workflowId && executionId && !apiResponse.ok) {
+            pauseFallbackWorkflowCustomer(buildSeedControlCenter, {
+              workflowId,
+              executionId,
+              ...(reason ? { reason } : {}),
+            });
+          }
+          response.writeHead(303, {
+            location: workflowId ? `/control-center?workflow=${encodeURIComponent(workflowId)}` : "/control-center",
+          });
+          response.end();
+          return;
+        } catch (error) {
+          try {
+            if (!workflowId || !executionId) {
+              throw error;
+            }
+            pauseFallbackWorkflowCustomer(buildSeedControlCenter, {
+              workflowId,
+              executionId,
+              ...(reason ? { reason } : {}),
+            });
+            response.writeHead(303, {
+              location: `/control-center?workflow=${encodeURIComponent(workflowId)}`,
+            });
+            response.end();
+            return;
+          } catch (fallbackError) {
+            console.error("Failed to pause control-center workflow customer", error, fallbackError);
+            response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Workflow pause failed." }));
+            return;
+          }
+        }
+      }
+
+      if (pathname === "/control-center/workflows/customer/resume") {
+        const form = await readFormBody(request);
+        const workflowId = form.get("workflowId")?.toString();
+        const executionId = form.get("executionId")?.toString();
+        const reason = form.get("reason")?.toString();
+        try {
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}/customers/${executionId}/resume`, {
+            method: "POST",
+            headers: { "content-type": "application/json; charset=utf-8" },
+            body: JSON.stringify({
+              principal: { id: "web_console", roles: ["controller", "ar_manager"] },
+              ...(reason ? { reason } : {}),
+            }),
+          });
+          if (workflowId && executionId && !apiResponse.ok) {
+            resumeFallbackWorkflowCustomer(buildSeedControlCenter, {
+              workflowId,
+              executionId,
+              ...(reason ? { reason } : {}),
+            });
+          }
+          response.writeHead(303, {
+            location: workflowId ? `/control-center?workflow=${encodeURIComponent(workflowId)}` : "/control-center",
+          });
+          response.end();
+          return;
+        } catch (error) {
+          try {
+            if (!workflowId || !executionId) {
+              throw error;
+            }
+            resumeFallbackWorkflowCustomer(buildSeedControlCenter, {
+              workflowId,
+              executionId,
+              ...(reason ? { reason } : {}),
+            });
+            response.writeHead(303, {
+              location: `/control-center?workflow=${encodeURIComponent(workflowId)}`,
+            });
+            response.end();
+            return;
+          } catch (fallbackError) {
+            console.error("Failed to resume control-center workflow customer", error, fallbackError);
+            response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Workflow resume failed." }));
+            return;
+          }
+        }
+      }
+
+      if (pathname === "/control-center/workflows/customer/unenroll") {
+        const form = await readFormBody(request);
+        const workflowId = form.get("workflowId")?.toString();
+        const executionId = form.get("executionId")?.toString();
+        try {
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}/customers/${executionId}`, {
+            method: "DELETE",
+            headers: { "content-type": "application/json; charset=utf-8" },
+            body: JSON.stringify({
+              principal: { id: "web_console", roles: ["controller", "ar_manager"] },
+            }),
+          });
+          if (workflowId && executionId && !apiResponse.ok) {
+            unenrollFallbackWorkflowCustomer(buildSeedControlCenter, {
+              workflowId,
+              executionId,
+            });
+          }
+          response.writeHead(303, {
+            location: workflowId ? `/control-center?workflow=${encodeURIComponent(workflowId)}` : "/control-center",
+          });
+          response.end();
+          return;
+        } catch (error) {
+          try {
+            if (!workflowId || !executionId) {
+              throw error;
+            }
+            unenrollFallbackWorkflowCustomer(buildSeedControlCenter, {
+              workflowId,
+              executionId,
+            });
+            response.writeHead(303, {
+              location: `/control-center?workflow=${encodeURIComponent(workflowId)}`,
+            });
+            response.end();
+            return;
+          } catch (fallbackError) {
+            console.error("Failed to unenroll control-center workflow customer", error, fallbackError);
+            response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Workflow unenrollment failed." }));
+            return;
+          }
+        }
+      }
+
+      if (pathname === "/control-center/stages/create") {
+        const form = await readFormBody(request);
+        const workflowId = form.get("workflowId")?.toString();
+        const triggerComparator = form.get("triggerComparator")?.toString() || "due_in_days";
+        const rawOffsetDays = Number.parseInt(form.get("offsetDays")?.toString() || "0", 10);
+        const outreachType = form.get("outreachType")?.toString() || "email";
+        const triggerType = form.get("triggerType")?.toString() || "relative_due_date";
+        const templateMode = form.get("templateMode")?.toString() || "ai_generated";
+        const aiStrategyId = form.get("aiStrategyId")?.toString() || undefined;
+        const templateId = form.get("templateId")?.toString() || undefined;
+        const notes = form.get("notes")?.toString() || "New stage";
+        const triggerConfig = {
+          comparator: triggerComparator as
+            | "due_in_days"
+            | "due_today"
+            | "days_past_due"
+            | "promise_missed"
+            | "remittance_missing_after_payment"
+            | "no_response_after_prior_stage"
+            | "manual",
+          offsetDays: triggerComparator === "due_today" ? 0 : rawOffsetDays,
+        };
+        try {
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/stages`, {
             method: "POST",
             headers: { "content-type": "application/json; charset=utf-8" },
             body: JSON.stringify({
               principal: { id: "web_console", roles: ["controller", "ar_manager"] },
               tenantId: "default",
               workflowId,
-              outreachType: form.get("outreachType")?.toString() || "email",
-              triggerType: form.get("triggerType")?.toString() || "relative_due_date",
-              triggerConfig: {
-                comparator: form.get("triggerComparator")?.toString() || "due_in_days",
-                offsetDays: Number.parseInt(form.get("offsetDays")?.toString() || "0", 10),
-              },
-              templateMode: form.get("templateMode")?.toString() || "ai_generated",
-              aiStrategyId: form.get("aiStrategyId")?.toString() || undefined,
-              templateId: form.get("templateId")?.toString() || undefined,
-              notes: form.get("notes")?.toString() || "New stage",
+              outreachType,
+              triggerType,
+              triggerConfig,
+              templateMode,
+              aiStrategyId,
+              templateId,
+              notes,
             }),
           });
+          if (!apiResponse.ok && workflowId) {
+            addFallbackWorkflowStage(buildSeedControlCenter, {
+              workflowId,
+              outreachType: outreachType as "email" | "call" | "sms",
+              triggerType: triggerType as
+                | "relative_due_date"
+                | "promise_to_pay_state"
+                | "payment_signal_state"
+                | "response_gap"
+                | "manual_operator_trigger",
+              triggerConfig,
+              templateMode: templateMode as "pre_saved_template" | "ai_generated",
+              ...(templateId ? { templateId } : {}),
+              ...(aiStrategyId ? { aiStrategyId } : {}),
+              notes,
+            });
+          }
           response.writeHead(303, { location: workflowId ? `/control-center?workflow=${encodeURIComponent(workflowId)}` : "/control-center" });
           response.end();
           return;
         } catch (error) {
-          console.error("Failed to create control-center stage", error);
-          response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-          response.end(JSON.stringify({ message: "Stage creation failed." }));
-          return;
+          try {
+            if (!workflowId) {
+              throw error;
+            }
+            addFallbackWorkflowStage(buildSeedControlCenter, {
+              workflowId,
+              outreachType: outreachType as "email" | "call" | "sms",
+              triggerType: triggerType as
+                | "relative_due_date"
+                | "promise_to_pay_state"
+                | "payment_signal_state"
+                | "response_gap"
+                | "manual_operator_trigger",
+              triggerConfig: {
+                comparator: triggerComparator as
+                  | "due_in_days"
+                  | "due_today"
+                  | "days_past_due"
+                  | "promise_missed"
+                  | "remittance_missing_after_payment"
+                  | "no_response_after_prior_stage"
+                  | "manual",
+                offsetDays: triggerComparator === "due_today" ? 0 : rawOffsetDays,
+              },
+              templateMode: templateMode as "pre_saved_template" | "ai_generated",
+              ...(templateId ? { templateId } : {}),
+              ...(aiStrategyId ? { aiStrategyId } : {}),
+              notes,
+            });
+            response.writeHead(303, { location: `/control-center?workflow=${encodeURIComponent(workflowId)}` });
+            response.end();
+            return;
+          } catch (fallbackError) {
+            console.error("Failed to create control-center stage", error, fallbackError);
+            response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Stage creation failed." }));
+            return;
+          }
         }
       }
 
-      if (pathname === "/control-center/folders/create") {
+      if (pathname === "/control-center/stages/delete") {
+        const form = await readFormBody(request);
+        const workflowId = form.get("workflowId")?.toString();
+        const stageId = form.get("stageId")?.toString();
         try {
-          const form = await readFormBody(request);
-          await fetch(`${apiBaseUrl}/v1/control-center/template-folders`, {
-            method: "POST",
+          if (!workflowId || !stageId) {
+            response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Stage deletion requires a workflow and stage id." }));
+            return;
+          }
+          const apiResponse = await fetch(`${apiBaseUrl}/v1/control-center/stages/${encodeURIComponent(stageId)}`, {
+            method: "DELETE",
             headers: { "content-type": "application/json; charset=utf-8" },
             body: JSON.stringify({
               principal: { id: "web_console", roles: ["controller", "ar_manager"] },
-              tenantId: "default",
-              name: form.get("name")?.toString() || "New Folder",
             }),
           });
-          response.writeHead(303, { location: "/control-center" });
+          if (!apiResponse.ok) {
+            removeFallbackWorkflowStage(buildSeedControlCenter, { workflowId, stageId });
+          }
+          response.writeHead(303, { location: `/control-center?workflow=${encodeURIComponent(workflowId)}` });
           response.end();
           return;
         } catch (error) {
-          console.error("Failed to create template folder", error);
-          response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-          response.end(JSON.stringify({ message: "Template folder creation failed." }));
-          return;
+          try {
+            if (!workflowId || !stageId) {
+              throw error;
+            }
+            removeFallbackWorkflowStage(buildSeedControlCenter, { workflowId, stageId });
+            response.writeHead(303, { location: `/control-center?workflow=${encodeURIComponent(workflowId)}` });
+            response.end();
+            return;
+          } catch (fallbackError) {
+            console.error("Failed to delete control-center stage", error, fallbackError);
+            response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Stage deletion failed." }));
+            return;
+          }
         }
       }
 
       if (pathname === "/control-center/templates/create") {
+        const form = await readFormBody(request);
         try {
-          const form = await readFormBody(request);
-          await fetch(`${apiBaseUrl}/v1/control-center/templates`, {
+          const createResponse = await fetch(`${apiBaseUrl}/v1/control-center/templates`, {
             method: "POST",
             headers: { "content-type": "application/json; charset=utf-8" },
             body: JSON.stringify({
@@ -1654,28 +3132,58 @@ async function main(): Promise<void> {
                 .filter(Boolean),
             }),
           });
-          response.writeHead(303, { location: "/control-center" });
+          if (!createResponse.ok) {
+            throw new Error(await safeReadErrorMessage(createResponse, "Template creation failed."));
+          }
+          await createResponse.json().catch(() => null);
+          response.writeHead(303, {
+            location: "/control-center?controlCenterTab=email-templates",
+          });
           response.end();
           return;
         } catch (error) {
-          console.error("Failed to create template", error);
-          response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-          response.end(JSON.stringify({ message: "Template creation failed." }));
-          return;
+          try {
+            createFallbackTemplate(buildSeedControlCenter, {
+              tenantId: "default",
+              name: form.get("name")?.toString() || "New Template",
+              subject: form.get("subject")?.toString() || "",
+              body: form.get("body")?.toString() || "",
+              ccEmails: (form.get("ccEmails")?.toString() ?? "")
+                .split(",")
+                .map((email) => email.trim())
+                .filter((email) => email.length > 0),
+              channelCompatibility: ((form.get("channelCompatibility")?.toString() || "email")
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean) as Array<"email" | "sms" | "voice_agent">),
+              autoCorrectEnabled: form.get("autoCorrectEnabled")?.toString() === "on",
+              isDefault: form.get("isDefault")?.toString() === "on",
+              previewSeedKey: "bill-default",
+            });
+            response.writeHead(303, {
+              location: "/control-center?controlCenterTab=email-templates",
+            });
+            response.end();
+            return;
+          } catch (fallbackError) {
+            console.error("Failed to create template", error, fallbackError);
+            response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Template creation failed." }));
+            return;
+          }
         }
       }
 
       if (pathname === "/control-center/templates/update") {
+        const form = await readFormBody(request);
         try {
-          const form = await readFormBody(request);
           const templateId = form.get("templateId")?.toString();
-          await fetch(`${apiBaseUrl}/v1/control-center/templates/${templateId}`, {
+          const updateResponse = await fetch(`${apiBaseUrl}/v1/control-center/templates/${templateId}`, {
             method: "PUT",
             headers: { "content-type": "application/json; charset=utf-8" },
             body: JSON.stringify({
               principal: { id: "web_console", roles: ["controller", "ar_manager"] },
               name: form.get("name")?.toString() || undefined,
-              folderId: form.get("folderId")?.toString() || null,
               subject: form.get("subject")?.toString() || undefined,
               body: form.get("body")?.toString() || undefined,
               ccEmails: (form.get("ccEmails")?.toString() ?? "")
@@ -1686,18 +3194,48 @@ async function main(): Promise<void> {
               isDefault: form.get("isDefault")?.toString() === "on",
             }),
           });
+          if (!updateResponse.ok) {
+            throw new Error(await safeReadErrorMessage(updateResponse, "Template update failed."));
+          }
           response.writeHead(303, {
-            location: templateId
-              ? `/control-center?controlCenterTab=email-templates&selectedTemplateId=${encodeURIComponent(templateId)}`
-              : "/control-center?controlCenterTab=email-templates",
+            location: "/control-center?controlCenterTab=email-templates",
           });
           response.end();
           return;
         } catch (error) {
-          console.error("Failed to update template", error);
-          response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-          response.end(JSON.stringify({ message: "Template update failed." }));
-          return;
+          try {
+            const templateId = form.get("templateId")?.toString();
+            if (!templateId) {
+              throw error;
+            }
+            const fallbackName = form.get("name")?.toString() || undefined;
+            const fallbackSubject = form.get("subject")?.toString() || undefined;
+            const fallbackBody = form.get("body")?.toString() || undefined;
+            const fallbackTemplate = updateFallbackTemplate(buildSeedControlCenter, templateId, {
+              ...(fallbackName !== undefined ? { name: fallbackName } : {}),
+              ...(fallbackSubject !== undefined ? { subject: fallbackSubject } : {}),
+              ...(fallbackBody !== undefined ? { body: fallbackBody } : {}),
+              ccEmails: (form.get("ccEmails")?.toString() ?? "")
+                .split(",")
+                .map((email) => email.trim())
+                .filter((email) => email.length > 0),
+              autoCorrectEnabled: form.get("autoCorrectEnabled")?.toString() === "on",
+              isDefault: form.get("isDefault")?.toString() === "on",
+            });
+            if (!fallbackTemplate) {
+              throw error;
+            }
+            response.writeHead(303, {
+              location: "/control-center?controlCenterTab=email-templates",
+            });
+            response.end();
+            return;
+          } catch (fallbackError) {
+            console.error("Failed to update template", error, fallbackError);
+            response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+            response.end(JSON.stringify({ message: "Template update failed." }));
+            return;
+          }
         }
       }
 
@@ -1709,17 +3247,10 @@ async function main(): Promise<void> {
             headers: { "content-type": "application/json; charset=utf-8" },
             body: JSON.stringify({
               principal: { id: "web_console", roles: ["controller", "ar_manager"] },
-              phoneNumber: form.get("phoneNumber")?.toString() || undefined,
-              humanSupportNumber: form.get("humanSupportNumber")?.toString() || null,
-              smsEnabled: form.get("smsEnabled")?.toString() === "on",
               outboundCallingEnabled: form.get("outboundCallingEnabled")?.toString() === "on",
-              handoffToHumanEnabled: form.get("handoffToHumanEnabled")?.toString() === "on",
-              callRecordingDisclaimerEnabled: form.get("callRecordingDisclaimerEnabled")?.toString() === "on",
-              manualAgentInstructions: form.get("manualAgentInstructions")?.toString() || undefined,
-              overrideOpeningLine: form.get("overrideOpeningLine")?.toString() || null,
             }),
           });
-          response.writeHead(303, { location: "/control-center" });
+          response.writeHead(303, { location: "/control-center?controlCenterTab=call-agent" });
           response.end();
           return;
         } catch (error) {
@@ -2115,10 +3646,70 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (request.method === "GET" && pathname === "/customers/soa") {
+        const html = await renderCustomerStatementHtml({
+          customerId: requestUrl.searchParams.get("customer") ?? undefined,
+          asOf: requestUrl.searchParams.get("asOf") ?? undefined,
+        });
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end(html);
+        return;
+      }
+
+      if (request.method === "GET" && pathname === "/invoices/export") {
+        const exportUrl = new URL("/v1/invoices/export", apiBaseUrl);
+        requestUrl.searchParams.forEach((value, key) => {
+          exportUrl.searchParams.append(key, value);
+        });
+        const apiResponse = await fetch(exportUrl.toString(), {
+          headers: buildPrincipalProxyHeaders(request.headers),
+        });
+        const body = Buffer.from(await apiResponse.arrayBuffer());
+        if (!apiResponse.ok) {
+          response.writeHead(apiResponse.status, {
+            "content-type": apiResponse.headers.get("content-type") ?? "application/json; charset=utf-8",
+          });
+          response.end(body);
+          return;
+        }
+        response.writeHead(apiResponse.status, {
+          "content-type": apiResponse.headers.get("content-type") ?? "application/pdf",
+          "content-disposition":
+            apiResponse.headers.get("content-disposition") ??
+            `attachment; filename="yield-aros-invoices.pdf"`,
+        });
+        response.end(body);
+        return;
+      }
+
+      if (request.method === "GET" && pathname === "/collections/call-inbox/export") {
+        const exportUrl = new URL("/v1/collections/call-inbox/export", apiBaseUrl);
+        requestUrl.searchParams.forEach((value, key) => {
+          exportUrl.searchParams.append(key, value);
+        });
+        const apiResponse = await fetch(exportUrl.toString(), {
+          headers: buildPrincipalProxyHeaders(request.headers),
+        });
+        const body = await apiResponse.text();
+        response.writeHead(apiResponse.status, {
+          "content-type": apiResponse.headers.get("content-type") ?? "text/csv; charset=utf-8",
+          "content-disposition":
+            apiResponse.headers.get("content-disposition") ??
+            `attachment; filename="yield-aros-call-inbox.csv"`,
+        });
+        response.end(body);
+        return;
+      }
+
       const html = await renderDashboardHtml(pathname, {
         cashAppTab: requestUrl.searchParams.get("tab") ?? undefined,
+        analyticsTrend: readAnalyticsTrend(requestUrl),
+        homeCalendarDate: requestUrl.searchParams.get("calendarDate") ?? undefined,
+        taskFilters: readTaskFilters(requestUrl),
+        invoiceFilters: readInvoiceFilters(requestUrl),
         customerId: requestUrl.searchParams.get("customer") ?? undefined,
         customerTab: requestUrl.searchParams.get("tab") ?? undefined,
+        invoiceNumber: requestUrl.searchParams.get("invoice") ?? undefined,
         odooConnectState: requestUrl.searchParams.get("odooConnectState") ?? undefined,
         odooConnectError: requestUrl.searchParams.get("odooConnectError") ?? undefined,
         emailConnectError: requestUrl.searchParams.get("emailConnectError") ?? undefined,
@@ -2138,13 +3729,45 @@ async function main(): Promise<void> {
         inboxReplyError: requestUrl.searchParams.get("inboxReplyError") ?? undefined,
         collectionsComposeStatus: requestUrl.searchParams.get("collectionsComposeStatus") ?? undefined,
         collectionsComposeError: requestUrl.searchParams.get("collectionsComposeError") ?? undefined,
+        collectionsComposeDraftComposeId:
+          requestUrl.searchParams.get("collectionsComposeDraftComposeId") ?? undefined,
+        collectionsComposeDraftGenerator:
+          requestUrl.searchParams.get("collectionsComposeDraftGenerator") ?? undefined,
+        collectionsComposeDraftSubject:
+          requestUrl.searchParams.get("collectionsComposeDraftSubject") ?? undefined,
+        collectionsComposeDraftBody:
+          requestUrl.searchParams.get("collectionsComposeDraftBody") ?? undefined,
+        collectionsComposeDraftAttachments:
+          requestUrl.searchParams.getAll("collectionsComposeDraftAttachment"),
+        taskComposeStatus: requestUrl.searchParams.get("taskComposeStatus") ?? undefined,
+        taskComposeError: requestUrl.searchParams.get("taskComposeError") ?? undefined,
+        taskInvoiceAttachmentStatus:
+          requestUrl.searchParams.get("taskInvoiceAttachmentStatus") ?? undefined,
+        taskInvoiceAttachmentError:
+          requestUrl.searchParams.get("taskInvoiceAttachmentError") ?? undefined,
+        taskComposeDraftComposeId: requestUrl.searchParams.get("taskComposeDraftComposeId") ?? undefined,
+        taskComposeDraftGenerator: requestUrl.searchParams.get("taskComposeDraftGenerator") ?? undefined,
+        taskComposeDraftSubject: requestUrl.searchParams.get("taskComposeDraftSubject") ?? undefined,
+        taskComposeDraftBody: requestUrl.searchParams.get("taskComposeDraftBody") ?? undefined,
+        taskComposeDraftNote: requestUrl.searchParams.get("taskComposeDraftNote") ?? undefined,
         onboardingImportStatus: readOnboardingImportStatus(requestUrl),
         controlCenterTab: readControlCenterTab(requestUrl),
         controlCenterExpandedWorkflowId: requestUrl.searchParams.get("workflow") ?? undefined,
         controlCenterSelectedTemplateId: requestUrl.searchParams.get("selectedTemplateId") ?? undefined,
+        controlCenterTemplateSearch: requestUrl.searchParams.get("templateSearch") ?? undefined,
+        controlCenterActionStatus: readControlCenterActionStatus(requestUrl),
+        controlCenterActionMessage: requestUrl.searchParams.get("controlCenterActionMessage") ?? undefined,
+        controlCenterEnrollModalWorkflowId: requestUrl.searchParams.get("enrollWorkflow") ?? undefined,
         controlCenterStageModalWorkflowId: requestUrl.searchParams.get("stageWorkflow") ?? undefined,
         controlCenterStageModalChannel: readControlCenterStageChannel(requestUrl),
         controlCenterStageModalTemplateMode: readControlCenterStageTemplateMode(requestUrl),
+        collectionsTab: readCollectionsTab(requestUrl),
+        collectionsEmailFilters: readCollectionsEmailFilters(requestUrl),
+        collectionsCallFilters: readCollectionsCallFilters(requestUrl),
+        customerCallStatus: readCustomerCallStatus(requestUrl),
+        customerCallMessage: requestUrl.searchParams.get("customerCallMessage") ?? undefined,
+        customerEmailStatus: readCustomerEmailStatus(requestUrl),
+        customerEmailMessage: requestUrl.searchParams.get("customerEmailMessage") ?? undefined,
       });
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(html);
@@ -2170,21 +3793,501 @@ function normalizeApiHost(host: string) {
   return host === "0.0.0.0" ? "127.0.0.1" : host;
 }
 
+async function safeReadErrorMessage(response: Response, fallback: string) {
+  try {
+    const payload = (await response.json()) as { message?: string };
+    return payload.message ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function buildFallbackWorkflowInput(form?: URLSearchParams) {
+  const senderEmail = form?.get("senderEmail")?.toString();
+  const testEmailRecipient = form?.get("testEmailRecipient")?.toString();
+  const testCallRecipient = form?.get("testCallRecipient")?.toString();
+  const outreachDays = form ? readWorkflowOutreachDays(form) : ["monday", "tuesday", "wednesday", "thursday", "friday"];
+
+  return {
+    tenantId: "default",
+    category: (form?.get("category")?.toString() as "collections" | "payments" | undefined) ?? "collections",
+    name: form?.get("name")?.toString() || "New workflow",
+    ...(senderEmail ? { senderEmail } : {}),
+    ...(testEmailRecipient ? { testEmailRecipient } : {}),
+    ...(testCallRecipient ? { testCallRecipient } : {}),
+    timezone: form?.get("timezone")?.toString() || "Asia/Manila",
+    outreachWindowStart: form?.get("outreachWindowStart")?.toString() || "08:00",
+    outreachWindowEnd: form?.get("outreachWindowEnd")?.toString() || "17:00",
+    outreachDays: outreachDays as Array<
+      "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday"
+    >,
+    weekendCallingEnabled: workflowDaysIncludeWeekend(outreachDays),
+  };
+}
+
+function updateFallbackWorkflowFromForm(form: URLSearchParams, workflowId: string) {
+  const outreachDays = readWorkflowOutreachDays(form) as Array<
+    "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday"
+  >;
+  const senderIdentityId = form.get("senderIdentityId")?.toString();
+  const senderEmail = form.get("senderEmail")?.toString();
+  const testEmailRecipient = form.get("testEmailRecipient")?.toString();
+  const testCallRecipient = form.get("testCallRecipient")?.toString();
+  replaceFallbackWorkflow(buildSeedControlCenter, workflowId, (workflow) => ({
+    ...workflow,
+    name: form.get("name")?.toString() || workflow.name,
+    ...(senderIdentityId ? { senderIdentityId } : {}),
+    ...(senderEmail ? { senderEmail } : {}),
+    ...(testEmailRecipient ? { testEmailRecipient } : {}),
+    ...(testCallRecipient ? { testCallRecipient } : {}),
+    timezone: form.get("timezone")?.toString() || workflow.timezone || "Asia/Manila",
+    outreachWindowStart: form.get("outreachWindowStart")?.toString() || workflow.outreachWindowStart,
+    outreachWindowEnd: form.get("outreachWindowEnd")?.toString() || workflow.outreachWindowEnd,
+    outreachDays,
+    weekendCallingEnabled: workflowDaysIncludeWeekend(outreachDays),
+    updatedAt: new Date().toISOString(),
+    metadata: {
+      ...workflow.metadata,
+      lastChangedBy: "human",
+      controlCenterFallback: true,
+    },
+  }));
+}
+
+function readWorkflowOutreachDays(form: URLSearchParams): string[] {
+  const allowed = new Set(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]);
+  const values = form
+    .getAll("outreachDays")
+    .flatMap((value) => value.toString().split(","))
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => allowed.has(value));
+  return values.length > 0 ? Array.from(new Set(values)) : ["monday", "tuesday", "wednesday", "thursday", "friday"];
+}
+
+function workflowDaysIncludeWeekend(days: string[]) {
+  return days.includes("saturday") || days.includes("sunday");
+}
+
+async function persistControlCenterWorkflowForm(apiBaseUrl: string, form: URLSearchParams) {
+  const workflowId = form.get("workflowId")?.toString();
+  if (!workflowId) {
+    return;
+  }
+  const outreachDays = readWorkflowOutreachDays(form);
+  const response = await fetch(`${apiBaseUrl}/v1/control-center/workflows/${workflowId}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({
+      principal: { id: "web_console", roles: ["controller", "ar_manager"] },
+      name: form.get("name")?.toString() || undefined,
+      senderIdentityId: form.get("senderIdentityId")?.toString() || undefined,
+      senderEmail: form.get("senderEmail")?.toString() || undefined,
+      testEmailRecipient: form.get("testEmailRecipient")?.toString() || undefined,
+      testCallRecipient: form.get("testCallRecipient")?.toString() || undefined,
+      timezone: form.get("timezone")?.toString() || "Asia/Manila",
+      outreachWindowStart: form.get("outreachWindowStart")?.toString() || undefined,
+      outreachWindowEnd: form.get("outreachWindowEnd")?.toString() || undefined,
+      outreachDays,
+      weekendCallingEnabled: workflowDaysIncludeWeekend(outreachDays),
+    }),
+  });
+  if (!response.ok) {
+    updateFallbackWorkflowFromForm(form, workflowId);
+  }
+}
+
+async function resolveDefaultSenderIdentity(apiBaseUrl: string, preferredIdentityId?: string) {
+  const response = await fetch(`${apiBaseUrl}/v1/email/sending-identities`);
+  if (!response.ok) {
+    return undefined;
+  }
+  const payload = (await response.json().catch(() => ({}))) as {
+    identities?: Array<{
+      id: string;
+      senderEmail?: string;
+      sendAsEmail?: string;
+      connectionStatus?: string;
+      healthState?: string;
+      isDefault?: boolean;
+    }>;
+  };
+  const identities = payload.identities ?? [];
+  const connected = identities.filter((identity) => identity.connectionStatus === "connected" || !identity.connectionStatus);
+  return (
+    connected.find((identity) => identity.id === preferredIdentityId) ??
+    connected.find((identity) => identity.isDefault) ??
+    connected[0]
+  );
+}
+
+function buildControlCenterWorkflowRedirect(requestBaseUrl: string, workflowId?: string) {
+  const target = new URL("/control-center", requestBaseUrl);
+  if (workflowId) {
+    target.searchParams.set("workflow", workflowId);
+  }
+  return target;
+}
+
+function buildControlCenterTestCallPayload(form: URLSearchParams, phoneNumber: string) {
+  const now = new Date().toISOString();
+  const workflowId = form.get("workflowId")?.toString() || "control-center-test";
+  const { account, contact, invoices } = buildControlCenterTestReceivableContext(now, {
+    workflowId,
+    phoneNumber,
+  });
+  const days = readWorkflowOutreachDays(form);
+  return {
+    principal: { id: "web_console", roles: ["controller", "ar_manager"] },
+    tenantId: "default",
+    account,
+    invoices,
+    contact,
+    asOf: now,
+    callWindow: {
+      timezone: form.get("timezone")?.toString() || "Asia/Manila",
+      startHour: readHour(form.get("outreachWindowStart")?.toString(), 8),
+      endHour: readHour(form.get("outreachWindowEnd")?.toString(), 17),
+      allowedWeekdays: days.map(dayToCallWindowWeekday),
+    },
+  };
+}
+
+function buildControlCenterTestReceivableContext(
+  now: string,
+  input: { workflowId: string; recipientEmail?: string; phoneNumber?: string },
+) {
+  const parentAccountId = "11111111-1111-4111-8111-111111111111";
+  const billingAccountId = "22222222-2222-4222-8222-222222222222";
+  const account = {
+    id: billingAccountId,
+    createdAt: now,
+    updatedAt: now,
+    parentAccountId,
+    accountNumber: "CONTROL-CENTER-TEST",
+    displayName: "Control Center Test Account",
+    currency: "PHP",
+    accountTier: "standard",
+    status: "active",
+    centrallyPaid: false,
+    metadata: { source: "control_center_test", workflowId: input.workflowId },
+  };
+  const contact = {
+    id: "33333333-3333-4333-8333-333333333333",
+    createdAt: now,
+    updatedAt: now,
+    parentAccountId,
+    billingAccountId,
+    scope: "billing_account",
+    scopeId: billingAccountId,
+    fullName: "Control Center test recipient",
+    ...(input.recipientEmail ? { email: input.recipientEmail } : {}),
+    ...(input.phoneNumber ? { phone: input.phoneNumber } : {}),
+    role: "ap",
+    isPrimary: true,
+    isVerified: true,
+    allowAutoSend: true,
+    recentSuccessfulResponses: 1,
+    metadata: { source: "control_center_test", workflowId: input.workflowId },
+  };
+  const invoices = [
+    {
+      id: "44444444-4444-4444-8444-444444444444",
+      createdAt: now,
+      updatedAt: now,
+      state: "synced_open",
+      parentAccountId,
+      billingAccountId,
+      invoiceNumber: "CC-TEST-001",
+      currency: "PHP",
+      amountCents: 100,
+      dueDate: now.slice(0, 10),
+      metadata: { source: "control_center_test", workflowId: input.workflowId },
+    },
+  ];
+  return { account, contact, invoices };
+}
+
+function readHour(value: string | undefined, fallback: number) {
+  if (!value) {
+    return fallback;
+  }
+  const hour = Number(value.split(":")[0]);
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : fallback;
+}
+
+function dayToCallWindowWeekday(day: string) {
+  switch (day) {
+    case "monday":
+      return 1;
+    case "tuesday":
+      return 2;
+    case "wednesday":
+      return 3;
+    case "thursday":
+      return 4;
+    case "friday":
+      return 5;
+    case "saturday":
+      return 6;
+    case "sunday":
+      return 7;
+    default:
+      return 1;
+  }
+}
+
+async function resolveWorkflowEnrollmentParentAccountId(
+  apiBaseUrl: string,
+  billingAccountId: string,
+  fallbackParentAccountId?: string,
+) {
+  try {
+    const response = await fetch(`${apiBaseUrl}/v1/accounts`);
+    if (!response.ok) {
+      return fallbackParentAccountId ?? billingAccountId;
+    }
+    const payload = (await response.json()) as {
+      items?: Array<{ billingAccountId?: string; parentAccountId?: string }>;
+    };
+    const match = payload.items?.find((item) => item.billingAccountId === billingAccountId);
+    return match?.parentAccountId ?? fallbackParentAccountId ?? billingAccountId;
+  } catch {
+    return fallbackParentAccountId ?? billingAccountId;
+  }
+}
+
 function readControlCenterStageChannel(url: URL) {
   const value = url.searchParams.get("stageChannel");
   return value === "email" || value === "call" || value === "sms" ? value : undefined;
 }
 
+function readAnalyticsTrend(url: URL) {
+  const value = url.searchParams.get("trend");
+
+  return value === "weekly" || value === "monthly" ? value : undefined;
+}
+
+function readTaskFilters(url: URL) {
+  const filters: {
+    status?: "active" | "all" | "open" | "in_progress" | "pending_approval" | "completed" | "closed" | "deleted";
+    type?: "all" | "collection" | "cash_app" | "deduction" | "integration" | "credit_line";
+    priority?: "all" | "high" | "medium" | "low";
+    q?: string;
+  } = {};
+  const status = url.searchParams.get("status");
+  if (status === "active" || status === "all" || status === "open" || status === "in_progress" || status === "pending_approval" || status === "completed" || status === "closed" || status === "deleted") {
+    filters.status = status;
+  }
+  const type = url.searchParams.get("type");
+  if (type === "all" || type === "collection" || type === "cash_app" || type === "deduction" || type === "integration" || type === "credit_line") {
+    filters.type = type;
+  }
+  const priority = url.searchParams.get("priority");
+  if (priority === "all" || priority === "high" || priority === "medium" || priority === "low") {
+    filters.priority = priority;
+  }
+  const q = url.searchParams.get("q")?.trim();
+  if (q) {
+    filters.q = q;
+  }
+  return Object.keys(filters).length > 0 ? filters : undefined;
+}
+
+function readInvoiceFilters(url: URL): InvoiceFilterInput | undefined {
+  const filters: InvoiceFilterInput = {};
+  const q = url.searchParams.get("q")?.trim();
+  if (q) {
+    filters.q = q;
+  }
+  const status = url.searchParams.get("status");
+  if (status === "all" || status === "open" || status === "partial" || status === "paid" || status === "disputed" || status === "voided") {
+    filters.status = status;
+  }
+  const type = url.searchParams.get("type");
+  if (
+    type === "all" ||
+    type === "live_connection" ||
+    type === "manual_upload" ||
+    type === "seed_fallback" ||
+    type === "installment_plan" ||
+    type === "standard_invoice"
+  ) {
+    filters.type = type;
+  }
+  const more = url.searchParams.get("more");
+  if (
+    more === "all" ||
+    more === "overdue" ||
+    more === "due_today" ||
+    more === "due_soon" ||
+    more === "with_promise" ||
+    more === "with_balance" ||
+    more === "with_branch" ||
+    more === "missing_branch"
+  ) {
+    filters.more = more;
+  }
+  const page = Number(url.searchParams.get("page"));
+  if (Number.isFinite(page) && page > 0) {
+    filters.page = Math.floor(page);
+  }
+  return Object.keys(filters).length > 0 ? filters : undefined;
+}
+
 function readControlCenterTab(url: URL) {
   const value = url.searchParams.get("controlCenterTab");
-  return value === "workflows" || value === "email-templates" || value === "call-agent" || value === "config"
+  return value === "workflows" || value === "email-templates" || value === "call-agent"
     ? value
     : undefined;
+}
+
+function readControlCenterActionStatus(url: URL) {
+  const value = url.searchParams.get("controlCenterActionStatus");
+  return value === "success" || value === "error" ? value : undefined;
 }
 
 function readControlCenterStageTemplateMode(url: URL) {
   const value = url.searchParams.get("stageTemplateMode");
   return value === "pre_saved_template" || value === "ai_generated" ? value : undefined;
+}
+
+function readCollectionsTab(url: URL) {
+  const value = url.searchParams.get("tab");
+  return value === "email" || value === "call-inbox" ? value : undefined;
+}
+
+function readCollectionsEmailFilters(url: URL): CollectionsEmailFilterInput | undefined {
+  const filters: CollectionsEmailFilterInput = {};
+  const folder = url.searchParams.get("folder");
+  if (folder === "all" || folder === "unread" || folder === "sent" || folder === "drafts") {
+    filters.folder = folder;
+  }
+  const customer = url.searchParams.get("customer")?.trim();
+  if (customer && customer !== "all") {
+    filters.customer = customer;
+  }
+  const q = url.searchParams.get("q")?.trim();
+  if (q) {
+    filters.q = q;
+  }
+  return Object.keys(filters).length > 0 ? filters : undefined;
+}
+
+function readCollectionsCallFilters(url: URL): CollectionsCallFilterInput | undefined {
+  const filters: CollectionsCallFilterInput = {};
+  const direction = url.searchParams.get("direction");
+  if (direction === "all" || direction === "inbound" || direction === "outbound" || direction === "unknown") {
+    filters.direction = direction;
+  }
+  const status = url.searchParams.get("status");
+  if (
+    status === "all" ||
+    status === "processing" ||
+    status === "completed" ||
+    status === "needs_review" ||
+    status === "failed" ||
+    status === "archived"
+  ) {
+    filters.status = status;
+  }
+  const voicemail = url.searchParams.get("voicemail");
+  if (voicemail === "all" || voicemail === "yes" || voicemail === "no") {
+    filters.voicemail = voicemail;
+  } else if (voicemail === "true" || voicemail === "false") {
+    filters.voicemail = voicemail === "true" ? "yes" : "no";
+  }
+  const customer = url.searchParams.get("customer")?.trim();
+  if (customer && customer !== "all") {
+    filters.customer = customer;
+  }
+  const classification = url.searchParams.get("classification")?.trim();
+  if (classification && classification !== "all") {
+    filters.classification = classification;
+  }
+  const workflow = url.searchParams.get("workflow")?.trim();
+  if (workflow && workflow !== "all") {
+    filters.workflow = workflow;
+  }
+  const date = url.searchParams.get("date")?.trim();
+  if (date) {
+    filters.date = date;
+    filters.dateFrom = date;
+    filters.dateTo = date;
+  } else {
+    const dateFrom = url.searchParams.get("dateFrom")?.trim();
+    const dateTo = url.searchParams.get("dateTo")?.trim();
+    if (dateFrom) {
+      filters.dateFrom = dateFrom;
+    }
+    if (dateTo) {
+      filters.dateTo = dateTo;
+    }
+  }
+  return Object.keys(filters).length > 0 ? filters : undefined;
+}
+
+function readCustomerCallStatus(url: URL) {
+  const value = url.searchParams.get("customerCallStatus");
+  return value === "started" || value === "failed" ? value : undefined;
+}
+
+function readCustomerEmailStatus(url: URL) {
+  const value = url.searchParams.get("customerEmailStatus");
+  return value === "sent" || value === "approval_needed" || value === "failed" ? value : undefined;
+}
+
+function buildCustomerCallRedirect(requestBaseUrl: string, customerId: string | undefined) {
+  const redirectTarget = new URL("/customers", requestBaseUrl);
+  if (customerId) {
+    redirectTarget.searchParams.set("customer", customerId);
+    redirectTarget.searchParams.set("tab", "activity");
+  }
+  return redirectTarget;
+}
+
+function buildCustomerEmailRedirect(requestBaseUrl: string, customerId: string | undefined) {
+  const redirectTarget = new URL("/customers", requestBaseUrl);
+  if (customerId) {
+    redirectTarget.searchParams.set("customer", customerId);
+  }
+  return redirectTarget;
+}
+
+const outboundPhonePattern = /^\+?[0-9][0-9 .()\-]{6,}$/;
+
+function normalizeOutboundPhoneNumber(value: string | undefined) {
+  const phone = value?.trim();
+  if (!phone || !outboundPhonePattern.test(phone)) {
+    return undefined;
+  }
+  return phone;
+}
+
+function normalizePhoneDigits(value: string) {
+  return value.replace(/\D/g, "");
+}
+
+function parseJsonFormField<T>(form: URLSearchParams, key: string): T | undefined {
+  const raw = form.get(key)?.toString();
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function humanizeCode(value: string) {
+  return value.replace(/_/g, " ");
 }
 
 async function readFormBody(request: import("node:http").IncomingMessage) {
@@ -2213,6 +4316,324 @@ async function readMultipartFormBody(
   } as RequestInit & { duplex: "half" });
 
   return webRequest.formData();
+}
+
+async function readEmailAttachments(form: FormData) {
+  const attachments: Array<{
+    fileName: string;
+    mimeType?: string;
+    contentBase64: string;
+  }> = [];
+
+  for (const fieldName of ["attachments", "soaAttachment"]) {
+    for (const fileEntry of form.getAll(fieldName)) {
+      if (!(fileEntry instanceof File) || fileEntry.size === 0) {
+        continue;
+      }
+
+      const buffer = Buffer.from(await fileEntry.arrayBuffer());
+      attachments.push({
+        fileName: fileEntry.name || (fieldName === "soaAttachment" ? "statement-of-account" : "attachment"),
+        ...(fileEntry.type ? { mimeType: fileEntry.type } : {}),
+        contentBase64: buffer.toString("base64"),
+      });
+    }
+  }
+
+  return attachments;
+}
+
+function readEmailListField(form: FormData, fieldName: string) {
+  const raw = form.get(fieldName)?.toString();
+  if (!raw) {
+    return [];
+  }
+
+  return raw
+    .split(/[,;\n]/)
+    .map((value) => value.trim())
+    .filter((value, index, array) => value.length > 0 && array.indexOf(value) === index);
+}
+
+async function markTaskCompletedAfterEmailSend(apiBaseUrl: string, taskId: string) {
+  try {
+    const statusResponse = await fetch(`${apiBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/status`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "x-principal-id": "web_console",
+        "x-principal-roles": "ar_manager",
+      },
+      body: JSON.stringify({
+        status: "completed",
+        summary: "Email follow-up sent from the task popup.",
+      }),
+    });
+    if (!statusResponse.ok) {
+      console.warn("Task email sent but completion status update was rejected");
+    }
+  } catch (error) {
+    console.warn("Task email sent but completion status update failed", error);
+  }
+}
+
+async function readSingleAttachment(form: FormData, fieldName: string) {
+  const fileEntry = form.get(fieldName);
+  if (!(fileEntry instanceof File) || fileEntry.size === 0) {
+    return undefined;
+  }
+
+  const buffer = Buffer.from(await fileEntry.arrayBuffer());
+  return {
+    fileName: fileEntry.name || "attachment",
+    ...(fileEntry.type ? { mimeType: fileEntry.type } : {}),
+    contentBase64: buffer.toString("base64"),
+  };
+}
+
+function applyTaskComposeDraftQueryState(redirectTarget: URL, form: FormData) {
+  const composeId = form.get("appliedDraftComposeId")?.toString();
+  const generator =
+    form.get("draftGenerator")?.toString() ?? form.get("appliedDraftGenerator")?.toString();
+  const subjectLine =
+    form.get("subjectLine")?.toString() ?? form.get("appliedDraftSubject")?.toString();
+  const body =
+    form.get("bodyPreview")?.toString() ?? form.get("appliedDraftBody")?.toString();
+  const note = form.get("appliedDraftNote")?.toString();
+
+  if (!composeId || !subjectLine || !body) {
+    return;
+  }
+
+  redirectTarget.searchParams.set("taskComposeDraftComposeId", composeId);
+  redirectTarget.searchParams.set(
+    "taskComposeDraftGenerator",
+    generator === "template" ? "template" : "ai",
+  );
+  redirectTarget.searchParams.set("taskComposeDraftSubject", subjectLine);
+  redirectTarget.searchParams.set("taskComposeDraftBody", body);
+  if (note?.trim()) {
+    redirectTarget.searchParams.set("taskComposeDraftNote", note.trim());
+  }
+}
+
+function applyCollectionsComposeDraftQueryState(redirectTarget: URL, form: FormData) {
+  const composeId = form.get("composeId")?.toString();
+  const generator = form.get("composeGenerator")?.toString();
+  const subjectLine = form.get("subjectLine")?.toString();
+  const body = form.get("bodyPreview")?.toString();
+
+  if (!composeId || !subjectLine || !body) {
+    return;
+  }
+
+  redirectTarget.searchParams.set("collectionsComposeDraftComposeId", composeId);
+  redirectTarget.searchParams.set(
+    "collectionsComposeDraftGenerator",
+    generator === "template" ? "template" : "ai",
+  );
+  redirectTarget.searchParams.set("collectionsComposeDraftSubject", subjectLine);
+  redirectTarget.searchParams.set("collectionsComposeDraftBody", body);
+  for (const attachment of form.getAll("collectionsComposeDraftAttachment")) {
+    const value = attachment.toString();
+    if (value.trim()) {
+      redirectTarget.searchParams.append("collectionsComposeDraftAttachment", value);
+    }
+  }
+}
+
+function appendCollectionsComposeDraftAttachment(
+  redirectTarget: URL,
+  kind: "invoice" | "soa",
+  spec: string,
+  label: string,
+) {
+  const serialized = serializeCollectionsComposeAttachment(kind, spec, label);
+  const existing = redirectTarget.searchParams.getAll("collectionsComposeDraftAttachment");
+  if (!existing.includes(serialized)) {
+    redirectTarget.searchParams.append("collectionsComposeDraftAttachment", serialized);
+  }
+}
+
+function serializeCollectionsComposeAttachment(kind: "invoice" | "soa", spec: string, label: string) {
+  return [kind, spec, label].map((part) => part.replace(/\|/g, " ").trim()).join("|");
+}
+
+function parseCollectionsComposeAttachmentSpec(value: string) {
+  const [kind, spec, label] = value.split("|");
+  if ((kind !== "invoice" && kind !== "soa") || !spec || !label) {
+    return undefined;
+  }
+  return { kind, spec, label };
+}
+
+function uniqueFormValues(values: FormDataEntryValue[]) {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value.toString().trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function readJsonFormField<T>(form: FormData, fieldName: string): T | undefined {
+  const raw = form.get(fieldName)?.toString();
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildCollectionsReplyAccountFromForm(
+  form: FormData,
+  accountName: string,
+  composeId: string,
+  now: string,
+) {
+  const billingAccountId = form.get("billingAccountId")?.toString() || composeId;
+  const parentAccountId = form.get("parentAccountId")?.toString() || billingAccountId;
+  return {
+    id: billingAccountId,
+    createdAt: now,
+    updatedAt: now,
+    parentAccountId,
+    accountNumber: form.get("accountNumber")?.toString() || billingAccountId,
+    displayName: accountName,
+    currency: form.get("currency")?.toString() || "PHP",
+    accountTier: form.get("accountTier")?.toString() === "strategic" ? "strategic" : "standard",
+    status: "active",
+    centrallyPaid: false,
+    metadata: {
+      source: "collections_compose",
+      composeId,
+    },
+  };
+}
+
+function buildCollectionsReplyContactFromForm(
+  form: FormData,
+  contactEmail: string,
+  accountName: string,
+  now: string,
+) {
+  const billingAccountId = form.get("billingAccountId")?.toString();
+  const parentAccountId = form.get("parentAccountId")?.toString() || billingAccountId || contactEmail;
+  return {
+    id: `collections-contact:${contactEmail}`,
+    createdAt: now,
+    updatedAt: now,
+    parentAccountId,
+    billingAccountId,
+    scope: "billing_account",
+    scopeId: billingAccountId,
+    fullName: form.get("contactName")?.toString() || accountName,
+    email: contactEmail,
+    role: "ap",
+    isPrimary: true,
+    // Live thread replies preserve the existing Gmail conversation and still flow through
+    // outbound policy checks when attached invoice context is disputed or ambiguous.
+    isVerified: true,
+    allowAutoSend: true,
+    recentSuccessfulResponses: 0,
+    metadata: {
+      source: "collections_compose",
+      trustedLiveThreadReply: true,
+    },
+  };
+}
+
+async function verifyCollectionsInvoiceAttachments(apiBaseUrl: string, invoiceNumbers: string[]) {
+  for (const invoiceNumber of invoiceNumbers) {
+    await fetchCollectionsInvoiceAttachment(apiBaseUrl, invoiceNumber);
+  }
+}
+
+async function verifyCollectionsSoaAttachment(apiBaseUrl: string, form: FormData) {
+  await fetchCollectionsSoaAttachment(apiBaseUrl, form);
+}
+
+async function buildCollectionsGeneratedEmailAttachments(apiBaseUrl: string, form: FormData) {
+  const specs = Array.from(
+    new Set(
+      form
+        .getAll("collectionsComposeDraftAttachment")
+        .map((value) => parseCollectionsComposeAttachmentSpec(value.toString()))
+        .filter((value): value is NonNullable<ReturnType<typeof parseCollectionsComposeAttachmentSpec>> => Boolean(value))
+        .map((value) => `${value.kind}|${value.spec}|${value.label}`),
+    ),
+  ).map((value) => parseCollectionsComposeAttachmentSpec(value)!);
+
+  const attachments: Array<{
+    fileName: string;
+    mimeType?: string;
+    contentBase64: string;
+  }> = [];
+  for (const spec of specs) {
+    if (spec.kind === "invoice") {
+      attachments.push(await fetchCollectionsInvoiceAttachment(apiBaseUrl, spec.spec));
+    } else {
+      attachments.push(await fetchCollectionsSoaAttachment(apiBaseUrl, form));
+    }
+  }
+  return attachments;
+}
+
+async function fetchCollectionsInvoiceAttachment(apiBaseUrl: string, invoiceNumber: string) {
+  const invoiceUrl = new URL(`${apiBaseUrl}/v1/invoices/export`);
+  invoiceUrl.searchParams.set("q", invoiceNumber);
+  const response = await fetch(invoiceUrl.toString());
+  if (!response.ok) {
+    throw new Error("Invoice attachment could not be generated.");
+  }
+  const body = Buffer.from(await response.arrayBuffer());
+  return {
+    fileName: `invoice-${sanitizeFileName(invoiceNumber)}.pdf`,
+    mimeType: response.headers.get("content-type") ?? "application/pdf",
+    contentBase64: body.toString("base64"),
+  };
+}
+
+async function fetchCollectionsSoaAttachment(apiBaseUrl: string, form: FormData) {
+  const account = readJsonFormField<Record<string, unknown>>(form, "accountJson");
+  const contact = readJsonFormField<Record<string, unknown>>(form, "contactJson");
+  const invoices = readJsonFormField<unknown[]>(form, "invoicesJson") ?? [];
+  if (!account || !contact) {
+    throw new Error("Statement-of-account attachment is missing account context.");
+  }
+  const response = await fetch(`${apiBaseUrl}/v1/email/outbound/attachments/statement-of-account`, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({
+      principal: { id: "web_console", roles: ["ar_manager"] },
+      account,
+      contact,
+      invoices,
+      asOf: new Date().toISOString(),
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await safeReadErrorMessage(response, "SOA attachment could not be generated."));
+  }
+  const payload = (await response.json().catch(() => ({}))) as {
+    attachment?: {
+      fileName: string;
+      mimeType?: string;
+      contentBase64: string;
+    };
+  };
+  if (!payload.attachment?.contentBase64) {
+    throw new Error("SOA attachment could not be generated.");
+  }
+  return payload.attachment;
+}
+
+function sanitizeFileName(value: string) {
+  return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "document";
 }
 
 function readOnboardingImportStatus(requestUrl: URL): OnboardingImportStatus | undefined {

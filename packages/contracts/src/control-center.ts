@@ -30,6 +30,33 @@ export interface ControlCenterWorkflow {
   metadata: Record<string, unknown>;
 }
 
+export interface ControlCenterWorkflowExecution {
+  id: string;
+  tenantId: string;
+  version?: number;
+  createdAt: string;
+  updatedAt: string;
+  workflowId: string;
+  billingAccountId: string;
+  parentAccountId: string;
+  status: "active" | "paused" | "opted_out" | "manual_review";
+  currentTrack:
+    | "standard_reminders"
+    | "promise_to_pay"
+    | "issue_resolution"
+    | "email_only"
+    | "call_assisted"
+    | "manual_review";
+  lastDecisionAction?: "continue" | "pause" | "opt_out" | "switch_track" | "escalate_for_review";
+  lastDecisionReason?: string;
+  lastDecisionConfidence?: number;
+  requiresHumanReview: boolean;
+  effectiveUntil?: string;
+  rationaleSummary?: string;
+  reasoningMetadata: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+}
+
 export interface ControlCenterStage {
   id: string;
   tenantId?: string;
@@ -133,6 +160,7 @@ export interface ControlCenterConfig {
 export interface ControlCenterWorkflowListItem extends ControlCenterWorkflow {
   approxTargetCount: number;
   stages: ControlCenterStage[];
+  executions: ControlCenterWorkflowExecution[];
 }
 
 export interface ControlCenterTemplatePreview {
@@ -188,6 +216,15 @@ export interface ControlCenterListWorkflowsResponse {
 export interface ControlCenterWorkflowDetailResponse {
   workflow: ControlCenterWorkflow;
   stages: ControlCenterStage[];
+}
+
+export interface ControlCenterWorkflowExecutionsResponse {
+  executions: ControlCenterWorkflowExecution[];
+}
+
+export interface ControlCenterAssignWorkflowCustomerResponse {
+  execution: ControlCenterWorkflowExecution;
+  created: boolean;
 }
 
 export interface ControlCenterListTemplatesResponse {

@@ -7,6 +7,8 @@ export type PaymentApplicationState = (typeof paymentApplicationStates)[number];
 export interface PaymentApplication extends DomainEntity {
   paymentId: string;
   invoiceId: string;
+  installmentPlanId?: string;
+  installmentLineId?: string;
   parentAccountId: string;
   billingAccountId: string;
   branchId?: string;
@@ -24,6 +26,8 @@ export function createPaymentApplication(params: {
   createdAt: string;
   paymentId: string;
   invoiceId: string;
+  installmentPlanId?: string;
+  installmentLineId?: string;
   parentAccountId: string;
   billingAccountId: string;
   branchId?: string;
@@ -43,6 +47,8 @@ export function createPaymentApplication(params: {
     }),
     paymentId: params.paymentId,
     invoiceId: params.invoiceId,
+    ...(params.installmentPlanId ? { installmentPlanId: params.installmentPlanId } : {}),
+    ...(params.installmentLineId ? { installmentLineId: params.installmentLineId } : {}),
     parentAccountId: params.parentAccountId,
     billingAccountId: params.billingAccountId,
     ...(params.branchId ? { branchId: params.branchId } : {}),
