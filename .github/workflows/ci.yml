@@ -25,13 +25,13 @@ jobs:
       - run: pnpm typecheck
 
       - name: Run tests
-        run: pnpm test
-        env:
-          NODE_ENV: test
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/o2c_test
-          REDIS_URL: redis://localhost:6379
-          DEFAULT_TENANT_SLUG: demo
-          JWT_ISSUER: o2c-test
-          JWT_AUDIENCE: o2c-test
-          JWT_PUBLIC_KEY: test-public-key
-          JWT_PRIVATE_KEY: test-private-key
+	run: pnpm test -- --env-mode=loose
+	env:
+	    NODE_ENV: test
+	    DATABASE_URL: postgresql://postgres:postgres@localhost:5432/o2c_test
+	    REDIS_URL: redis://localhost:6379
+	    DEFAULT_TENANT_SLUG: demo
+	    JWT_ISSUER: o2c-test
+	    JWT_AUDIENCE: o2c-test
+	    JWT_PUBLIC_KEY: test-public-key
+	    JWT_PRIVATE_KEY: test-private-key
