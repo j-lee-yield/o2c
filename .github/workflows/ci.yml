@@ -10,12 +10,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: "pnpm"
+
       - run: pnpm install --no-frozen-lockfile
+
       - run: pnpm lint
+
       - run: pnpm typecheck
-      - run: pnpm test
+
+      - name: Run tests
+        run: pnpm test
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/o2c_test
+          REDIS_URL: redis://localhost:6379
+          DEFAULT_TENANT_SLUG: demo
+          JWT_ISSUER: o2c-test
+          JWT_AUDIENCE: o2c-test
+          JWT_PUBLIC_KEY: test-public-key
+          JWT_PRIVATE_KEY: test-private-key
