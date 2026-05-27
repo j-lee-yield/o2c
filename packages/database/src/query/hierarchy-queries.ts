@@ -3,7 +3,11 @@ import type { InvoiceHierarchyContext } from "../client/in-memory-customer-hiera
 import { InMemoryCustomerHierarchyRepository } from "../client/in-memory-customer-hierarchy-repository.js";
 
 export class HierarchyQueries {
-  constructor(private readonly repository: InMemoryCustomerHierarchyRepository) {}
+  private readonly repository: InMemoryCustomerHierarchyRepository;
+
+  constructor(repository: InMemoryCustomerHierarchyRepository) {
+    this.repository = repository;
+  }
 
   getInvoiceRollup(invoiceId: string): InvoiceHierarchyContext | undefined {
     return this.repository.getInvoiceContext(invoiceId);

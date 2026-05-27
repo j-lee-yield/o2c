@@ -179,10 +179,13 @@ type ConfigRow = {
 };
 
 export class PostgresControlCenterPersistence implements ControlCenterPersistence {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   loadSnapshot(): ControlCenterPersistenceSnapshot {
     const callAgentConfig = this.getCallAgentConfig();

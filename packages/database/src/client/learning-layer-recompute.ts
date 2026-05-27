@@ -7,7 +7,7 @@ import {
 import { queryJsonRows, quoteLiteral } from "./postgres.js";
 import { PostgresLearningLayerRuntimeStore } from "./learning-layer-runtime-store.js";
 
-export interface LearningLayerRecomputeInput {
+export type LearningLayerRecomputeInput = {
   tenantId: string;
   billingAccountId?: string;
   contactId?: string;
@@ -18,7 +18,7 @@ export interface LearningLayerRecomputeInput {
   actorId?: string;
 }
 
-export interface LearningLayerRecomputeResult {
+export type LearningLayerRecomputeResult = {
   processedAccountProfiles: number;
   processedContactProfiles: number;
   targetBillingAccountId?: string;
@@ -26,7 +26,7 @@ export interface LearningLayerRecomputeResult {
   computedAt: string;
 }
 
-interface AccountRecomputeTarget {
+type AccountRecomputeTarget = {
   scope: BehaviorProfileScope;
   scopeId: string;
   parentAccountId: string;
@@ -34,14 +34,14 @@ interface AccountRecomputeTarget {
   branchId?: string;
 }
 
-interface ContactRecomputeTarget {
+type ContactRecomputeTarget = {
   contactId: string;
   parentAccountId: string;
   billingAccountId?: string;
   branchId?: string;
 }
 
-interface ContactVerificationRow {
+type ContactVerificationRow = {
   emailVerified: boolean;
   smsNumberVerified: boolean;
   phoneNumberVerified: boolean;

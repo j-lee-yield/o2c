@@ -6,7 +6,7 @@ import type {
 import { buildCustomerProfileReadModel } from "@o2c/domain";
 import { queryJsonRows, quoteLiteral } from "./postgres.js";
 
-export interface PersistedLearningSummaryRow {
+export type PersistedLearningSummaryRow = {
   billingAccountId: string;
   accountNumber?: string;
   accountName?: string;
@@ -42,7 +42,7 @@ export interface PersistedLearningSummaryRow {
   remittanceQualityReasonSummary?: string;
 }
 
-export interface LoadPersistedLearningSummaryInput {
+export type LoadPersistedLearningSummaryInput = {
   databaseUrl: string;
   tenantId: string;
   billingAccountId?: string;
@@ -50,12 +50,15 @@ export interface LoadPersistedLearningSummaryInput {
   contactEmail?: string;
 }
 
-export interface LoadPersistedCustomerProfileInput
-  extends LoadPersistedLearningSummaryInput {}
+export type LoadPersistedCustomerProfileInput = {} & LoadPersistedLearningSummaryInput
 
-export type LearningSummaryQueryExecutor = (databaseUrl: string, sql: string) => unknown[];
+function defaultLearningSummaryQueryExecutor(databaseUrl: string, sql: string): unknown[] {
+  return queryJsonRows(databaseUrl, sql);
+}
 
-interface PersistedCustomerProfileRow {
+export type LearningSummaryQueryExecutor = typeof defaultLearningSummaryQueryExecutor;
+
+type PersistedCustomerProfileRow = {
   billingAccountId: string;
   accountNumber?: string;
   accountName?: string;
@@ -105,7 +108,7 @@ interface PersistedCustomerProfileRow {
 
 export function loadPersistedLearningSummary(
   input: LoadPersistedLearningSummaryInput,
-  executor: LearningSummaryQueryExecutor = queryJsonRows,
+  executor: LearningSummaryQueryExecutor = defaultLearningSummaryQueryExecutor,
 ): PersistedLearningSummaryRow | undefined {
   if (!input.billingAccountId && !input.accountNumber) {
     return undefined;
@@ -178,7 +181,7 @@ export function loadPersistedLearningSummary(
 
 export function loadPersistedCustomerProfile(
   input: LoadPersistedCustomerProfileInput,
-  executor: LearningSummaryQueryExecutor = queryJsonRows,
+  executor: LearningSummaryQueryExecutor = defaultLearningSummaryQueryExecutor,
 ): CustomerProfileReadModel | undefined {
   if (!input.billingAccountId && !input.accountNumber) {
     return undefined;

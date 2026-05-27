@@ -265,7 +265,6 @@ async function main(): Promise<void> {
         return;
       }
       const tenantSlug = access.claims.tenantSlug;
-      const clientName = access.claims.clientName;
       const target = new URL(`${apiBaseUrl}/v1/integrations/quickbooks/connect`);
       target.searchParams.set("tenantSlug", tenantSlug);
       target.searchParams.set(
@@ -302,7 +301,6 @@ async function main(): Promise<void> {
         return;
       }
       const tenantSlug = access.claims.tenantSlug;
-      const clientName = access.claims.clientName;
       const target = new URL(`${apiBaseUrl}/v1/integrations/business-central/connect`);
       target.searchParams.set("tenantSlug", tenantSlug);
       target.searchParams.set(
@@ -518,7 +516,6 @@ async function main(): Promise<void> {
           return;
         }
         const tenantSlug = access.claims.tenantSlug;
-        const clientName = access.claims.clientName;
         const payload = {
           tenantSlug,
           returnTo: new URL(
@@ -593,7 +590,6 @@ async function main(): Promise<void> {
           return;
         }
         const tenantSlug = access.claims.tenantSlug;
-        const clientName = access.claims.clientName;
         const payload = {
           tenantSlug,
           returnTo: new URL(
@@ -677,8 +673,6 @@ async function main(): Promise<void> {
           response.end(html);
           return;
         }
-        const tenantSlug = access.claims.tenantSlug;
-        const clientName = access.claims.clientName;
         const payload = {
           state: form.get("state")?.toString(),
           database: form.get("database")?.toString(),
@@ -4253,7 +4247,7 @@ function buildCustomerEmailRedirect(requestBaseUrl: string, customerId: string |
   return redirectTarget;
 }
 
-const outboundPhonePattern = /^\+?[0-9][0-9 .()\-]{6,}$/;
+const outboundPhonePattern = /^\+?[0-9][0-9 .()-]{6,}$/;
 
 function normalizeOutboundPhoneNumber(value: string | undefined) {
   const phone = value?.trim();

@@ -12,7 +12,7 @@ import {
   quoteLiteral,
 } from "./postgres.js";
 
-export interface LearningLayerHistoryQuery {
+export type LearningLayerHistoryQuery = {
   tenantId: string;
   targetType: OperatorFeedbackTarget;
   targetId: string;
@@ -22,12 +22,12 @@ export interface LearningLayerHistoryQuery {
   contactId?: string;
 }
 
-export interface PersistedLearningLayerHistory {
+export type PersistedLearningLayerHistory = {
   events: LearningEvent[];
   feedback: OperatorFeedback[];
 }
 
-export interface PersistLearningCaptureInput {
+export type PersistLearningCaptureInput = {
   feedback: OperatorFeedback;
   emittedEvents: LearningEvent[];
   updatedAccountProfile?: AccountBehaviorProfile;
@@ -84,7 +84,11 @@ export function buildLearningLayerContextWhereClause(
 }
 
 export class PostgresLearningLayerRuntimeStore {
-  constructor(private readonly databaseUrl: string) {}
+  private readonly databaseUrl: string;
+
+  constructor(databaseUrl: string) {
+    this.databaseUrl = databaseUrl;
+  }
 
   loadHistory(input: LearningLayerHistoryQuery): PersistedLearningLayerHistory {
     const historyPredicate = buildLearningLayerContextWhereClause(input, "history");

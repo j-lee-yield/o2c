@@ -84,23 +84,23 @@ export const approvalTypes = [
 ] as const;
 export type ApprovalType = (typeof approvalTypes)[number];
 
-export interface AssignmentScope {
+export type AssignmentScope = {
   scopeType: ScopeType;
   scopeId?: string;
 }
 
-export interface RoleAssignment extends AssignmentScope {
+export type RoleAssignment = {
   assignmentId?: string;
   role: Role;
   tenantId?: string;
   expiresAt?: string;
-}
+} & AssignmentScope
 
-export interface ApprovalAuthority extends AssignmentScope {
+export type ApprovalAuthority = {
   approvalType: ApprovalType;
   role?: Role;
   userId?: string;
-}
+} & AssignmentScope
 
 export type Principal = {
   id: string;
@@ -117,16 +117,16 @@ export type RoleDefinition = {
   permissions: readonly (Permission | "*")[];
 };
 
-export interface PermissionContext extends Partial<AssignmentScope> {
+export type PermissionContext = {
   tenantId?: string;
-}
+} & Partial<AssignmentScope>
 
-export interface PermissionGrantSummary extends AssignmentScope {
+export type PermissionGrantSummary = {
   permission: Permission | "*";
   role: Role;
-}
+} & AssignmentScope
 
-export interface EffectiveAccessSummary {
+export type EffectiveAccessSummary = {
   roles: Role[];
   permissions: PermissionGrantSummary[];
   approvalAuthorities: ApprovalAuthority[];

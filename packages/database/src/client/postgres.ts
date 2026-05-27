@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-export interface PostgresCommandResult {
+export type PostgresCommandResult = {
   status: number | null;
   stdout: string;
   stderr: string;

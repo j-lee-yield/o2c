@@ -15,14 +15,14 @@ import {
   remittanceStates
 } from "@o2c/domain";
 
-export interface ColumnDefinition {
+export type ColumnDefinition = {
   type: string;
   nullable?: boolean;
   primaryKey?: boolean;
   references?: string;
 }
 
-export interface TableDefinition {
+export type TableDefinition = {
   name: string;
   columns: Record<string, ColumnDefinition>;
 }

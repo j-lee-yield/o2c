@@ -54,10 +54,13 @@ type CallInboxRow = {
 };
 
 export class PostgresCallInboxRepository implements CallInboxRepository {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   async save(record: CallInboxCallRecord): Promise<void> {
     executeSqlCommand(

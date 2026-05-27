@@ -7,7 +7,7 @@ import {
   coreTables as coreDomainTables
 } from "../schema/core-domain.js";
 
-export interface SchemaSnapshot {
+export type SchemaSnapshot = {
   version: string;
   enums: typeof enumDefinitions;
   tables: Record<string, string[]>;

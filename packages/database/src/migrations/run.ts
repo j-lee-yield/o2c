@@ -4,30 +4,24 @@ import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export interface MigrationFile {
+export type MigrationFile = {
   id: string;
   fileName: string;
   absolutePath: string;
   sql: string;
 }
 
-export interface MigrationPlan {
+export type MigrationPlan = {
   databaseUrl: string;
   generatedAt: string;
   migrations: MigrationFile[];
 }
 
-export interface AppliedMigrationRecord {
+export type AppliedMigrationRecord = {
   id: string;
   fileName: string;
   status: "applied" | "skipped";
 }
-
-export type PsqlExecutor = (args: string[]) => {
-  status: number | null;
-  stdout: string;
-  stderr: string;
-};
 
 export function discoverMigrationFiles(migrationsDir: string): MigrationFile[] {
   return readdirSync(migrationsDir)
@@ -72,6 +66,8 @@ export function defaultPsqlExecutor(args: string[]) {
     stderr: result.stderr ?? ""
   };
 }
+
+export type PsqlExecutor = typeof defaultPsqlExecutor;
 
 export function ensureSchemaMigrationsTable(
   databaseUrl: string,

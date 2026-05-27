@@ -82,10 +82,13 @@ type GmailOauthConnectionRow = GmailOauthConnectionRecord & {
 };
 
 export class PostgresCommunicationAttemptStore {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   save(attempt: CommunicationAttempt): void {
     executeSqlCommand(
@@ -194,10 +197,13 @@ export class PostgresCommunicationAttemptStore {
 }
 
 export class PostgresSendingIdentityStore {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   save(identity: SendingIdentity): void {
     executeSqlCommand(
@@ -398,10 +404,13 @@ export class PostgresSendingIdentityStore {
 }
 
 export class PostgresEmailThreadReferenceStore {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   save(reference: EmailThreadReference): void {
     executeSqlCommand(
@@ -573,10 +582,13 @@ export class PostgresEmailThreadReferenceStore {
 }
 
 export class PostgresGmailOauthConnectionStore {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   save(input: GmailOauthConnectionRecord & {
     requestedByPrincipalId?: string;

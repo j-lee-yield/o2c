@@ -72,10 +72,13 @@ type StoredPromiseRow = {
 };
 
 export class PostgresOutreachIntelligenceContextStore implements OutreachContextStore {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   loadContextSupplement(input: OutreachGenerationInput): OutreachContextSupplement {
     const supplement: OutreachContextSupplement = {};

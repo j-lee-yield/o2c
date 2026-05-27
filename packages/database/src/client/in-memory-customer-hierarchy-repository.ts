@@ -8,7 +8,7 @@ import type {
   ParentAccount
 } from "@o2c/domain";
 
-export interface InvoiceHierarchyContext {
+export type InvoiceHierarchyContext = {
   invoice: CustomerInvoice;
   branch: Branch | undefined;
   billingAccount: BillingAccount;
@@ -36,17 +36,29 @@ export class InMemoryCustomerHierarchyRepository {
     this.branchById = indexBy(data.branches);
     this.invoiceById = indexBy(data.invoices);
     this.contactById = indexBy(data.contacts);
-    this.branchesByBillingId = groupBy(data.branches, (branch) => branch.billingAccountId);
-    this.billingByParentId = groupBy(data.billingAccounts, (account) => account.parentAccountId);
-    this.contactsByScope = groupBy(data.contacts, (contact) => `${contact.scope}:${contact.scopeId}`);
-    this.configByBillingId = groupBySingle(
-      data.configurations.filter((configuration) => configuration.billingAccountId),
-      (configuration) => configuration.billingAccountId as string
-    );
-    this.configByParentId = groupBySingle(
-      data.configurations.filter((configuration) => configuration.parentAccountId),
-      (configuration) => configuration.parentAccountId as string
-    );
+    this.branchesByBillingId = new Map();
+    this.billingByParentId = new Map();
+    this.contactsByScope = new Map();
+    this.configByBillingId = new Map();
+    this.configByParentId = new Map();
+
+    for (const branch of data.branches) {
+      appendGrouped(this.branchesByBillingId, branch.billingAccountId, branch);
+    }
+    for (const account of data.billingAccounts) {
+      appendGrouped(this.billingByParentId, account.parentAccountId, account);
+    }
+    for (const contact of data.contacts) {
+      appendGrouped(this.contactsByScope, `${contact.scope}:${contact.scopeId}`, contact);
+    }
+    for (const configuration of data.configurations) {
+      if (configuration.billingAccountId) {
+        this.configByBillingId.set(configuration.billingAccountId, configuration);
+      }
+      if (configuration.parentAccountId) {
+        this.configByParentId.set(configuration.parentAccountId, configuration);
+      }
+    }
   }
 
   getInvoiceContext(invoiceId: string): InvoiceHierarchyContext | undefined {
@@ -148,20 +160,11 @@ function indexBy<T extends { id: string }>(items: T[]): Map<string, T> {
   return new Map(items.map((item) => [item.id, item]));
 }
 
-function groupBy<T>(items: T[], keySelector: (item: T) => string): Map<string, T[]> {
-  const grouped = new Map<string, T[]>();
-  for (const item of items) {
-    const key = keySelector(item);
-    const bucket = grouped.get(key);
-    if (bucket) {
-      bucket.push(item);
-      continue;
-    }
-    grouped.set(key, [item]);
+function appendGrouped<T>(grouped: Map<string, T[]>, key: string, item: T): void {
+  const bucket = grouped.get(key);
+  if (bucket) {
+    bucket.push(item);
+    return;
   }
-  return grouped;
-}
-
-function groupBySingle<T>(items: T[], keySelector: (item: T) => string): Map<string, T> {
-  return new Map(items.map((item) => [keySelector(item), item]));
+  grouped.set(key, [item]);
 }

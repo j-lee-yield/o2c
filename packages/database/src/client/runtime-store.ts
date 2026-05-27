@@ -17,7 +17,7 @@ import {
   quoteLiteral,
 } from "./postgres.js";
 
-interface ImmutableActivityLogEntry {
+type ImmutableActivityLogEntry = {
   id: string;
   occurredAt: string;
   action: string;
@@ -30,35 +30,21 @@ interface ImmutableActivityLogEntry {
   metadata: Record<string, unknown>;
 }
 
-interface ImmutableActivityLogStore {
-  append(entry: ImmutableActivityLogEntry): void | Promise<void>;
-  list?(filter?: {
-    entityType?: string;
-    entityId?: string;
-    actions?: string[];
-    occurredAtFrom?: string;
-  }): ImmutableActivityLogEntry[] | Promise<ImmutableActivityLogEntry[]>;
-}
-
-interface AuditContext {
+type AuditContext = {
   actorId: string;
   actorType: "user" | "system" | "automation";
   correlationId: string;
   occurredAt: string;
 }
 
-interface AuditEvent {
+type AuditEvent = {
   action: string;
   entityId: string;
   entityType: string;
   metadata?: Record<string, string | number | boolean | null>;
 }
 
-interface AuditLogger {
-  log(context: AuditContext, event: AuditEvent): Promise<void>;
-}
-
-export interface StoredRemittanceRecord {
+export type StoredRemittanceRecord = {
   remittance: {
     id: string;
     tenantId?: string;
@@ -80,16 +66,14 @@ export interface StoredRemittanceRecord {
   review?: Record<string, unknown>;
 }
 
-interface RemittanceRepository {
-  save(record: StoredRemittanceRecord): Promise<void>;
-  get(remittanceId: string): Promise<StoredRemittanceRecord | undefined>;
-}
+export class PostgresImmutableActivityLogStore {
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
 
-export class PostgresImmutableActivityLogStore implements ImmutableActivityLogStore {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   append(entry: ImmutableActivityLogEntry): void {
     const beforeState = readState(entry.before);
@@ -225,11 +209,14 @@ export class PostgresImmutableActivityLogStore implements ImmutableActivityLogSt
   }
 }
 
-export class PostgresAuditLogger implements AuditLogger {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+export class PostgresAuditLogger {
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   async log(context: AuditContext, event: AuditEvent): Promise<void> {
     executeSqlCommand(
@@ -304,10 +291,13 @@ type ApprovalRequestRow = {
 };
 
 export class PostgresApprovalRequestRepository implements ApprovalRequestRepository {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   async save(request: ApprovalRequest): Promise<void> {
     executeSqlCommand(
@@ -483,10 +473,13 @@ type BirInvoiceCaseRow = {
 };
 
 export class PostgresBirInvoiceCaseRepository {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   async save(record: StoredBirInvoiceCaseRecord): Promise<void> {
     const internalDocumentId = toDeterministicUuid(`uploaded_document:${record.documentId}`);
@@ -769,11 +762,14 @@ type RemittanceRecordRow = {
   review?: Record<string, unknown>;
 };
 
-export class PostgresRemittanceRepository implements RemittanceRepository {
-  constructor(
-    private readonly databaseUrl: string,
-    private readonly tenantId = "default",
-  ) {}
+export class PostgresRemittanceRepository {
+  private readonly databaseUrl: string;
+  private readonly tenantId: string;
+
+  constructor(databaseUrl: string, tenantId = "default") {
+    this.databaseUrl = databaseUrl;
+    this.tenantId = tenantId;
+  }
 
   async save(record: StoredRemittanceRecord): Promise<void> {
     executeSqlCommand(
